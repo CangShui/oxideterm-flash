@@ -1,0 +1,15 @@
+[package]
+name = "oxideterm-modem-transfer"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "modem_consumer"
+harness = false

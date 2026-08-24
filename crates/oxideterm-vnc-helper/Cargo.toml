@@ -1,0 +1,21 @@
+[package]
+name = "oxideterm-vnc-helper"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+des = "0.9"
+flate2 = "1.1.9"
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+ironrdp-cliprdr-format = { git = "https://github.com/AnalyseDeCircuit/IronRDP", rev = "5c6bd6dc41175ac3a34d17dac9f0a918d4a8f5e5" }
+native-tls = { version = "0.2", features = ["vendored"] }
+openh264 = { version = "0.9", default-features = false, features = ["libloading"] }
+oxideterm-pcm-audio = { path = "../oxideterm-pcm-audio" }
+oxideterm-remote-desktop = { path = "../oxideterm-remote-desktop" }
+sha2.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

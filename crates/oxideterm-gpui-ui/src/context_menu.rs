@@ -1,0 +1,355 @@
+use gpui::{
+    App, CursorStyle, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Rgba, Styled, Window, div, prelude::*, px, rgb,
+};
+use oxideterm_theme::ThemeTokens;
+
+use crate::{
+    menu::{menu_item_chrome, menu_surface_chrome},
+    modal::popover_backdrop,
+};
+
+const CONTEXT_MENU_DISABLED_OPACITY: f32 = 0.5;
+const CONTEXT_MENU_RADIO_DOT_SIZE: f32 = 8.0;
+const CONTEXT_MENU_LINE_HEIGHT_RATIO: f32 = 1.35;
+
+pub fn context_menu_line_height(tokens: &ThemeTokens) -> f32 {
+    // Menu overlays can be mounted under terminal/editor roots that set their
+    // own text metrics. Normalize the line box so rows do not inherit those
+    // larger surface-specific line heights.
+    tokens.metrics.ui_text_sm * CONTEXT_MENU_LINE_HEIGHT_RATIO
+}
+
+pub fn context_menu_item_height_estimate(tokens: &ThemeTokens) -> f32 {
+    context_menu_line_height(tokens) + tokens.metrics.ui_menu_item_padding_y * 2.0
+}
+
+pub fn context_menu_separator_height_estimate(tokens: &ThemeTokens) -> f32 {
+    1.0 + tokens.metrics.ui_menu_padding * 2.0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextMenuItemKind {
+    Plain,
+    Checkbox(bool),
+    Radio(bool),
+    Submenu,
+}
+
+pub fn context_menu_backdrop() -> Div {
+    // Radix ContextMenu uses the same transparent outside-hit-test layer as a
+    // popover, but naming the role keeps file/tree/table menus separate from
+    // generic floating panels when we audit dismissal and focus restoration.
+    popover_backdrop()
+}
+
+pub fn context_menu_item_is_actionable(disabled: bool, loading: bool) -> bool {
+    // Radix disabled menu items keep pointer events from invoking item actions.
+    // Loading rows use the same action guard even if a caller keeps them styled
+    // as active to show progress.
+    !(disabled || loading)
+}
+
+fn context_menu_action_cursor(disabled: bool, loading: bool) -> CursorStyle {
+    // Loading rows are not Radix `disabled` attributes, but they have the same
+    // pointer contract: no hand cursor and no activation while work is pending.
+    if context_menu_item_is_actionable(disabled, loading) {
+        CursorStyle::PointingHand
+    } else {
+        CursorStyle::OperationNotAllowed
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ContextMenuActionableStyle {
+    pub hover_background: Option<Rgba>,
+    pub hover_text_color: Option<Rgba>,
+}
+
+pub fn context_menu_actionable_row(
+    item: Div,
+    disabled: bool,
+    loading: bool,
+    style: ContextMenuActionableStyle,
+) -> Div {
+    // Radix keeps disabled/loading menu rows visible but inert. Centralizing the
+    // row state prevents feature menus from drifting on cursor, hover, or opacity.
+    if context_menu_item_is_actionable(disabled, loading) {
+        item.cursor_pointer().hover(move |item| {
+            let item = if let Some(background) = style.hover_background {
+                item.bg(background)
+            } else {
+                item
+            };
+            if let Some(text_color) = style.hover_text_color {
+                item.text_color(text_color)
+            } else {
+                item
+            }
+        })
+    } else {
+        // Loading rows are semantically inert like disabled Radix menu items.
+        // Force the cursor here because many callers build the visual row with
+        // `disabled = false` and rely on this shared action guard for loading.
+        item.opacity(CONTEXT_MENU_DISABLED_OPACITY)
+            .cursor(context_menu_action_cursor(disabled, loading))
+    }
+}
+
+pub fn context_menu_action(
+    item: Div,
+    disabled: bool,
+    loading: bool,
+    listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    if context_menu_item_is_actionable(disabled, loading) {
+        item.on_mouse_down(MouseButton::Left, listener)
+    } else {
+        item
+    }
+}
+
+pub fn context_menu_event_boundary(menu: Div) -> Div {
+    // Radix ContextMenuContent is an event island: pointer/wheel input inside
+    // the menu does not reach the underlying trigger row, file list, or terminal.
+    context_menu_pointer_event_boundary(menu).on_scroll_wheel(|_, _, cx| {
+        cx.stop_propagation();
+    })
+}
+
+pub fn context_menu_pointer_event_boundary(menu: Div) -> Div {
+    // Scrollable menu-like popovers need nested scroll surfaces to receive
+    // wheel input, but pointer input should still stay inside the menu island.
+    menu.on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+        cx.stop_propagation();
+    })
+    .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
+        cx.stop_propagation();
+    })
+}
+
+pub fn context_menu_content(tokens: &ThemeTokens) -> Div {
+    menu_surface_chrome(tokens)
+        .min_w(px(tokens.metrics.ui_menu_min_width))
+        .p(px(tokens.metrics.ui_menu_padding))
+        .line_height(px(context_menu_line_height(tokens)))
+}
+
+pub fn context_menu_sub_content(tokens: &ThemeTokens) -> Div {
+    context_menu_content(tokens)
+}
+
+pub fn context_menu_item(
+    tokens: &ThemeTokens,
+    label: impl Into<String>,
+    kind: ContextMenuItemKind,
+    inset: bool,
+    disabled: bool,
+) -> Div {
+    context_menu_item_row(tokens, kind, inset, disabled)
+        .child(context_menu_builtin_indicator(tokens, kind))
+        .child(label.into())
+        .when(kind == ContextMenuItemKind::Submenu, |item| {
+            item.child(context_menu_chevron(tokens, "›"))
+        })
+}
+
+pub fn context_menu_item_with_trailing(
+    tokens: &ThemeTokens,
+    label: impl Into<String>,
+    kind: ContextMenuItemKind,
+    inset: bool,
+    disabled: bool,
+    trailing: impl IntoElement,
+) -> Div {
+    context_menu_item_row(tokens, kind, inset, disabled)
+        .child(context_menu_builtin_indicator(tokens, kind))
+        .child(label.into())
+        .child(context_menu_trailing_slot().child(trailing))
+}
+
+pub fn context_menu_item_with_shortcut(
+    tokens: &ThemeTokens,
+    label: impl Into<String>,
+    shortcut: impl IntoElement,
+) -> Div {
+    context_menu_item_with_trailing(
+        tokens,
+        label,
+        ContextMenuItemKind::Plain,
+        false,
+        false,
+        shortcut,
+    )
+}
+
+pub fn context_menu_sub_trigger(
+    tokens: &ThemeTokens,
+    label: impl Into<String>,
+    inset: bool,
+    disabled: bool,
+) -> Div {
+    context_menu_item_row(tokens, ContextMenuItemKind::Submenu, inset, disabled)
+        .child(context_menu_builtin_indicator(
+            tokens,
+            ContextMenuItemKind::Submenu,
+        ))
+        .child(label.into())
+        .child(context_menu_chevron(tokens, "›"))
+}
+
+pub fn context_menu_checkbox_item(
+    tokens: &ThemeTokens,
+    label: impl Into<String>,
+    checked: bool,
+    disabled: bool,
+    check_icon: impl IntoElement,
+) -> Div {
+    context_menu_item_row(
+        tokens,
+        ContextMenuItemKind::Checkbox(checked),
+        false,
+        disabled,
+    )
+    .child(context_menu_indicator_slot(tokens).when(checked, |slot| slot.child(check_icon)))
+    .child(label.into())
+}
+
+pub fn context_menu_radio_item(
+    tokens: &ThemeTokens,
+    label: impl Into<String>,
+    checked: bool,
+    disabled: bool,
+) -> Div {
+    context_menu_item_row(tokens, ContextMenuItemKind::Radio(checked), false, disabled)
+        .child(context_menu_indicator_slot(tokens).when(checked, |slot| {
+            slot.child(
+                div()
+                    .size(px(CONTEXT_MENU_RADIO_DOT_SIZE))
+                    .rounded_full()
+                    .bg(rgb(tokens.ui.text)),
+            )
+        }))
+        .child(label.into())
+}
+
+pub fn context_menu_label(tokens: &ThemeTokens, label: impl Into<String>, inset: bool) -> Div {
+    div()
+        .px(px(tokens.metrics.ui_menu_item_padding_x))
+        .pl(px(if inset {
+            tokens.metrics.ui_menu_inset_padding_left
+        } else {
+            tokens.metrics.ui_menu_item_padding_x
+        }))
+        .py(px(tokens.metrics.ui_menu_item_padding_y))
+        .text_size(px(tokens.metrics.ui_text_sm))
+        .line_height(px(context_menu_line_height(tokens)))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(tokens.ui.text_muted))
+        .child(label.into())
+}
+
+pub fn context_menu_separator(tokens: &ThemeTokens) -> Div {
+    div()
+        .mx(px(-tokens.metrics.ui_menu_padding))
+        .my(px(tokens.metrics.ui_menu_padding))
+        .h(px(1.0))
+        .bg(rgb(tokens.ui.border))
+}
+
+pub fn context_menu_shortcut(tokens: &ThemeTokens, shortcut: impl Into<String>) -> Div {
+    div()
+        .ml_auto()
+        .flex_none()
+        .text_size(px(tokens.metrics.ui_text_xs))
+        .text_color(rgb(tokens.ui.text_muted))
+        .child(shortcut.into())
+}
+
+pub fn context_menu_item_row(
+    tokens: &ThemeTokens,
+    kind: ContextMenuItemKind,
+    inset: bool,
+    disabled: bool,
+) -> Div {
+    let needs_indicator = matches!(
+        kind,
+        ContextMenuItemKind::Checkbox(_) | ContextMenuItemKind::Radio(_)
+    );
+    let left_padding = if inset || needs_indicator {
+        tokens.metrics.ui_menu_inset_padding_left
+    } else {
+        tokens.metrics.ui_menu_item_padding_x
+    };
+    let hover_bg = rgb(tokens.ui.bg_hover);
+
+    let item = menu_item_chrome(tokens, left_padding, tokens.metrics.ui_menu_item_padding_x)
+        .line_height(px(context_menu_line_height(tokens)))
+        .opacity(if disabled {
+            CONTEXT_MENU_DISABLED_OPACITY
+        } else {
+            1.0
+        })
+        // Tauri Radix context-menu disabled rows are visibly and semantically
+        // non-interactive. Keep the native shared row from showing a hand
+        // cursor while retaining caller-specific event ownership.
+        .cursor(context_menu_action_cursor(disabled, false));
+
+    if disabled {
+        item
+    } else {
+        item.hover(move |style| style.bg(hover_bg))
+    }
+}
+
+pub fn context_menu_indicator_slot(tokens: &ThemeTokens) -> Div {
+    div()
+        .absolute()
+        .left(px(tokens.metrics.ui_menu_item_padding_x))
+        .size(px(tokens.metrics.ui_menu_indicator_size))
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+pub fn context_menu_trailing_slot() -> Div {
+    div().ml_auto().flex_none()
+}
+
+fn context_menu_builtin_indicator(tokens: &ThemeTokens, kind: ContextMenuItemKind) -> Div {
+    context_menu_indicator_slot(tokens).when(
+        matches!(
+            kind,
+            ContextMenuItemKind::Checkbox(true) | ContextMenuItemKind::Radio(true)
+        ),
+        |slot| {
+            slot.child(if matches!(kind, ContextMenuItemKind::Radio(true)) {
+                "●"
+            } else {
+                "✓"
+            })
+        },
+    )
+}
+
+fn context_menu_chevron(tokens: &ThemeTokens, chevron: impl Into<String>) -> Div {
+    div()
+        .ml_auto()
+        .flex_none()
+        .text_size(px(tokens.metrics.ui_menu_icon_size))
+        .text_color(rgb(tokens.ui.text_muted))
+        .child(chevron.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::context_menu_item_is_actionable;
+
+    #[test]
+    fn context_menu_action_guard_blocks_disabled_or_loading_items() {
+        assert!(context_menu_item_is_actionable(false, false));
+        assert!(!context_menu_item_is_actionable(true, false));
+        assert!(!context_menu_item_is_actionable(false, true));
+        assert!(!context_menu_item_is_actionable(true, true));
+    }
+}

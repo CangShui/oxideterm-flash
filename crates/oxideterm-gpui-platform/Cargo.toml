@@ -1,0 +1,25 @@
+[package]
+name = "oxideterm-gpui-platform"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+gpui.workspace = true
+# GPUI-CE otherwise installs a no-op text system on macOS.
+gpui_platform = { workspace = true, features = ["font-kit"] }
+oxideterm-render-policy = { path = "../oxideterm-render-policy" }
+oxideterm-theme = { path = "../oxideterm-theme" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", features = ["NSResponder", "NSView", "NSWindow"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+raw-window-handle.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle.workspace = true
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+raw-window-handle.workspace = true
+x11-dl = "2.21.0"

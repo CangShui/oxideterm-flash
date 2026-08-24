@@ -1,0 +1,1209 @@
+use super::*;
+
+const BACKGROUND_SCOPE_OPTIONS: [(BackgroundScope, &str); 2] = [
+    (
+        BackgroundScope::Content,
+        "settings_view.terminal.bg_scope_content",
+    ),
+    (
+        BackgroundScope::Window,
+        "settings_view.terminal.bg_scope_window",
+    ),
+];
+
+fn background_scope_index(scope: BackgroundScope) -> usize {
+    BACKGROUND_SCOPE_OPTIONS
+        .iter()
+        .position(|(option, _)| *option == scope)
+        .unwrap_or(0)
+}
+
+impl WorkspaceApp {
+    pub(in crate::workspace) fn settings_appearance_section(
+        &self,
+        section_index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let settings = self.settings_store.settings();
+        match section_index {
+            0 => self.appearance_theme_card(settings, cx),
+            1 => self.appearance_layout_card(settings, cx),
+            2 => self.appearance_app_icon_card(settings, cx),
+            3 => self.appearance_background_card(settings, cx),
+            _ => div().into_any_element(),
+        }
+    }
+
+    pub(in crate::workspace) fn appearance_theme_card(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.appearance_card(
+            self.i18n.t("settings_view.appearance.theme"),
+            None,
+            vec![
+                self.appearance_row(
+                    "settings_view.appearance.color_theme",
+                    "settings_view.appearance.color_theme_hint",
+                    self.appearance_select_control(
+                        SettingsSelect::AppearanceTheme,
+                        theme_display_name(&settings.terminal.theme),
+                        self.tokens.metrics.settings_select_width,
+                        cx,
+                    ),
+                ),
+                self.appearance_theme_preview(settings),
+            ],
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_layout_card(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.appearance_card(
+            self.i18n.t("settings_view.appearance.layout"),
+            None,
+            vec![
+                self.appearance_row(
+                    "settings_view.appearance.density",
+                    "settings_view.appearance.density_hint",
+                    self.appearance_select_control(
+                        SettingsSelect::AppearanceDensity,
+                        density_label(settings.appearance.ui_density, &self.i18n),
+                        self.tokens.metrics.settings_appearance_select_width,
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.appearance.border_radius",
+                    "settings_view.appearance.border_radius_hint",
+                    self.appearance_radius_control(settings, cx),
+                ),
+                self.appearance_row(
+                    "settings_view.appearance.ui_font",
+                    "settings_view.appearance.ui_font_hint",
+                    self.appearance_text_input_control(
+                        SettingsInput::AppearanceUiFont,
+                        settings.appearance.ui_font_family.clone(),
+                        self.i18n.t("settings_view.appearance.ui_font_placeholder"),
+                        self.tokens.metrics.settings_appearance_select_width,
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.appearance.ui_font_size",
+                    "settings_view.appearance.ui_font_size_hint",
+                    self.appearance_slider_value_control(
+                        SettingsSlider::AppearanceUiFontSize,
+                        SelectAnchorId::SettingsAppearanceUiFontSizeSlider,
+                        APPEARANCE_UI_FONT_SIZE_MIN,
+                        APPEARANCE_UI_FONT_SIZE_MAX,
+                        settings.appearance.ui_font_size as f32,
+                        "px",
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.appearance.window_opacity",
+                    "settings_view.appearance.window_opacity_hint",
+                    self.appearance_slider_value_control(
+                        SettingsSlider::AppearanceWindowOpacity,
+                        SelectAnchorId::SettingsAppearanceWindowOpacitySlider,
+                        (MIN_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                        (MAX_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                        (settings.appearance.window_opacity * SETTINGS_PERCENT_SCALE).round()
+                            as f32,
+                        "%",
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.appearance.animation",
+                    "settings_view.appearance.animation_hint",
+                    self.appearance_select_control(
+                        SettingsSelect::AppearanceAnimation,
+                        animation_label(settings.appearance.animation_speed, &self.i18n),
+                        self.tokens.metrics.settings_appearance_select_width,
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.appearance.render_profile",
+                    "settings_view.appearance.render_profile_hint",
+                    self.appearance_select_control(
+                        SettingsSelect::AppearanceRenderProfile,
+                        render_profile_label(settings.appearance.render_profile, &self.i18n),
+                        self.tokens.metrics.settings_appearance_select_width,
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.appearance.frosted_glass",
+                    "settings_view.appearance.frosted_glass_hint",
+                    self.appearance_select_control(
+                        SettingsSelect::AppearanceFrostedGlass,
+                        frosted_glass_label(settings.appearance.frosted_glass, &self.i18n),
+                        self.tokens.metrics.settings_appearance_select_width,
+                        cx,
+                    ),
+                ),
+            ]
+            .into_iter()
+            .chain(cfg!(target_os = "linux").then(|| {
+                self.appearance_window_titlebar_row(settings.appearance.show_window_titlebar, cx)
+            }))
+            .chain(std::iter::once(self.appearance_vibrancy_status(settings)))
+            .collect(),
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_app_icon_card(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.appearance_card_with_icon(
+            LucideIcon::AppWindow,
+            self.i18n.t("settings_view.appearance.app_icon"),
+            vec![self.appearance_app_icon_row(settings.appearance.app_icon, cx)],
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_app_icon_row(
+        &self,
+        selected: AppIconVariant,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // The icon picker can wrap into multiple rows. Keep its label above the
+        // grid so narrow settings panes do not squeeze localized copy vertically.
+        div()
+            .w_full()
+            .min_w(px(0.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(self.tokens.metrics.ui_text_sm))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgb(self.tokens.ui.text))
+                            .child(self.i18n.t("settings_view.appearance.app_icon_variant")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(self.tokens.metrics.ui_text_xs))
+                            .text_color(rgb(self.tokens.ui.text_muted))
+                            .child(
+                                self.i18n
+                                    .t("settings_view.appearance.app_icon_variant_hint"),
+                            ),
+                    ),
+            )
+            .child(self.appearance_app_icon_picker(selected, cx))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_app_icon_picker(
+        &self,
+        selected: AppIconVariant,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut picker = div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_start()
+            .gap(px(10.0))
+            .min_w(px(0.0))
+            .flex_wrap();
+
+        for variant in crate::app_icon::APP_ICON_VARIANTS {
+            picker =
+                picker.child(self.appearance_app_icon_option(*variant, *variant == selected, cx));
+        }
+
+        picker.into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_app_icon_option(
+        &self,
+        variant: AppIconVariant,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let icon_path = crate::app_icon::app_icon_variant_resource_path(variant);
+        let border_color = if selected {
+            self.tokens.ui.accent
+        } else {
+            self.tokens.ui.border
+        };
+        let image = img(icon_path)
+            .size(px(42.0))
+            .object_fit(ObjectFit::Contain)
+            .rounded(px(self.tokens.radii.md));
+
+        div()
+            .relative()
+            .size(px(58.0))
+            .flex_none()
+            .rounded(px(self.tokens.radii.lg))
+            .border_1()
+            .border_color(rgb(border_color))
+            .bg(rgb(self.tokens.ui.bg_sunken))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|button| button.bg(rgb(self.tokens.ui.bg_hover)))
+            .child(image)
+            .when(selected, |button| {
+                button.child(
+                    div()
+                        .absolute()
+                        .right(px(4.0))
+                        .bottom(px(4.0))
+                        .size(px(16.0))
+                        .rounded_full()
+                        .bg(rgb(self.tokens.ui.accent))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Self::render_lucide_icon(
+                            LucideIcon::Check,
+                            11.0,
+                            rgb(self.tokens.ui.bg),
+                        )),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.edit_settings(|settings| settings.appearance.app_icon = variant, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_background_card(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let background_blur = self
+            .settings_workspace
+            .read(cx)
+            .background_blur_preview()
+            .unwrap_or(settings.terminal.background_blur);
+        let has_background_image = settings.terminal.background_image.is_some();
+        let mut rows = Vec::new();
+        if has_background_image {
+            // Tauri only shows the master enable checkbox after an image exists.
+            // Keep the same conditional layout so the empty gallery card does not
+            // reserve controls that the browser version hides.
+            rows.push(self.appearance_checkbox_row(
+                "settings_view.terminal.bg_enabled",
+                "settings_view.terminal.bg_enabled_hint",
+                settings.terminal.background_enabled,
+                set_terminal_background_enabled,
+                cx,
+            ));
+        }
+        rows.push(self.appearance_background_image_slot(settings, cx));
+        if has_background_image {
+            rows.push(self.appearance_row(
+                "settings_view.terminal.bg_scope",
+                "settings_view.terminal.bg_scope_hint",
+                self.appearance_background_scope_control(settings.terminal.background_scope, cx),
+            ));
+            rows.extend([
+                self.appearance_row(
+                    "settings_view.terminal.bg_opacity",
+                    "settings_view.terminal.bg_opacity_hint",
+                    self.appearance_slider_value_control(
+                        SettingsSlider::AppearanceBackgroundOpacity,
+                        SelectAnchorId::SettingsAppearanceBackgroundOpacitySlider,
+                        (MIN_TERMINAL_BACKGROUND_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                        (MAX_TERMINAL_BACKGROUND_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                        (settings.terminal.background_opacity * SETTINGS_PERCENT_SCALE).round()
+                            as f32,
+                        "%",
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.terminal.bg_blur",
+                    "settings_view.terminal.bg_blur_hint",
+                    self.appearance_slider_value_control(
+                        SettingsSlider::AppearanceBackgroundBlur,
+                        SelectAnchorId::SettingsAppearanceBackgroundBlurSlider,
+                        0.0,
+                        20.0,
+                        background_blur as f32,
+                        "px",
+                        cx,
+                    ),
+                ),
+                self.appearance_row(
+                    "settings_view.terminal.bg_fit",
+                    "settings_view.terminal.bg_fit_hint",
+                    self.appearance_select_control(
+                        SettingsSelect::AppearanceBackgroundFit,
+                        background_fit_label(settings.terminal.background_fit, &self.i18n),
+                        self.tokens.metrics.settings_appearance_fit_select_width,
+                        cx,
+                    ),
+                ),
+            ]);
+            if settings.terminal.background_scope == BackgroundScope::Content {
+                rows.push(self.appearance_background_tabs(settings, cx));
+            }
+        }
+        self.appearance_card_with_icon(
+            LucideIcon::Image,
+            self.i18n.t("settings_view.terminal.bg_title"),
+            rows,
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_background_scope_control(
+        &self,
+        selected: BackgroundScope,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active_index = background_scope_index(selected);
+        let control_id = selection_motion::APPEARANCE_BACKGROUND_SCOPE_SWITCHER_ID;
+        let previous_index = self
+            .segmented_control_user_previous_index(control_id, active_index)
+            .unwrap_or(active_index);
+        let transition_generation = self
+            .segmented_control_user_transition(control_id, active_index)
+            .map(|(generation, _)| generation);
+        let item_width = 1.0 / BACKGROUND_SCOPE_OPTIONS.len() as f32;
+        let active_left = active_index as f32 * item_width;
+        let previous_left = previous_index as f32 * item_width;
+        let indicator = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(relative(item_width))
+            .rounded(px(self.tokens.radii.sm))
+            .bg(rgba((self.tokens.ui.accent << 8) | 0x24));
+        let indicator = match (
+            transition_generation,
+            oxideterm_gpui_ui::segmented_control_motion(&self.tokens),
+        ) {
+            (Some(generation), Some(motion)) if motion.spatial => indicator
+                .with_animation(
+                    (
+                        gpui::ElementId::from(control_id),
+                        format!("selection-{generation}"),
+                    ),
+                    Animation::new(motion.duration)
+                        .with_easing(oxideterm_gpui_ui::motion::ease_in_out_cubic),
+                    move |indicator, progress| {
+                        indicator.left(relative(oxideterm_gpui_ui::motion::lerp(
+                            previous_left,
+                            active_left,
+                            progress,
+                        )))
+                    },
+                )
+                .into_any_element(),
+            (Some(generation), Some(motion)) => indicator
+                .left(relative(active_left))
+                .with_animation(
+                    (
+                        gpui::ElementId::from(control_id),
+                        format!("selection-{generation}"),
+                    ),
+                    Animation::new(motion.duration),
+                    |indicator, progress| indicator.opacity(progress),
+                )
+                .into_any_element(),
+            _ => indicator.left(relative(active_left)).into_any_element(),
+        };
+        let mut options = div()
+            .relative()
+            .grid()
+            .grid_cols(BACKGROUND_SCOPE_OPTIONS.len() as u16)
+            .child(indicator);
+        for (target_index, (scope, label_key)) in
+            BACKGROUND_SCOPE_OPTIONS.iter().copied().enumerate()
+        {
+            let active = scope == selected;
+            options = options.child(
+                div()
+                    .relative()
+                    .h(px(28.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(self.tokens.radii.sm))
+                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(if active {
+                        self.tokens.ui.accent
+                    } else {
+                        self.tokens.ui.text_muted
+                    }))
+                    .cursor_pointer()
+                    .hover({
+                        let hover = self.tokens.ui.bg_hover;
+                        move |segment| segment.bg(rgb(hover))
+                    })
+                    .child(self.i18n.t(label_key))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            if target_index != active_index {
+                                this.edit_settings(
+                                    |settings| settings.terminal.background_scope = scope,
+                                    cx,
+                                );
+                                this.begin_user_segmented_control_transition_from(
+                                    control_id,
+                                    active_index,
+                                    target_index,
+                                    cx,
+                                );
+                            }
+                            cx.stop_propagation();
+                        }),
+                    ),
+            );
+        }
+        // The grid keeps both localized labels at equal intrinsic widths while
+        // the existing shell remains unchanged around the moving selection.
+        div()
+            .flex()
+            .items_center()
+            .p(px(2.0))
+            .rounded(px(self.tokens.radii.sm))
+            .border_1()
+            .border_color(rgb(self.tokens.ui.border))
+            .bg(rgb(self.tokens.ui.bg_sunken))
+            .child(options)
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_card(
+        &self,
+        title: String,
+        actions: Option<AnyElement>,
+        rows: Vec<AnyElement>,
+    ) -> AnyElement {
+        self.appearance_card_shell(
+            settings_appearance_card_header(&self.tokens, title, None, actions),
+            rows,
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_card_with_icon(
+        &self,
+        icon: LucideIcon,
+        title: String,
+        rows: Vec<AnyElement>,
+    ) -> AnyElement {
+        self.appearance_card_shell(
+            settings_appearance_card_header(
+                &self.tokens,
+                title,
+                Some(Self::render_lucide_icon(
+                    icon,
+                    16.0,
+                    rgb(self.tokens.ui.text),
+                )),
+                None,
+            ),
+            rows,
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_card_shell(
+        &self,
+        header: AnyElement,
+        rows: Vec<AnyElement>,
+    ) -> AnyElement {
+        settings_appearance_card_shell(
+            &self.tokens,
+            self.settings_background_active(),
+            header,
+            rows,
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_action_button(
+        &self,
+        icon: LucideIcon,
+        label: String,
+        listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> Div {
+        // Appearance header actions are Tauri small outline toolbar buttons.
+        // Route activation through the workspace Button boundary so browser
+        // disabled/loading/focus-visible behavior can stay centralized.
+        self.workspace_toolbar_action_button(
+            label,
+            Some(Self::render_lucide_icon(
+                icon,
+                14.0,
+                rgb(self.tokens.ui.text),
+            )),
+            ToolbarButtonOptions {
+                button: ButtonOptions {
+                    variant: ButtonVariant::Outline,
+                    size: ButtonSize::Sm,
+                    radius: ButtonRadius::Md,
+                    disabled: false,
+                },
+                height: Some(self.tokens.metrics.settings_appearance_action_height),
+                padding_x: Some(10.0),
+                font_size: Some(self.tokens.metrics.ui_text_xs),
+                background: Some(rgba(0x00000000)),
+                border: Some(rgb(self.tokens.ui.border)),
+                text_color: Some(rgb(self.tokens.ui.text)),
+                hover_background: Some(rgb(self.tokens.ui.bg_hover)),
+                ..ToolbarButtonOptions::default()
+            },
+            listener,
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_row(
+        &self,
+        label_key: &str,
+        hint_key: &str,
+        control: AnyElement,
+    ) -> AnyElement {
+        settings_appearance_row(&self.tokens, &self.i18n, label_key, hint_key, control)
+    }
+
+    pub(in crate::workspace) fn appearance_vibrancy_status(
+        &self,
+        settings: &PersistedSettings,
+    ) -> AnyElement {
+        let mode = effective_vibrancy_mode(settings, &self.render_policy);
+        let mode_label = frosted_glass_label(frosted_glass_mode_from_native(mode), &self.i18n);
+        let effective_text = format!(
+            "{} {}",
+            self.i18n
+                .t("settings_view.appearance.frosted_glass_effective_mode"),
+            mode_label
+        );
+        let (status_key, status_color) = if !self.render_policy.allow_vibrancy {
+            (
+                "settings_view.appearance.frosted_glass_status_profile_disabled",
+                self.tokens.ui.warning,
+            )
+        } else if mode == NativeVibrancyMode::Off {
+            (
+                "settings_view.appearance.frosted_glass_status_off",
+                self.tokens.ui.text_muted,
+            )
+        } else {
+            match self.vibrancy_support {
+                VibrancySupport::Supported => (
+                    "settings_view.appearance.frosted_glass_status_active",
+                    self.tokens.ui.success,
+                ),
+                VibrancySupport::Fallback { .. } => (
+                    "settings_view.appearance.frosted_glass_status_fallback",
+                    self.tokens.ui.warning,
+                ),
+                VibrancySupport::Unsupported { .. } => (
+                    "settings_view.appearance.frosted_glass_status_unsupported",
+                    self.tokens.ui.error,
+                ),
+            }
+        };
+        let blur_key = if self.render_policy.allow_background_blur {
+            "settings_view.appearance.frosted_glass_dialog_blur_enabled"
+        } else {
+            "settings_view.appearance.frosted_glass_dialog_blur_disabled"
+        };
+        let status_row = |color: u32, label: String| {
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .mt(px(5.0))
+                        .size(px(6.0))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(rgb(color)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_size(px(self.tokens.metrics.ui_text_xs))
+                        .line_height(px(18.0))
+                        .text_color(rgb(self.tokens.ui.text_muted))
+                        .child(label),
+                )
+                .into_any_element()
+        };
+
+        // This status block explains the two independent glass layers. They
+        // intentionally follow different render-policy gates so low-power mode
+        // can keep cheap system material while disabling expensive realtime blur.
+        div()
+            .w_full()
+            .min_w(px(0.0))
+            .rounded(px(self.tokens.radii.md))
+            .border_1()
+            .border_color(rgb(self.tokens.ui.border))
+            .bg(rgb(self.tokens.ui.bg_sunken))
+            .px(px(12.0))
+            .py(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(status_row(self.tokens.ui.accent, effective_text))
+            .child(status_row(status_color, self.i18n.t(status_key)))
+            .child(status_row(self.tokens.ui.text_muted, self.i18n.t(blur_key)))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_checkbox_row(
+        &self,
+        label_key: &str,
+        hint_key: &str,
+        checked: bool,
+        setter: fn(&mut PersistedSettings, bool),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.appearance_row(
+            label_key,
+            hint_key,
+            checkbox(&self.tokens, String::new(), checked)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.edit_settings(|settings| setter(settings, !checked), cx);
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn appearance_window_titlebar_row(&self, checked: bool, cx: &mut Context<Self>) -> AnyElement {
+        self.appearance_row(
+            "settings_view.appearance.show_window_titlebar",
+            "settings_view.appearance.show_window_titlebar_hint",
+            checkbox(&self.tokens, String::new(), checked)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.edit_settings(
+                            |settings| settings.appearance.show_window_titlebar = !checked,
+                            cx,
+                        );
+                        // Detached windows read the same workspace settings but
+                        // need an explicit repaint after their chrome changes.
+                        cx.refresh_windows();
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_select_control(
+        &self,
+        select_id: SettingsSelect,
+        value: String,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .relative()
+            .w(px(width))
+            .min_w(px(0.0))
+            .child(self.settings_select_control(select_id, value, false, Some(width), cx))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_text_input_control(
+        &self,
+        input: SettingsInput,
+        value: String,
+        placeholder: String,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let focused = self.focused_settings_input == Some(input);
+        let display_value = if focused {
+            self.settings_input_draft.as_str()
+        } else {
+            value.as_str()
+        };
+        let target = WorkspaceImeTarget::Settings(input);
+        let workspace = cx.entity();
+        text_input_anchor_probe(
+            target.anchor_id(),
+            text_input(
+                &self.tokens,
+                TextInputView {
+                    value: display_value,
+                    placeholder,
+                    focused,
+                    caret_visible: self.input_caret.visible(),
+                    secret: false,
+                    selected_all: false,
+                    selected_range: self.ime_selected_range_for_target(target, cx),
+                    marked_text: self.marked_text_for_target(target, cx),
+                },
+            )
+            .w(px(width))
+            .cursor(CursorStyle::IBeam)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    let current = this.current_settings_input_value(input, cx);
+                    this.focus_settings_input(input, current, cx);
+                    this.ime_marked_text = None;
+                    window.focus(&this.focus_handle, cx);
+                    this.begin_ime_selection_from_mouse_down(target, event, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(
+                |this, event: &gpui::MouseMoveEvent, window, cx| {
+                    this.update_ime_selection_drag_from_mouse_move(event, window, cx);
+                },
+            )),
+            move |anchor, _window, cx| {
+                let _ = workspace.update(cx, |this, cx| {
+                    this.update_text_input_anchor(anchor, cx);
+                });
+            },
+        )
+        .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_radius_control(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        settings_appearance_radius_control(
+            &self.tokens,
+            settings.appearance.border_radius,
+            self.appearance_slider_control(
+                SettingsSlider::AppearanceBorderRadius,
+                SelectAnchorId::SettingsAppearanceBorderRadiusSlider,
+                APPEARANCE_BORDER_RADIUS_MIN,
+                APPEARANCE_BORDER_RADIUS_MAX,
+                settings.appearance.border_radius as f32,
+                cx,
+            ),
+        )
+    }
+
+    pub(in crate::workspace) fn appearance_slider_value_control(
+        &self,
+        slider: SettingsSlider,
+        anchor_id: SelectAnchorId,
+        min: f32,
+        max: f32,
+        value: f32,
+        unit: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .child(self.appearance_slider_control(slider, anchor_id, min, max, value, cx))
+            .child(
+                div()
+                    .w(px(48.0))
+                    .text_align(gpui::TextAlign::Right)
+                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                    .text_color(rgb(self.tokens.ui.text_muted))
+                    .child(format!("{}{}", value.round() as i64, unit)),
+            )
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_slider_control(
+        &self,
+        slider_id: SettingsSlider,
+        anchor_id: SelectAnchorId,
+        min: f32,
+        max: f32,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspace = cx.entity();
+        div()
+            .w(px(self.tokens.metrics.settings_slider_width))
+            .child(select_anchor_probe(
+                anchor_id,
+                slider(
+                    &self.tokens,
+                    SliderView {
+                        min,
+                        max,
+                        value,
+                        disabled: false,
+                    },
+                )
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        this.close_settings_select();
+                        this.focused_settings_input = None;
+                        this.settings_slider_drag = Some(slider_id);
+                        this.apply_settings_slider_from_position(
+                            slider_id,
+                            f32::from(event.position.x),
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                        this.finish_settings_slider_drag(cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_move(cx.listener(
+                    |this, event: &MouseMoveEvent, _window, cx| {
+                        this.update_settings_slider_drag(event, cx);
+                    },
+                )),
+                move |anchor, _window, cx| {
+                    let _ = workspace.update(cx, |this, cx| {
+                        this.update_select_anchor(anchor, cx);
+                    });
+                },
+            ))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn appearance_theme_preview(
+        &self,
+        settings: &PersistedSettings,
+    ) -> AnyElement {
+        settings_appearance_theme_preview(&self.tokens, settings)
+    }
+
+    pub(in crate::workspace) fn send_settings_notice(
+        &self,
+        title: String,
+        variant: TerminalNoticeVariant,
+        cx: &App,
+    ) {
+        self.push_workspace_notice(
+            TerminalNotice {
+                title,
+                description: None,
+                status_text: None,
+                progress: None,
+                variant,
+            },
+            cx,
+        );
+    }
+
+    pub(in crate::workspace) fn appearance_background_image_slot(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let background_images = self
+            .settings_workspace
+            .read(cx)
+            .background_images_snapshot();
+        let has_removable_gallery_images = !background_images.is_empty();
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(self.appearance_action_button(
+                LucideIcon::Plus,
+                self.i18n.t("settings_view.terminal.bg_add"),
+                cx.listener(|this, _event, _window, cx| {
+                    this.pick_background_image(cx);
+                    cx.stop_propagation();
+                }),
+            ))
+            .when(has_removable_gallery_images, |actions| {
+                actions.child(
+                    settings_background_clear_all_button(
+                        &self.tokens,
+                        self.i18n.t("settings_view.terminal.bg_clear_all"),
+                        Self::render_lucide_icon(
+                            LucideIcon::Trash2,
+                            14.0,
+                            rgb(self.tokens.ui.error),
+                        ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.clear_background_image_gallery(cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+                )
+            })
+            .into_any_element();
+        settings_background_gallery(
+            &self.tokens,
+            self.i18n.t("settings_view.terminal.bg_gallery"),
+            actions,
+            self.background_image_slot_content(settings, cx),
+        )
+    }
+
+    pub(in crate::workspace) fn background_image_slot_content(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let background_images = self
+            .settings_workspace
+            .read(cx)
+            .background_images_snapshot();
+        if background_images.is_empty() {
+            return settings_background_empty_hint(
+                &self.tokens,
+                self.i18n.t("settings_view.terminal.bg_hint"),
+            );
+        }
+
+        let current = settings.terminal.background_image.as_deref();
+        let thumbnails = background_images
+            .iter()
+            .map(|image_path| {
+                self.background_thumbnail(image_path, current == Some(image_path.as_str()), cx)
+            })
+            .collect();
+        settings_background_thumbnails_layout(thumbnails)
+    }
+
+    pub(in crate::workspace) fn pick_background_image(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(SharedString::from(
+                self.i18n.t("settings_view.terminal.bg_select_title"),
+            )),
+        });
+        let settings_path = self.settings_store.path().to_path_buf();
+        let current_path = self
+            .settings_store
+            .settings()
+            .terminal
+            .background_image
+            .as_ref()
+            .map(PathBuf::from);
+        let runtime = self.forwarding_runtime.handle().clone();
+        let selection = async move {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return None;
+            };
+            Some(paths)
+        };
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.start_background_image_import(
+                selection,
+                settings_path,
+                current_path,
+                runtime,
+                cx,
+            );
+        });
+    }
+
+    pub(in crate::workspace) fn background_thumbnail(
+        &self,
+        image_path: &str,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let image_path = image_path.to_string();
+        let remove_path = image_path.clone();
+        let fallback_icon_color = self.tokens.ui.text_muted;
+        let thumbnail = settings_background_thumbnail_frame(
+            &self.tokens,
+            &image_path,
+            active,
+            self.i18n.t("settings_view.terminal.bg_active"),
+            move || {
+                WorkspaceApp::render_lucide_icon(LucideIcon::Image, 20.0, rgb(fallback_icon_color))
+            },
+        );
+        thumbnail
+            .child(
+                settings_background_thumbnail_remove_button(
+                    &self.tokens,
+                    Self::render_lucide_icon(LucideIcon::X, 12.0, rgb(self.tokens.ui.text)),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.remove_background_image_from_gallery(remove_path.clone(), cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    let selected_path = image_path.clone();
+                    this.edit_settings(
+                        move |settings| {
+                            settings.terminal.background_image = Some(selected_path);
+                        },
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn remove_background_image_from_gallery(
+        &mut self,
+        image_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        let settings_path = self.settings_store.path().to_path_buf();
+        let runtime = self.forwarding_runtime.handle().clone();
+        let current_path = self
+            .settings_store
+            .settings()
+            .terminal
+            .background_image
+            .clone();
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.remove_background_image(settings_path, image_path, current_path, runtime, cx);
+        });
+    }
+
+    pub(in crate::workspace) fn clear_background_image_gallery(&mut self, cx: &mut Context<Self>) {
+        let settings_path = self.settings_store.path().to_path_buf();
+        let runtime = self.forwarding_runtime.handle().clone();
+        let current_path = self
+            .settings_store
+            .settings()
+            .terminal
+            .background_image
+            .clone();
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.clear_background_image_gallery(settings_path, current_path, runtime, cx);
+        });
+    }
+
+    pub(in crate::workspace) fn appearance_background_tabs(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut pills = Vec::new();
+        for (key, label_key, icon) in background_tab_options() {
+            let enabled = settings
+                .terminal
+                .background_enabled_tabs
+                .iter()
+                .any(|tab| tab == key);
+            let key = (*key).to_string();
+            pills.push(
+                self.background_tab_pill(
+                    &key,
+                    *label_key,
+                    settings_background_tab_lucide(*icon),
+                    enabled,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.toggle_background_tab(&key, cx);
+                    }),
+                )
+                .into_any_element(),
+            );
+        }
+
+        settings_background_tabs_section(
+            &self.tokens,
+            self.i18n.t("settings_view.terminal.bg_tabs"),
+            self.i18n.t("settings_view.terminal.bg_tabs_hint"),
+            pills,
+        )
+    }
+
+    pub(in crate::workspace) fn background_tab_pill(
+        &self,
+        _key: &str,
+        label_key: &str,
+        icon: LucideIcon,
+        enabled: bool,
+    ) -> Div {
+        let color = if enabled {
+            self.tokens.ui.accent
+        } else {
+            self.tokens.ui.text_muted
+        };
+        settings_background_tab_pill(
+            &self.tokens,
+            self.i18n.t(label_key),
+            Self::render_lucide_icon(
+                icon,
+                self.tokens.metrics.settings_background_tab_icon_size,
+                rgb(color),
+            ),
+            enabled,
+        )
+    }
+
+    pub(in crate::workspace) fn toggle_background_tab(
+        &mut self,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_settings(
+            |settings| {
+                if let Some(index) = settings
+                    .terminal
+                    .background_enabled_tabs
+                    .iter()
+                    .position(|tab| tab == key)
+                {
+                    settings.terminal.background_enabled_tabs.remove(index);
+                } else {
+                    settings
+                        .terminal
+                        .background_enabled_tabs
+                        .push(key.to_string());
+                }
+            },
+            cx,
+        );
+    }
+}

@@ -1,0 +1,163 @@
+// Copyright (C) 2026 AnalyseDeCircuit
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! Connection transport identity and default-field transition rules.
+
+pub const SSH_DEFAULT_PORT_TEXT: &str = "22";
+pub const TELNET_DEFAULT_PORT_TEXT: &str = "23";
+pub const RDP_DEFAULT_PORT_TEXT: &str = "3389";
+pub const VNC_DEFAULT_PORT_TEXT: &str = "5900";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionTransport {
+    LocalTerminal,
+    Ssh,
+    StandaloneSftp,
+    Telnet,
+    Serial,
+    Rdp,
+    Vnc,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransportUsernameTransition {
+    Set(&'static str),
+    Clear,
+}
+
+pub fn transport_default_port(transport: ConnectionTransport) -> Option<&'static str> {
+    match transport {
+        ConnectionTransport::LocalTerminal => None,
+        ConnectionTransport::Ssh => Some(SSH_DEFAULT_PORT_TEXT),
+        ConnectionTransport::StandaloneSftp => Some(SSH_DEFAULT_PORT_TEXT),
+        ConnectionTransport::Telnet => Some(TELNET_DEFAULT_PORT_TEXT),
+        ConnectionTransport::Rdp => Some(RDP_DEFAULT_PORT_TEXT),
+        ConnectionTransport::Vnc => Some(VNC_DEFAULT_PORT_TEXT),
+        ConnectionTransport::Serial => None,
+    }
+}
+
+pub fn transport_port_replacement(
+    current_port: &str,
+    previous_transport: ConnectionTransport,
+    next_transport: ConnectionTransport,
+) -> Option<&'static str> {
+    let current_port = current_port.trim();
+    let next_default_port = transport_default_port(next_transport)?;
+    let current_matches_previous_default = transport_default_port(previous_transport).map_or_else(
+        || is_known_transport_default_port(current_port),
+        |previous_default| current_port == previous_default,
+    );
+
+    (current_port.is_empty() || current_matches_previous_default).then_some(next_default_port)
+}
+
+pub fn transport_username_transition(
+    current_username: &str,
+    previous_transport: ConnectionTransport,
+    next_transport: ConnectionTransport,
+) -> Option<TransportUsernameTransition> {
+    let username = current_username.trim();
+    match next_transport {
+        ConnectionTransport::Rdp
+            if username.is_empty()
+                || (matches!(
+                    previous_transport,
+                    ConnectionTransport::Ssh | ConnectionTransport::StandaloneSftp
+                ) && username == "root") =>
+        {
+            Some(TransportUsernameTransition::Set("Administrator"))
+        }
+        ConnectionTransport::Vnc
+            if matches!(
+                previous_transport,
+                ConnectionTransport::Ssh
+                    | ConnectionTransport::StandaloneSftp
+                    | ConnectionTransport::Rdp
+            ) && matches!(username, "root" | "Administrator") =>
+        {
+            Some(TransportUsernameTransition::Clear)
+        }
+        ConnectionTransport::Ssh
+        | ConnectionTransport::StandaloneSftp
+            if previous_transport == ConnectionTransport::Rdp
+                && (username == "Administrator" || username.is_empty()) =>
+        {
+            Some(TransportUsernameTransition::Set("root"))
+        }
+        ConnectionTransport::Ssh
+        | ConnectionTransport::StandaloneSftp
+            if previous_transport == ConnectionTransport::Vnc && username.is_empty() =>
+        {
+            Some(TransportUsernameTransition::Set("root"))
+        }
+        _ => None,
+    }
+}
+
+pub fn transport_is_persistable(transport: ConnectionTransport) -> bool {
+    // One-shot local surfaces are launch targets, not saved connection assets.
+    !matches!(transport, ConnectionTransport::LocalTerminal)
+}
+
+fn is_known_transport_default_port(port: &str) -> bool {
+    [
+        SSH_DEFAULT_PORT_TEXT,
+        TELNET_DEFAULT_PORT_TEXT,
+        RDP_DEFAULT_PORT_TEXT,
+        VNC_DEFAULT_PORT_TEXT,
+    ]
+    .contains(&port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_transitions_preserve_custom_values_and_local_only_state() {
+        assert_eq!(
+            transport_port_replacement("22", ConnectionTransport::Ssh, ConnectionTransport::Rdp),
+            Some("3389")
+        );
+        assert_eq!(
+            transport_port_replacement("", ConnectionTransport::Serial, ConnectionTransport::Vnc),
+            Some("5900")
+        );
+        assert_eq!(
+            transport_port_replacement("2200", ConnectionTransport::Ssh, ConnectionTransport::Rdp),
+            None
+        );
+        assert_eq!(
+            transport_username_transition(
+                "root",
+                ConnectionTransport::Ssh,
+                ConnectionTransport::Rdp
+            ),
+            Some(TransportUsernameTransition::Set("Administrator"))
+        );
+        assert_eq!(
+            transport_username_transition(
+                "custom",
+                ConnectionTransport::Ssh,
+                ConnectionTransport::Rdp
+            ),
+            None
+        );
+        assert_eq!(
+            transport_username_transition(
+                "Administrator",
+                ConnectionTransport::Rdp,
+                ConnectionTransport::Vnc
+            ),
+            Some(TransportUsernameTransition::Clear)
+        );
+        assert!(!transport_is_persistable(
+            ConnectionTransport::LocalTerminal
+        ));
+        assert_eq!(
+            transport_default_port(ConnectionTransport::LocalTerminal),
+            None
+        );
+    }
+}

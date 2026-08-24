@@ -1,0 +1,406 @@
+// Copyright (C) 2026 AnalyseDeCircuit
+// SPDX-License-Identifier: GPL-3.0-only
+
+use std::{
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
+
+use gpui::{
+    AnyElement, Bounds, Corners, CursorStyle, DevicePixels, Div, ObjectFit, ParentElement, Pixels,
+    RenderImage, Styled, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
+};
+use oxideterm_gpui_ui::{empty_state, error_state};
+use oxideterm_remote_desktop::{
+    RemoteDesktopCursorShape, RemoteDesktopFrameFormat, RemoteDesktopSessionStatus,
+};
+use oxideterm_theme::ThemeTokens;
+
+use crate::{
+    RemoteDesktopCursorState, RemoteDesktopViewState, SharedRemoteDesktopGeometry,
+    state::RemoteDesktopFrameSurface,
+};
+
+const VIEW_PADDING: f32 = 14.0;
+const FRAME_BORDER_ALPHA: u32 = 0x80;
+const FRAME_BG_ALPHA: u32 = 0x66;
+const REMOTE_DESKTOP_DIAGNOSTICS_ENV: &str = "OXIDETERM_REMOTE_DESKTOP_DIAGNOSTICS";
+
+pub fn remote_desktop_surface(tokens: &ThemeTokens, state: &RemoteDesktopViewState) -> AnyElement {
+    remote_desktop_surface_with_geometry(tokens, state, None)
+}
+
+pub fn remote_desktop_surface_with_geometry(
+    tokens: &ThemeTokens,
+    state: &RemoteDesktopViewState,
+    geometry: Option<SharedRemoteDesktopGeometry>,
+) -> AnyElement {
+    let snapshot = state.snapshot();
+    div()
+        .size_full()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .bg(rgb(tokens.ui.bg_panel))
+        .flex()
+        .child(div().min_h(px(0.0)).flex_1().child(match snapshot.status {
+            RemoteDesktopSessionStatus::Failed => error_body(tokens, snapshot.message),
+            status if should_render_remote_frame(status, snapshot.has_frame) => {
+                // Keep the last framebuffer visible while an engine performs an
+                // internal resize reconnect. The footer already exposes the
+                // transient status without blanking the desktop surface.
+                frame_body(tokens, state, geometry)
+            }
+            RemoteDesktopSessionStatus::Idle
+            | RemoteDesktopSessionStatus::Connecting
+            | RemoteDesktopSessionStatus::Reconnecting
+            | RemoteDesktopSessionStatus::Disconnected => {
+                placeholder_body(tokens, snapshot.status, snapshot.message, geometry)
+            }
+            RemoteDesktopSessionStatus::Connected => frame_body(tokens, state, geometry),
+        }))
+        .into_any_element()
+}
+
+fn should_render_remote_frame(status: RemoteDesktopSessionStatus, has_frame: bool) -> bool {
+    matches!(status, RemoteDesktopSessionStatus::Connected)
+        || (status == RemoteDesktopSessionStatus::Reconnecting && has_frame)
+}
+
+fn frame_body(
+    tokens: &ThemeTokens,
+    state: &RemoteDesktopViewState,
+    geometry: Option<SharedRemoteDesktopGeometry>,
+) -> AnyElement {
+    if state.frame_size().is_some() {
+        let Some(surface) = state.frame_surface() else {
+            if let Some(geometry) = geometry {
+                geometry.clear();
+            }
+            return corrupted_frame_body(tokens, state).into_any_element();
+        };
+        let cursor = state.cursor().clone();
+        let cursor_image = state.cursor_image();
+
+        return div()
+            .size_full()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .bg(rgb(0x000000))
+            .overflow_hidden()
+            .child(remote_desktop_frame_canvas(
+                surface,
+                cursor,
+                cursor_image,
+                geometry,
+            ))
+            .into_any_element();
+    }
+
+    div()
+        .size_full()
+        .relative()
+        .child(empty_state(
+            tokens,
+            "RD",
+            "Waiting for the first remote frame",
+            Some("The helper is connected, but no desktop frame has arrived yet.".to_string()),
+            None,
+        ))
+        .when_some(geometry, |element, geometry| {
+            element.child(remote_desktop_viewport_probe(geometry))
+        })
+        .into_any_element()
+}
+
+fn corrupted_frame_body(tokens: &ThemeTokens, state: &RemoteDesktopViewState) -> Div {
+    let details = state
+        .corrupted_frame()
+        .map(|frame| {
+            let format_label = match frame.format {
+                RemoteDesktopFrameFormat::Rgba8 => "RGBA",
+                RemoteDesktopFrameFormat::Bgra8 => "BGRA",
+            };
+            format!(
+                "{} x {}, {format_label}, {} bytes",
+                frame.size.width, frame.size.height, frame.byte_len
+            )
+        })
+        .unwrap_or_else(|| "The framebuffer cache was not available.".to_string());
+
+    div()
+        .size_full()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .border_1()
+        .border_color(rgba((tokens.ui.error << 8) | FRAME_BORDER_ALPHA))
+        .bg(rgba((tokens.ui.bg_sunken << 8) | FRAME_BG_ALPHA))
+        .p(px(VIEW_PADDING))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(tokens.spacing.two))
+        .text_color(rgb(tokens.ui.text_muted))
+        .child(
+            div()
+                .text_size(px(tokens.metrics.ui_text_sm))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(tokens.ui.text_heading))
+                .child("Remote frame is incomplete"),
+        )
+        .child(
+            div()
+                .text_size(px(tokens.metrics.ui_text_xs))
+                .child(details),
+        )
+}
+
+fn remote_desktop_frame_canvas(
+    surface: RemoteDesktopFrameSurface,
+    cursor: RemoteDesktopCursorState,
+    cursor_image: Option<Arc<RenderImage>>,
+    geometry: Option<SharedRemoteDesktopGeometry>,
+) -> impl IntoElement {
+    let cursor_for_paint = cursor.clone();
+    let cursor_image_for_paint = cursor_image.clone();
+    let width = surface.size.width;
+    let height = surface.size.height;
+    canvas(
+        move |bounds, _window: &mut Window, _cx| {
+            let image_bounds = ObjectFit::Contain.get_bounds(
+                bounds,
+                size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            );
+            if let Some(geometry) = geometry.as_ref() {
+                geometry.update(
+                    Some(image_bounds),
+                    Some(oxideterm_remote_desktop::RemoteDesktopSize { width, height }),
+                    Some(oxideterm_remote_desktop::RemoteDesktopSize::clamped(
+                        f32::from(bounds.size.width).round() as u32,
+                        f32::from(bounds.size.height).round() as u32,
+                    )),
+                );
+            }
+            image_bounds
+        },
+        move |bounds, image_bounds, window: &mut Window, _cx| {
+            window.paint_quad(fill(bounds, rgb(0x000000)));
+            paint_remote_desktop_surface(window, image_bounds, &surface);
+            if cursor_for_paint.visible
+                && let (Some(shape), Some(cursor_image)) = (
+                    cursor_for_paint.shape.as_ref(),
+                    cursor_image_for_paint.as_ref(),
+                )
+                && let Some(cursor_bounds) =
+                    cursor_bounds(image_bounds, width, height, &cursor_for_paint, shape)
+            {
+                let cursor_image: Arc<RenderImage> = Arc::clone(cursor_image);
+                let _ = window.paint_image(
+                    cursor_bounds,
+                    Corners::all(px(0.0)),
+                    cursor_image,
+                    0,
+                    false,
+                );
+            }
+        },
+    )
+    .when(
+        should_hide_system_cursor(&cursor, cursor_image.is_some()),
+        |element| element.cursor(CursorStyle::None),
+    )
+    .size_full()
+}
+
+fn paint_remote_desktop_surface(
+    window: &mut Window,
+    image_bounds: Bounds<Pixels>,
+    surface: &RemoteDesktopFrameSurface,
+) {
+    debug_assert!(surface.generation > 0);
+    let diagnostics_enabled = remote_desktop_view_diagnostics_enabled();
+    let upload_started_at = diagnostics_enabled.then(Instant::now);
+    let mut upload_count = 0usize;
+    let mut upload_bytes = 0usize;
+    let mut upload_pixels = 0u64;
+    let mut largest_upload_pixels = 0u64;
+    let renderer_resource_generation = window.renderer_resource_generation();
+    let updates = surface.pending_texture_uploads(renderer_resource_generation);
+    let mut uploaded_count = 0usize;
+    for update in &updates {
+        let rect_pixels =
+            u64::from(update.rect.width).saturating_mul(u64::from(update.rect.height));
+        let rect_bytes = update.bytes.len();
+        let update_bounds = Bounds::new(
+            point(
+                DevicePixels(update.rect.x as i32),
+                DevicePixels(update.rect.y as i32),
+            ),
+            size(
+                DevicePixels(update.rect.width as i32),
+                DevicePixels(update.rect.height as i32),
+            ),
+        );
+        if window
+            .update_dynamic_texture(&surface.texture, update_bounds, update.bytes.as_ref())
+            .is_ok()
+        {
+            uploaded_count = uploaded_count.saturating_add(1);
+            upload_count = upload_count.saturating_add(1);
+            upload_bytes = upload_bytes.saturating_add(rect_bytes);
+            upload_pixels = upload_pixels.saturating_add(rect_pixels);
+            largest_upload_pixels = largest_upload_pixels.max(rect_pixels);
+        } else {
+            break;
+        }
+    }
+    if uploaded_count > 0 {
+        // Confirm the successful prefix once so paint does not lock and compact queues per region.
+        surface.acknowledge_texture_uploads(&updates[..uploaded_count]);
+    }
+    if let Some(upload_started_at) = upload_started_at
+        && upload_count > 0
+    {
+        let frame_pixels =
+            u64::from(surface.size.width).saturating_mul(u64::from(surface.size.height));
+        let upload_ratio_per_mille = ratio_per_mille(upload_pixels, frame_pixels);
+        let largest_ratio_per_mille = ratio_per_mille(largest_upload_pixels, frame_pixels);
+        eprintln!(
+            "[oxideterm:remote-desktop-paint] gen={} uploads={} upload_bytes={} upload_pixels={} upload_ratio_per_mille={} largest_upload_ratio_per_mille={} upload_us={}",
+            surface.generation,
+            upload_count,
+            upload_bytes,
+            upload_pixels,
+            upload_ratio_per_mille,
+            largest_ratio_per_mille,
+            duration_micros_u64(upload_started_at.elapsed()),
+        );
+    }
+    let texture = Arc::clone(&surface.texture);
+    let _ = window.paint_dynamic_texture(image_bounds, Corners::all(px(0.0)), texture, false);
+}
+
+fn remote_desktop_view_diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os(REMOTE_DESKTOP_DIAGNOSTICS_ENV).is_some())
+}
+
+fn duration_micros_u64(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn ratio_per_mille(value: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    value.saturating_mul(1_000) / total
+}
+
+fn should_hide_system_cursor(
+    cursor: &RemoteDesktopCursorState,
+    cursor_image_available: bool,
+) -> bool {
+    !cursor.visible || cursor_image_available
+}
+
+fn remote_desktop_viewport_probe(geometry: SharedRemoteDesktopGeometry) -> impl IntoElement {
+    canvas(
+        move |bounds, _window: &mut Window, _cx| {
+            // The placeholder has no remote framebuffer yet, but the app can
+            // still use this measured viewport to request the initial desktop
+            // size before starting the helper.
+            geometry.update(
+                None,
+                None,
+                Some(oxideterm_remote_desktop::RemoteDesktopSize::clamped(
+                    f32::from(bounds.size.width).round() as u32,
+                    f32::from(bounds.size.height).round() as u32,
+                )),
+            );
+            bounds
+        },
+        |_bounds, _state, _window: &mut Window, _cx| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+fn cursor_bounds(
+    image_bounds: Bounds<Pixels>,
+    frame_width: u32,
+    frame_height: u32,
+    cursor: &RemoteDesktopCursorState,
+    shape: &RemoteDesktopCursorShape,
+) -> Option<Bounds<Pixels>> {
+    if frame_width == 0 || frame_height == 0 {
+        return None;
+    }
+    let scale_x = f32::from(image_bounds.size.width) / frame_width as f32;
+    let scale_y = f32::from(image_bounds.size.height) / frame_height as f32;
+    let left = (cursor.x as f32 - shape.hotspot_x as f32) * scale_x;
+    let top = (cursor.y as f32 - shape.hotspot_y as f32) * scale_y;
+    Some(Bounds::new(
+        point(
+            image_bounds.origin.x + px(left),
+            image_bounds.origin.y + px(top),
+        ),
+        size(
+            px(shape.size.width as f32 * scale_x),
+            px(shape.size.height as f32 * scale_y),
+        ),
+    ))
+}
+
+fn placeholder_body(
+    tokens: &ThemeTokens,
+    status: RemoteDesktopSessionStatus,
+    message: Option<String>,
+    geometry: Option<SharedRemoteDesktopGeometry>,
+) -> AnyElement {
+    let title = match status {
+        RemoteDesktopSessionStatus::Idle => "Remote desktop is idle",
+        RemoteDesktopSessionStatus::Connecting => "Opening remote desktop",
+        RemoteDesktopSessionStatus::Reconnecting => "Reconnecting remote desktop",
+        RemoteDesktopSessionStatus::Disconnected => "Remote desktop disconnected",
+        RemoteDesktopSessionStatus::Connected | RemoteDesktopSessionStatus::Failed => {
+            "Remote desktop"
+        }
+    };
+
+    div()
+        .size_full()
+        .relative()
+        .child(empty_state(tokens, "RD", title, message, None))
+        .when_some(geometry, |element, geometry| {
+            element.child(remote_desktop_viewport_probe(geometry))
+        })
+        .into_any_element()
+}
+
+fn error_body(tokens: &ThemeTokens, message: Option<String>) -> AnyElement {
+    error_state(
+        tokens,
+        "!",
+        "Remote desktop failed",
+        message.or_else(|| Some("The helper reported a connection failure.".to_string())),
+        None,
+    )
+    .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnecting_session_keeps_last_frame_visible() {
+        assert!(should_render_remote_frame(
+            RemoteDesktopSessionStatus::Reconnecting,
+            true
+        ));
+        assert!(!should_render_remote_frame(
+            RemoteDesktopSessionStatus::Reconnecting,
+            false
+        ));
+    }
+}

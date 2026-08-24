@@ -1,0 +1,11 @@
+[package]
+name = "oxideterm-quick-commands"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+oxideterm-atomic-file = { path = "../oxideterm-atomic-file" }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

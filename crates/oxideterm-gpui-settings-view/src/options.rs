@@ -1,0 +1,569 @@
+use std::path::Path;
+
+use oxideterm_gpui_ui::select::SelectAnchorId;
+use oxideterm_i18n::I18n;
+use oxideterm_settings::{
+    AiThinkingStyle, AnimationSpeed, BackgroundFit, ConflictAction,
+    CursorStyle as SettingsCursorStyle, FontFamily, IdeAgentMode, Language, PersistedSettings,
+    TerminalBackspaceSequence, TerminalDeleteSequence, TerminalEncoding, UiDensity, UpdateChannel,
+    UpdateProxyMode, UpdateProxyProtocol,
+};
+pub use oxideterm_settings_model::theme_display_name;
+use oxideterm_theme::BUILT_IN_THEMES;
+
+use crate::{SettingsBackgroundTabIcon, SettingsSlider};
+
+pub fn set_terminal_cursor_blink(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.cursor_blink = value;
+}
+
+pub fn set_show_terminal_performance_overlay(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.show_fps_overlay = value;
+}
+
+pub fn set_highlight_tab_on_new_output(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.highlight_tab_on_new_output = value;
+}
+
+pub fn set_terminal_smooth_scroll(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.smooth_scroll = value;
+}
+
+pub fn set_paste_protection(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.paste_protection = value;
+}
+
+pub fn set_smart_copy(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.smart_copy = value;
+}
+
+pub fn set_copy_on_select(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.copy_on_select = value;
+}
+
+pub fn set_osc52_clipboard(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.osc52_clipboard = value;
+}
+
+pub fn set_osc52_clipboard_read(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.osc52_clipboard_read = value;
+}
+
+pub fn set_middle_click_paste(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.middle_click_paste = value;
+}
+
+pub fn set_right_click_paste(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.right_click_paste = value;
+}
+
+pub fn set_open_links_with_modifier(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.open_links_with_modifier = value;
+}
+
+pub fn set_detect_file_paths_as_links(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.detect_file_paths_as_links = value;
+}
+
+pub fn set_selection_requires_shift(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.selection_requires_shift = value;
+}
+
+pub fn set_free_type_mode(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.free_type_mode = value;
+}
+
+pub fn set_font_ligatures(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.font_ligatures = value;
+}
+
+pub fn compact_decimal(value: f64) -> String {
+    let text = format!("{value:.1}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+pub fn font_family_options() -> &'static [FontFamily] {
+    &[
+        FontFamily::Cascadia,
+        FontFamily::Consolas,
+        FontFamily::Menlo,
+        FontFamily::Custom,
+    ]
+}
+
+pub fn terminal_cjk_font_options() -> &'static [&'static str] {
+    &[
+        "",
+        "Sarasa Fixed SC",
+        "Noto Sans Mono CJK SC",
+        "Noto Sans Mono CJK TC",
+        "Noto Sans Mono CJK JP",
+        "Noto Sans Mono CJK KR",
+        "PingFang SC",
+        "Hiragino Sans GB",
+        "Microsoft YaHei UI",
+        "Malgun Gothic",
+    ]
+}
+
+pub fn terminal_encoding_options() -> &'static [TerminalEncoding] {
+    &[
+        TerminalEncoding::Utf8,
+        TerminalEncoding::Gbk,
+        TerminalEncoding::Gb18030,
+        TerminalEncoding::Big5,
+        TerminalEncoding::ShiftJis,
+        TerminalEncoding::EucJp,
+        TerminalEncoding::EucKr,
+        TerminalEncoding::Windows1252,
+    ]
+}
+
+pub fn terminal_backspace_sequence_options() -> &'static [TerminalBackspaceSequence] {
+    &[
+        TerminalBackspaceSequence::Delete,
+        TerminalBackspaceSequence::ControlH,
+    ]
+}
+
+pub fn terminal_delete_sequence_options() -> &'static [TerminalDeleteSequence] {
+    &[
+        TerminalDeleteSequence::Csi3Tilde,
+        TerminalDeleteSequence::Delete,
+        TerminalDeleteSequence::ControlH,
+    ]
+}
+
+pub fn cursor_style_options() -> &'static [SettingsCursorStyle] {
+    &[
+        SettingsCursorStyle::Block,
+        SettingsCursorStyle::Underline,
+        SettingsCursorStyle::Bar,
+    ]
+}
+
+pub fn density_options() -> &'static [UiDensity] {
+    &[
+        UiDensity::Compact,
+        UiDensity::Comfortable,
+        UiDensity::Spacious,
+    ]
+}
+
+pub fn animation_options() -> &'static [AnimationSpeed] {
+    &[
+        AnimationSpeed::Off,
+        AnimationSpeed::Reduced,
+        AnimationSpeed::Normal,
+        AnimationSpeed::Fast,
+    ]
+}
+
+pub fn background_fit_options() -> &'static [BackgroundFit] {
+    &[
+        BackgroundFit::Cover,
+        BackgroundFit::Contain,
+        BackgroundFit::Fill,
+        BackgroundFit::Tile,
+    ]
+}
+
+pub fn is_supported_background_image(path: &Path) -> bool {
+    // Keep callers on the established settings-view API while validation lives
+    // beside the gallery storage implementation.
+    oxideterm_settings::is_supported_background_image(path)
+}
+
+pub fn background_tab_options() -> &'static [(&'static str, &'static str, SettingsBackgroundTabIcon)]
+{
+    // Mirrors native `tab_background_key` so every renderable tab kind can be
+    // enabled or disabled from Appearance settings.
+    &[
+        (
+            "terminal",
+            "settings_view.terminal.bg_tab_terminal",
+            SettingsBackgroundTabIcon::Terminal,
+        ),
+        (
+            "local_terminal",
+            "settings_view.terminal.bg_tab_local",
+            SettingsBackgroundTabIcon::Monitor,
+        ),
+        (
+            "file_manager",
+            "settings_view.terminal.bg_tab_files",
+            SettingsBackgroundTabIcon::Folder,
+        ),
+        (
+            "launcher",
+            "settings_view.terminal.bg_tab_launcher",
+            SettingsBackgroundTabIcon::Rocket,
+        ),
+        (
+            "graphics",
+            "settings_view.terminal.bg_tab_graphics",
+            SettingsBackgroundTabIcon::Monitor,
+        ),
+        (
+            "runtime",
+            "settings_view.terminal.bg_tab_runtime",
+            SettingsBackgroundTabIcon::Gauge,
+        ),
+        (
+            "connection_monitor",
+            "settings_view.terminal.bg_tab_monitor",
+            SettingsBackgroundTabIcon::Activity,
+        ),
+        (
+            "topology",
+            "settings_view.terminal.bg_tab_topology",
+            SettingsBackgroundTabIcon::Network,
+        ),
+        (
+            "notification_center",
+            "settings_view.terminal.bg_tab_notifications",
+            SettingsBackgroundTabIcon::Bell,
+        ),
+        (
+            "sftp",
+            "settings_view.terminal.bg_tab_sftp",
+            SettingsBackgroundTabIcon::FolderInput,
+        ),
+        (
+            "ide",
+            "settings_view.terminal.bg_tab_ide",
+            SettingsBackgroundTabIcon::Code2,
+        ),
+        (
+            "forwards",
+            "settings_view.terminal.bg_tab_forwards",
+            SettingsBackgroundTabIcon::ArrowLeftRight,
+        ),
+        (
+            "session_manager",
+            "settings_view.terminal.bg_tab_sessions",
+            SettingsBackgroundTabIcon::ListTree,
+        ),
+        (
+            "remote_desktop",
+            "settings_view.terminal.bg_tab_remote_desktop",
+            SettingsBackgroundTabIcon::Monitor,
+        ),
+        (
+            "settings",
+            "settings_view.terminal.bg_tab_settings",
+            SettingsBackgroundTabIcon::Settings,
+        ),
+    ]
+}
+
+// The built-in theme roster is reduced to the default dark theme. The id list
+// stays a constant because the command palette still partitions theme entries
+// through `is_oxide_theme` and `built_in_theme_exists`.
+pub const OXIDE_THEME_IDS: &[&str] = &["default"];
+
+pub fn is_oxide_theme(id: &str) -> bool {
+    OXIDE_THEME_IDS.contains(&id)
+}
+
+pub fn built_in_theme_exists(id: &str) -> bool {
+    BUILT_IN_THEMES.iter().any(|theme| theme.id == id)
+}
+
+pub fn set_terminal_scrollback(settings: &mut PersistedSettings, value: i64) {
+    settings.terminal.scrollback = value;
+}
+
+pub fn set_load_shell_profile(settings: &mut PersistedSettings, value: bool) {
+    settings.local_terminal.load_shell_profile = value;
+}
+
+pub fn set_oh_my_posh(settings: &mut PersistedSettings, value: bool) {
+    settings.local_terminal.oh_my_posh_enabled = value;
+}
+
+pub fn set_connection_default_port(settings: &mut PersistedSettings, value: i64) {
+    settings.connection_defaults.port = value;
+}
+
+pub fn set_connection_idle_timeout(settings: &mut PersistedSettings, value: i64) {
+    settings.connection_pool.idle_timeout_secs = value;
+}
+
+pub fn set_ssh_config_auto_load_hosts(settings: &mut PersistedSettings, value: bool) {
+    settings.ssh_config.auto_load_hosts = value;
+}
+
+pub fn set_ssh_config_auto_sync_hosts(settings: &mut PersistedSettings, value: bool) {
+    settings.ssh_config.auto_sync_hosts = value;
+}
+
+pub fn set_ssh_config_allow_proxy_command(settings: &mut PersistedSettings, value: bool) {
+    settings.ssh_config.allow_proxy_command = value;
+}
+
+pub fn sftp_concurrent_options() -> &'static [i64] {
+    &[1, 2, 3, 4, 5, 6, 8, 10]
+}
+
+pub fn sftp_directory_parallelism_options() -> &'static [i64] {
+    &[1, 2, 3, 4, 5, 6, 8, 10, 12, 16]
+}
+
+pub fn sftp_transfer_count_label(i18n: &I18n, count: i64) -> String {
+    let key = if count == 1 {
+        "settings_view.sftp.transfer_count_one"
+    } else {
+        "settings_view.sftp.transfer_count_other"
+    };
+    i18n.t(key).replace("{{count}}", &count.to_string())
+}
+
+pub fn set_reconnect_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.reconnect.enabled = value;
+}
+
+pub fn set_reconnect_max_attempts(settings: &mut PersistedSettings, value: i64) {
+    settings.reconnect.max_attempts = value;
+}
+
+pub fn set_reconnect_base_delay(settings: &mut PersistedSettings, value: i64) {
+    settings.reconnect.base_delay_ms = value;
+}
+
+pub fn set_reconnect_max_delay(settings: &mut PersistedSettings, value: i64) {
+    settings.reconnect.max_delay_ms = value;
+}
+
+pub fn set_sftp_concurrent(settings: &mut PersistedSettings, value: i64) {
+    settings.sftp.max_concurrent_transfers = value;
+}
+
+pub fn set_sftp_directory_parallelism(settings: &mut PersistedSettings, value: i64) {
+    settings.sftp.directory_parallelism = value;
+}
+
+pub fn set_sftp_speed_limit_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.sftp.speed_limit_enabled = value;
+}
+
+pub fn set_sftp_speed_limit_kbps(settings: &mut PersistedSettings, value: i64) {
+    settings.sftp.speed_limit_kbps = value;
+}
+
+pub fn set_ide_auto_save(settings: &mut PersistedSettings, value: bool) {
+    settings.ide.auto_save = value;
+}
+
+pub fn set_ide_word_wrap(settings: &mut PersistedSettings, value: bool) {
+    settings.ide.word_wrap = value;
+}
+
+pub fn set_ide_font_size(settings: &mut PersistedSettings, value: i64) {
+    settings.ide.font_size = Some(value);
+}
+
+pub fn set_ide_line_height_percent(settings: &mut PersistedSettings, value: i64) {
+    settings.ide.line_height = Some(value as f64 / 100.0);
+}
+
+pub fn set_command_bar_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.enabled = value;
+}
+
+pub fn set_command_bar_git_status(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.git_status = value;
+}
+
+pub fn set_command_bar_project_tasks(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.project_tasks = value;
+}
+
+pub fn set_command_bar_current_directory_awareness(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.current_directory_awareness = value;
+}
+
+pub fn set_command_bar_show_current_directory(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.show_current_directory = value;
+}
+
+pub fn set_quick_commands_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.quick_commands_enabled = value;
+}
+
+pub fn set_quick_bar_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.quick_bar_enabled = value;
+}
+
+pub fn set_quick_commands_confirm(settings: &mut PersistedSettings, value: bool) {
+    settings
+        .terminal
+        .command_bar
+        .quick_commands_confirm_before_run = value;
+}
+
+pub fn set_quick_commands_toast(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_bar.quick_commands_show_toast = value;
+}
+
+pub fn set_terminal_trigger_shell_execution(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.triggers.explicit_shell_enabled = value;
+}
+
+pub fn set_diagnostics_debug_logging(settings: &mut PersistedSettings, value: bool) {
+    settings.diagnostics.debug_logging = value;
+}
+
+pub fn set_autosuggest_local_history(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.autosuggest.local_shell_history = value;
+}
+
+pub fn set_command_marks_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_marks.enabled = value;
+}
+
+pub fn set_command_marks_hover_actions(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_marks.show_hover_actions = value;
+}
+
+pub fn set_in_band_transfer_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.in_band_transfer.enabled = value;
+}
+
+pub fn set_in_band_transfer_allow_directory(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.in_band_transfer.allow_directory = value;
+}
+
+pub fn set_in_band_transfer_max_chunk_bytes(settings: &mut PersistedSettings, value: i64) {
+    settings.terminal.in_band_transfer.max_chunk_bytes = value;
+}
+
+pub fn set_in_band_transfer_max_file_count(settings: &mut PersistedSettings, value: i64) {
+    settings.terminal.in_band_transfer.max_file_count = value;
+}
+
+pub fn set_in_band_transfer_max_total_bytes(settings: &mut PersistedSettings, value: i64) {
+    settings.terminal.in_band_transfer.max_total_bytes = value;
+}
+
+pub fn set_in_band_transfer_max_total_mb(settings: &mut PersistedSettings, value: i64) {
+    settings.terminal.in_band_transfer.max_total_bytes = value * 1024 * 1024;
+}
+
+pub fn set_terminal_background_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.background_enabled = value;
+}
+
+pub fn settings_slider_anchor_id(slider: SettingsSlider) -> SelectAnchorId {
+    match slider {
+        SettingsSlider::TerminalFontSize => SelectAnchorId::SettingsTerminalFontSizeSlider,
+        SettingsSlider::AppearanceUiFontSize => SelectAnchorId::SettingsAppearanceUiFontSizeSlider,
+        SettingsSlider::AppearanceBorderRadius => {
+            SelectAnchorId::SettingsAppearanceBorderRadiusSlider
+        }
+        SettingsSlider::OnboardingBorderRadius => SelectAnchorId::OnboardingBorderRadiusSlider,
+        SettingsSlider::VersionMigrationBorderRadius => {
+            SelectAnchorId::VersionMigrationBorderRadiusSlider
+        }
+        SettingsSlider::AppearanceWindowOpacity => {
+            SelectAnchorId::SettingsAppearanceWindowOpacitySlider
+        }
+        SettingsSlider::AppearanceBackgroundOpacity => {
+            SelectAnchorId::SettingsAppearanceBackgroundOpacitySlider
+        }
+        SettingsSlider::AppearanceBackgroundBlur => {
+            SelectAnchorId::SettingsAppearanceBackgroundBlurSlider
+        }
+    }
+}
+
+pub fn language_options() -> [Language; 3] {
+    [Language::En, Language::ZhCn, Language::ZhTw]
+}
+
+pub fn cycle_sftp_conflict(settings: &mut PersistedSettings) {
+    settings.sftp.conflict_action = match settings.sftp.conflict_action {
+        ConflictAction::Ask => ConflictAction::Overwrite,
+        ConflictAction::Overwrite => ConflictAction::Skip,
+        ConflictAction::Skip => ConflictAction::Rename,
+        ConflictAction::Rename => ConflictAction::Ask,
+    };
+}
+
+pub fn cycle_ide_agent_mode(settings: &mut PersistedSettings) {
+    settings.ide.agent_mode = match settings.ide.agent_mode {
+        IdeAgentMode::Ask => IdeAgentMode::Enabled,
+        IdeAgentMode::Enabled => IdeAgentMode::Disabled,
+        IdeAgentMode::Disabled => IdeAgentMode::Ask,
+    };
+}
+
+pub fn update_channel_label(channel: UpdateChannel, i18n: &I18n) -> String {
+    match channel {
+        UpdateChannel::Stable => i18n.t("settings_view.help.channel_stable"),
+        UpdateChannel::Beta => i18n.t("settings_view.help.channel_beta"),
+    }
+}
+
+pub fn update_proxy_mode_label(mode: UpdateProxyMode, i18n: &I18n) -> String {
+    match mode {
+        UpdateProxyMode::Direct => i18n.t("settings_view.help.update_proxy_mode_direct"),
+        UpdateProxyMode::Application => i18n.t("settings_view.help.update_proxy_mode_application"),
+        UpdateProxyMode::System => i18n.t("settings_view.help.update_proxy_mode_system"),
+        UpdateProxyMode::Custom => i18n.t("settings_view.help.update_proxy_mode_custom"),
+    }
+}
+
+pub fn update_proxy_protocol_label(protocol: UpdateProxyProtocol, i18n: &I18n) -> String {
+    match protocol {
+        UpdateProxyProtocol::Http => i18n.t("settings_view.help.update_proxy_protocol_http"),
+        UpdateProxyProtocol::Https => i18n.t("settings_view.help.update_proxy_protocol_https"),
+        UpdateProxyProtocol::Socks5 => i18n.t("settings_view.help.update_proxy_protocol_socks5"),
+    }
+}
+
+pub fn terminal_encoding_label(encoding: TerminalEncoding) -> String {
+    match encoding {
+        TerminalEncoding::Utf8 => "UTF-8",
+        TerminalEncoding::Gbk => "GBK",
+        TerminalEncoding::Gb18030 => "GB18030",
+        TerminalEncoding::Big5 => "Big5",
+        TerminalEncoding::ShiftJis => "Shift_JIS",
+        TerminalEncoding::EucJp => "EUC-JP",
+        TerminalEncoding::EucKr => "EUC-KR",
+        TerminalEncoding::Windows1252 => "Windows-1252",
+    }
+    .to_string()
+}
+
+pub fn terminal_backspace_sequence_label(sequence: TerminalBackspaceSequence) -> &'static str {
+    match sequence {
+        TerminalBackspaceSequence::Delete => "DEL (0x7F)",
+        TerminalBackspaceSequence::ControlH => "Ctrl+H (0x08)",
+    }
+}
+
+pub fn terminal_delete_sequence_label(sequence: TerminalDeleteSequence) -> &'static str {
+    match sequence {
+        TerminalDeleteSequence::Csi3Tilde => "CSI 3~",
+        TerminalDeleteSequence::Delete => "DEL (0x7F)",
+        TerminalDeleteSequence::ControlH => "Ctrl+H (0x08)",
+    }
+}
+
+pub fn cursor_style_label(style: SettingsCursorStyle, i18n: &I18n) -> String {
+    match style {
+        SettingsCursorStyle::Block => i18n.t("settings_view.terminal.cursor_block"),
+        SettingsCursorStyle::Underline => i18n.t("settings_view.terminal.cursor_underline"),
+        SettingsCursorStyle::Bar => i18n.t("settings_view.terminal.cursor_bar"),
+    }
+}
+
+pub fn background_fit_label(fit: BackgroundFit, i18n: &I18n) -> String {
+    match fit {
+        BackgroundFit::Cover => i18n.t("settings_view.terminal.bg_fit_cover"),
+        BackgroundFit::Contain => i18n.t("settings_view.terminal.bg_fit_contain"),
+        BackgroundFit::Fill => i18n.t("settings_view.terminal.bg_fit_fill"),
+        BackgroundFit::Tile => i18n.t("settings_view.terminal.bg_fit_tile"),
+    }
+}

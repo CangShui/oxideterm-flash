@@ -1,0 +1,37 @@
+[package]
+name = "oxideterm-ssh"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+base64.workspace = true
+dashmap.workspace = true
+dirs.workspace = true
+oxideterm-backend-classification = { path = "../oxideterm-backend-classification" }
+oxideterm-connection-monitor = { path = "../oxideterm-connection-monitor" }
+oxideterm-connections = { path = "../oxideterm-connections" }
+oxideterm-portable-runtime = { path = "../oxideterm-portable-runtime" }
+oxideterm-sftp = { path = "../oxideterm-sftp" }
+oxideterm-topology = { path = "../oxideterm-topology" }
+oxideterm-x11-forwarding = { path = "../oxideterm-x11-forwarding" }
+parking_lot.workspace = true
+russh = { path = "../russh" }
+serde.workspace = true
+sha2.workspace = true
+signature.workspace = true
+ssh-encoding.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libgssapi.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[dev-dependencies]
+rand10.workspace = true

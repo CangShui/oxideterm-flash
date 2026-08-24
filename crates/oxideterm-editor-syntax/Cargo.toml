@@ -1,0 +1,14 @@
+[package]
+name = "oxideterm-editor-syntax"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+oxideterm-editor-core = { path = "../oxideterm-editor-core" }
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-fish.workspace = true
+tree-sitter-powershell.workspace = true
+tree-sitter-zsh.workspace = true

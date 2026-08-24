@@ -1,0 +1,35 @@
+[package]
+name = "oxideterm-gpui-terminal"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+chrono.workspace = true
+futures.workspace = true
+gpui.workspace = true
+image.workspace = true
+oxideterm-render-policy = { path = "../oxideterm-render-policy" }
+oxideterm-gpui-ui = { path = "../oxideterm-gpui-ui" }
+oxideterm-modem-transfer = { path = "../oxideterm-modem-transfer" }
+oxideterm-settings = { path = "../oxideterm-settings" }
+oxideterm-ssh = { path = "../oxideterm-ssh" }
+oxideterm-terminal = { path = "../oxideterm-terminal" }
+oxideterm-terminal-recording = { path = "../oxideterm-terminal-recording" }
+oxideterm-terminal-triggers = { path = "../oxideterm-terminal-triggers" }
+oxideterm-terminal-semantic = { path = "../oxideterm-terminal-semantic", features = ["shell-syntax"] }
+oxideterm-terminal-unicode = { path = "../oxideterm-terminal-unicode" }
+oxideterm-theme = { path = "../oxideterm-theme" }
+oxideterm-trzsz = { path = "../oxideterm-trzsz" }
+parking_lot.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+tempfile = "3.23"
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

@@ -1,0 +1,1229 @@
+use super::*;
+
+// Match the browser slider debounce while keeping exactly one retained task.
+const BACKGROUND_BLUR_COMMIT_DELAY: Duration = Duration::from_millis(150);
+
+impl WorkspaceApp {
+    pub(in crate::workspace) fn settings_select_trigger(
+        &self,
+        select_id: SettingsSelect,
+        value: String,
+        placeholder: bool,
+        disabled: bool,
+    ) -> Div {
+        let focused = self.open_settings_select == Some(select_id);
+        // Browser focus-visible depends on keyboard vs pointer origin. Keep the
+        // setting select trigger path shared so individual settings pages do
+        // not reimplement the same modality check.
+        select_trigger_with_focus_visible(
+            &self.tokens,
+            value,
+            placeholder,
+            disabled,
+            browser_behavior::browser_focus_visible(focused, self.settings_select_focus_origin),
+        )
+    }
+
+    pub(in crate::workspace) fn settings_select_control(
+        &self,
+        select_id: SettingsSelect,
+        value: String,
+        disabled: bool,
+        width: Option<f32>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.settings_select_control_with_trigger_style(
+            select_id,
+            value,
+            disabled,
+            width,
+            |trigger| trigger,
+            cx,
+        )
+    }
+
+    pub(in crate::workspace) fn settings_select_control_with_trigger_style(
+        &self,
+        select_id: SettingsSelect,
+        value: String,
+        disabled: bool,
+        width: Option<f32>,
+        trigger_style: impl FnOnce(Div) -> Div,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let anchor_id = select_id.anchor_id();
+        let workspace = cx.entity();
+        let trigger = trigger_style(
+            self.settings_select_trigger(select_id, value, false, disabled),
+        )
+        .when(!disabled, |trigger| {
+            trigger.cursor_pointer().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.open_settings_select_from_pointer(select_id, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+        });
+        // Settings selects all share the same Radix-like trigger contract:
+        // pointer-open sets focus origin, anchor bounds are refreshed in the
+        // same paint pass, and scroll-close is owned by the settings surface.
+        div()
+            .relative()
+            .min_w(px(0.0))
+            .when_some(width, |control, width| control.w(px(width)).max_w_full())
+            .when(width.is_none(), |control| control.w_full())
+            .child(select_anchor_probe(
+                anchor_id,
+                trigger,
+                move |anchor, _window, cx| {
+                    let _ = workspace.update(cx, |this, cx| {
+                        this.update_select_anchor(anchor, cx);
+                    });
+                },
+            ))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn settings_card(
+        &self,
+        title_key: &str,
+        _description_key: &str,
+        rows: Vec<AnyElement>,
+    ) -> AnyElement {
+        let card = div()
+            .w_full()
+            .min_w(px(0.0))
+            .rounded(px(self.tokens.radii.lg))
+            .border_1()
+            .border_color(rgb(self.tokens.ui.border))
+            .p(px(self.tokens.metrics.settings_card_padding))
+            .flex()
+            .flex_col()
+            .gap(px(self.tokens.metrics.settings_card_gap))
+            .child(
+                div()
+                    .mb(px(self.tokens.metrics.settings_card_title_nudge_y))
+                    .text_size(px(self.tokens.metrics.ui_text_sm))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(self.tokens.ui.text))
+                    .child(self.i18n.t(title_key).to_uppercase()),
+            )
+            .children(rows);
+        self.settings_card_surface(card, self.tokens.ui.bg_card)
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn plain_settings_card(&self, rows: Vec<AnyElement>) -> AnyElement {
+        let card = div()
+            .w_full()
+            .min_w(px(0.0))
+            .rounded(px(self.tokens.radii.lg))
+            .border_1()
+            .border_color(rgb(self.tokens.ui.border))
+            .p(px(self.tokens.metrics.settings_card_padding))
+            .flex()
+            .flex_col()
+            .gap(px(self.tokens.metrics.settings_card_gap))
+            .children(rows);
+        self.settings_card_surface(card, self.tokens.ui.bg_card)
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn terminal_input_settings_card(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut rows = div()
+            .w_full()
+            .min_w(px(0.0))
+            .rounded(px(self.tokens.radii.lg))
+            .border_1()
+            .border_color(rgb(self.tokens.ui.border))
+            .p(px(self.tokens.metrics.settings_card_padding))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .mb(px(16.0))
+                    .text_size(px(self.tokens.metrics.ui_text_sm))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(self.tokens.ui.text))
+                    .child(
+                        self.i18n
+                            .t("settings_view.terminal.input_safety")
+                            .to_uppercase(),
+                    ),
+            )
+            .child(self.checkbox_row(
+                "settings_view.terminal.paste_protection",
+                "settings_view.terminal.paste_protection_hint",
+                settings.terminal.paste_protection,
+                set_paste_protection,
+                cx,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.osc52_clipboard",
+                    "settings_view.terminal.osc52_clipboard_hint",
+                    settings.terminal.osc52_clipboard,
+                    set_osc52_clipboard,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.osc52_clipboard_read",
+                    "settings_view.terminal.osc52_clipboard_read_hint",
+                    settings.terminal.osc52_clipboard_read,
+                    set_osc52_clipboard_read,
+                    cx,
+                ),
+                16.0,
+            ));
+
+        if !cfg!(target_os = "macos") {
+            rows = rows.child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.smart_copy",
+                    "settings_view.terminal.smart_copy_hint",
+                    settings.terminal.smart_copy,
+                    set_smart_copy,
+                    cx,
+                ),
+                16.0,
+            ));
+        }
+
+        let rows = rows
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.copy_on_select",
+                    "settings_view.terminal.copy_on_select_hint",
+                    settings.terminal.copy_on_select,
+                    set_copy_on_select,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.middle_click_paste",
+                    "settings_view.terminal.middle_click_paste_hint",
+                    settings.terminal.middle_click_paste,
+                    set_middle_click_paste,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.right_click_paste",
+                    "settings_view.terminal.right_click_paste_hint",
+                    settings.terminal.right_click_paste,
+                    set_right_click_paste,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.open_links_with_modifier",
+                    "settings_view.terminal.open_links_with_modifier_hint",
+                    settings.terminal.open_links_with_modifier,
+                    set_open_links_with_modifier,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.detect_file_paths_as_links",
+                    "settings_view.terminal.detect_file_paths_as_links_hint",
+                    settings.terminal.detect_file_paths_as_links,
+                    set_detect_file_paths_as_links,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.selection_requires_shift",
+                    "settings_view.terminal.selection_requires_shift_hint",
+                    settings.terminal.selection_requires_shift,
+                    set_selection_requires_shift,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(self.settings_row_with_margin(
+                self.checkbox_row(
+                    "settings_view.terminal.free_type_mode",
+                    "settings_view.terminal.free_type_mode_hint",
+                    settings.terminal.free_type_mode,
+                    set_free_type_mode,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(
+                self.settings_row_with_margin(
+                    self.select_setting_row(
+                        "settings_view.terminal.backspace_sequence",
+                        "settings_view.terminal.backspace_sequence_hint",
+                        SettingsSelect::TerminalBackspaceSequence,
+                        terminal_backspace_sequence_label(settings.terminal.backspace_sequence)
+                            .to_string(),
+                        self.tokens.metrics.settings_select_width,
+                        cx,
+                    ),
+                    16.0,
+                ),
+            )
+            .child(self.settings_row_with_margin(
+                self.select_setting_row(
+                    "settings_view.terminal.delete_sequence",
+                    "settings_view.terminal.delete_sequence_hint",
+                    SettingsSelect::TerminalDeleteSequence,
+                    terminal_delete_sequence_label(settings.terminal.delete_sequence).to_string(),
+                    self.tokens.metrics.settings_select_width,
+                    cx,
+                ),
+                16.0,
+            ))
+            .child(
+                div()
+                    .my(px(20.0))
+                    .h(px(1.0))
+                    .w_full()
+                    .bg(rgba((self.tokens.ui.border << 8) | 0x80)),
+            )
+            .child(self.checkbox_row(
+                "settings_view.terminal.autosuggest_local_history",
+                "settings_view.terminal.autosuggest_local_history_hint",
+                settings.terminal.autosuggest.local_shell_history,
+                set_autosuggest_local_history,
+                cx,
+            ));
+        self.settings_card_surface(rows, self.tokens.ui.bg_card)
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn settings_row_with_margin(
+        &self,
+        row: AnyElement,
+        margin_top: f32,
+    ) -> AnyElement {
+        div().mt(px(margin_top)).child(row).into_any_element()
+    }
+
+    pub(in crate::workspace) fn card_title(&self, title_key: &str) -> AnyElement {
+        div()
+            .text_size(px(self.tokens.metrics.ui_text_sm))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(rgb(self.tokens.ui.text))
+            .child(self.i18n.t(title_key).to_uppercase())
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn card_separator(&self) -> AnyElement {
+        div()
+            .h(px(1.0))
+            .w_full()
+            .bg(rgba((self.tokens.ui.border << 8) | 0x80))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn settings_background_active(&self) -> bool {
+        self.background_surface_active("settings")
+    }
+
+    pub(in crate::workspace) fn settings_panel_background(&self, color: u32) -> Rgba {
+        if self.settings_background_active() {
+            rgba((color << 8) | oxideterm_gpui_ui::theme_glass_card_background_alpha(&self.tokens))
+        } else {
+            rgb(color)
+        }
+    }
+
+    pub(in crate::workspace) fn settings_card_surface(&self, card: Div, _color: u32) -> Div {
+        let chrome = oxideterm_gpui_ui::surface_chrome(
+            &self.tokens,
+            oxideterm_gpui_ui::SurfaceOptions::new(oxideterm_gpui_ui::SurfaceKind::Inspector)
+                .padding(oxideterm_gpui_ui::SurfacePadding::None)
+                .has_background_image(self.settings_background_active()),
+        );
+        // Settings cards already own their inner padding and children, so only
+        // shared chrome and theme-aware elevation are applied here.
+        let card = card
+            .rounded(px(chrome.radius))
+            .border_color(chrome.border)
+            .bg(chrome.background);
+        oxideterm_gpui_ui::theme_card_surface_shadow(card, &self.tokens)
+    }
+
+    pub(in crate::workspace) fn text_badge(&self, label: String, color: u32) -> AnyElement {
+        div()
+            .px(px(8.0))
+            .py(px(2.0))
+            .rounded(px(self.tokens.radii.sm))
+            .bg(rgba((color << 8) | 0x1a))
+            .text_size(px(self.tokens.metrics.ui_text_xs))
+            .text_color(rgb(color))
+            .child(label)
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn standard_footer_action_button(
+        &self,
+        label: String,
+        variant: ButtonVariant,
+        action: ConfirmDialogAction,
+        disabled: bool,
+        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        // Tauri DialogFooter buttons are normal shadcn Buttons, but their
+        // focus-visible ring is owned by keyboard navigation rather than mouse
+        // hover. Route activation through the workspace Button guard so
+        // disabled/loading footers cannot dispatch while preserving that ring.
+        self.workspace_confirm_footer_action_button(
+            label,
+            variant,
+            action,
+            disabled,
+            self.standard_confirm_focus(),
+            move |this, event, window, cx| {
+                this.clear_standard_confirm_focus();
+                listener(this, event, window, cx);
+                cx.stop_propagation();
+            },
+            cx,
+        )
+    }
+
+    pub(in crate::workspace) fn split_confirm_footer_button(
+        &self,
+        label: String,
+        action: ConfirmDialogAction,
+        destructive: bool,
+        draw_right_separator: bool,
+    ) -> Div {
+        let text_color = if destructive {
+            self.tokens.ui.error
+        } else {
+            self.tokens.ui.text_muted
+        };
+        let hover_bg = if destructive {
+            rgba((self.tokens.ui.error << 8) | 0x1a)
+        } else {
+            rgba((self.tokens.ui.bg_hover << 8) | 0x80)
+        };
+        let hover_text = if destructive {
+            self.tokens.ui.error
+        } else {
+            self.tokens.ui.text
+        };
+
+        // Some Tauri confirm dialogs use a split footer instead of shadcn
+        // DialogFooter spacing. Use the shared split footer primitive so
+        // settings confirms share button focus-visible behavior.
+        split_footer_button(
+            &self.tokens,
+            label,
+            SplitFooterButtonOptions {
+                text_color: rgb(text_color),
+                hover_text_color: rgb(hover_text),
+                hover_background: hover_bg,
+                font_weight: if destructive {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                },
+                focus_visible: self.standard_confirm_focus() == Some(action),
+                right_separator: draw_right_separator,
+                separator_color: Some(rgba((self.tokens.ui.border << 8) | 0x66)),
+                disabled: false,
+                loading: false,
+                height: None,
+                padding_y: Some(10.0),
+                font_size: Some(self.tokens.metrics.ui_text_sm),
+                edge: SplitFooterButtonEdge::None,
+            },
+        )
+    }
+
+    pub(in crate::workspace) fn split_confirm_footer_action_button(
+        &self,
+        label: String,
+        action: ConfirmDialogAction,
+        destructive: bool,
+        draw_right_separator: bool,
+        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        // Split confirm footers are visually different from DialogFooter, but
+        // Tauri still routes pointer activation through the same Radix action
+        // lifecycle. Keep focus cleanup and event isolation shared with
+        // standard_footer_action_button.
+        self.split_confirm_footer_button(label, action, destructive, draw_right_separator)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    this.clear_standard_confirm_focus();
+                    listener(this, event, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+    }
+
+    pub(in crate::workspace) fn terminal_page_switcher(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pages = TerminalSettingsPage::all();
+        let route = self.settings_workspace.read(cx).route_snapshot();
+        let active_index = pages
+            .iter()
+            .position(|page| *page == route.terminal_page)
+            .unwrap_or(0);
+        let previous_index = pages
+            .iter()
+            .position(|page| *page == route.previous_terminal_page)
+            .unwrap_or(active_index);
+        let mut items = Vec::with_capacity(pages.len());
+        for (page_index, page) in pages.iter().enumerate() {
+            let page_id = *page;
+            let active = route.terminal_page == page_id;
+            let item = oxideterm_gpui_ui::segmented_control_item(
+                &self.tokens,
+                self.i18n.t(page_id.label_key()),
+                active,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    let changed = this
+                        .settings_workspace
+                        .update(cx, |settings, cx| settings.set_terminal_page(page_id, cx));
+                    if changed {
+                        this.begin_user_segmented_control_transition(
+                            selection_motion::TERMINAL_SETTINGS_SWITCHER_ID,
+                            page_index,
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                }),
+            );
+            items.push(item.into_any_element());
+        }
+        oxideterm_gpui_ui::segmented_control(
+            &self.tokens,
+            selection_motion::TERMINAL_SETTINGS_SWITCHER_ID,
+            oxideterm_gpui_ui::SegmentedControlOptions::new(
+                active_index,
+                previous_index,
+                pages.len(),
+            )
+            .user_transition_active(self.segmented_control_user_transition_active(
+                selection_motion::TERMINAL_SETTINGS_SWITCHER_ID,
+                active_index,
+            ))
+            .has_background_image(self.settings_background_active()),
+            items,
+        )
+        .into_any_element()
+    }
+
+    pub(in crate::workspace) fn update_select_anchor(
+        &mut self,
+        anchor: OverlayAnchor,
+        cx: &mut Context<Self>,
+    ) {
+        // Resolve new-connection anchors through their canonical mapping so a
+        // newly added select cannot silently lose its root-mounted overlay.
+        let should_notify = self
+            .open_settings_select
+            .is_some_and(|select| select.anchor_id() == anchor.id)
+            || self
+                .connection_form_state(cx)
+                .open_select
+                .is_some_and(|select| Self::new_connection_select_anchor_id(select) == anchor.id)
+            || (anchor.id == SelectAnchorId::TerminalBroadcastMenu
+                && self.terminal.read(cx).broadcast_menu_open())
+            || (anchor.id == SelectAnchorId::TerminalCommandBar
+                && self.terminal.read(cx).quick_commands.is_open())
+            || (anchor.id == SelectAnchorId::TerminalCwdMenu
+                && self.terminal.read(cx).cwd_picker_open())
+            || (anchor.id == SelectAnchorId::TerminalGitBranchMenu
+                && self.terminal.read(cx).git_panel_open())
+            || (anchor.id == SelectAnchorId::TerminalProjectMenu
+                && self.terminal.read(cx).project_panel_open())
+            || (anchor.id == SelectAnchorId::SessionManagerViewMode
+                && self.session_manager.read(cx).view_mode_menu_open)
+            || (anchor.id == SelectAnchorId::SessionManagerSort
+                && self.session_manager.read(cx).sort_menu_open)
+            || (anchor.id == SelectAnchorId::SessionManagerBatchMove
+                && self.session_manager.read(cx).show_batch_move)
+            || (matches!(anchor.id, SelectAnchorId::RemoteDesktopResizeMenu(_))
+                && self.remote_desktop_resize_menu_tab_id.is_some())
+            || self
+                .settings_slider_drag
+                .is_some_and(|slider| settings_slider_anchor_id(slider) == anchor.id);
+        if !should_notify && !select_anchor_tracks_while_closed(anchor.id) {
+            self.select_anchors.remove(&anchor.id);
+            return;
+        }
+        if self.select_anchors.get(&anchor.id) != Some(&anchor) {
+            self.select_anchors.insert(anchor.id, anchor);
+            if should_notify {
+                cx.notify();
+            }
+        }
+    }
+
+    pub(in crate::workspace) fn handle_settings_input_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(input) = self
+            .settings_workspace
+            .read(cx)
+            .settings_entity_focused_input()
+        {
+            let key = event.keystroke.key.as_str();
+            let modifiers = event.keystroke.modifiers;
+            match key {
+                "escape" if input == SettingsInput::SettingsSearch => {
+                    self.close_settings_search(cx);
+                    return true;
+                }
+                "enter" if input == SettingsInput::SettingsSearch => {
+                    self.activate_first_settings_search_result(cx);
+                    return true;
+                }
+                "escape" | "enter" => {
+                    self.settings_workspace.update(cx, |settings, cx| {
+                        settings.blur_settings_entity_input(cx);
+                    });
+                    self.clear_ime_selection();
+                    self.show_active_input_caret(cx);
+                    return true;
+                }
+                "backspace" | "delete" if !modifiers.platform && !modifiers.control => {
+                    self.settings_workspace.update(cx, |settings, cx| {
+                        settings.pop_settings_entity_input(input, cx);
+                    });
+                    return true;
+                }
+                _ => return true,
+            }
+        }
+        let Some(input) = self.focused_settings_input else {
+            return false;
+        };
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+
+        match key {
+            "escape"
+                if input == SettingsInput::TerminalCommandSpecsJson
+                    && self.terminal_command_specs_editor_open =>
+            {
+                // This input belongs to a workspace modal, so Escape dismisses
+                // the editor instead of leaving an unfocused modal behind.
+                self.close_terminal_command_specs_editor(cx);
+                self.show_active_input_caret(cx);
+                true
+            }
+            "escape" => {
+                self.focused_settings_input = None;
+                self.clear_settings_input_draft(input);
+                self.show_active_input_caret(cx);
+                cx.notify();
+                true
+            }
+            "enter" => {
+                if input.accepts_newline() {
+                    self.settings_input_draft.push('\n');
+                    self.apply_settings_input_draft(input, cx);
+                    return true;
+                }
+                self.focused_settings_input = None;
+                self.clear_settings_input_draft(input);
+                self.show_active_input_caret(cx);
+                cx.notify();
+                true
+            }
+            "backspace" | "delete" if !modifiers.platform && !modifiers.control => {
+                if self.settings_input_draft.pop().is_some() {
+                    // Empty Backspace/Delete does not change the draft value.
+                    self.apply_settings_input_draft(input, cx);
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    pub(in crate::workspace) fn blur_text_inputs(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if self
+            .settings_workspace
+            .update(cx, |settings, cx| settings.blur_settings_entity_input(cx))
+        {
+            self.ime_marked_text = None;
+            self.clear_ime_selection();
+            changed = true;
+        }
+        if let Some(input) = self.focused_settings_input.take() {
+            self.clear_settings_input_draft(input);
+            self.ime_marked_text = None;
+            self.clear_ime_selection();
+            changed = true;
+        }
+        if self.open_settings_select.is_some() {
+            self.ime_marked_text = None;
+            self.close_settings_select();
+            changed = true;
+        }
+        if self.connection_form_state(cx).open_select.is_some() {
+            self.ime_marked_text = None;
+            self.close_new_connection_select(cx);
+            changed = true;
+        }
+        if self
+            .terminal
+            .update(cx, |terminal, _cx| terminal.blur_cast_search())
+        {
+            self.ime_marked_text = None;
+            changed = true;
+        }
+        if self.terminal.read(cx).quick_commands.has_open_or_pending() {
+            self.close_terminal_quick_commands_popover(cx);
+            changed = true;
+        }
+        if self.close_terminal_git_branch_picker(cx) {
+            changed = true;
+        }
+        if self.session_manager.update(cx, |session_manager, cx| {
+            session_manager.clear_input_focus(cx)
+        }) {
+            self.ime_marked_text = None;
+            changed = true;
+        }
+        if self
+            .forwarding
+            .update(cx, |forwarding, _cx| forwarding.clear_input_focus())
+        {
+            self.ime_marked_text = None;
+            changed = true;
+        }
+        if self
+            .file_manager
+            .update(cx, |file_manager, cx| file_manager.clear_input_focus(cx))
+        {
+            self.ime_marked_text = None;
+            changed = true;
+        }
+        if self
+            .launcher
+            .update(cx, |launcher, cx| launcher.clear_input_focus(cx))
+        {
+            self.ime_marked_text = None;
+            changed = true;
+        }
+        if self
+            .sftp_view
+            .update(cx, |sftp, cx| sftp.clear_input_focus(cx))
+        {
+            self.ime_marked_text = None;
+            changed = true;
+        }
+        let blurred_connection_form = self.update_connection_form_state(cx, |state| {
+            let Some(form) = state.form.as_mut() else {
+                return false;
+            };
+            if !form.field_focused {
+                return false;
+            }
+            form.field_focused = false;
+            form.selected_field = None;
+            true
+        });
+        if blurred_connection_form {
+            self.ime_marked_text = None;
+            changed = true;
+        }
+        if changed {
+            self.clear_ime_selection();
+            self.show_active_input_caret(cx);
+            cx.notify();
+        }
+    }
+
+    pub(in crate::workspace) fn update_settings_slider_drag(
+        &mut self,
+        event: &MouseMoveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(slider) = self.settings_slider_drag {
+            self.apply_settings_slider_from_position(slider, f32::from(event.position.x), cx);
+        }
+    }
+
+    pub(in crate::workspace) fn apply_settings_slider_from_position(
+        &mut self,
+        slider: SettingsSlider,
+        x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        match slider {
+            SettingsSlider::TerminalFontSize => {
+                self.set_font_size_from_position(x, cx);
+            }
+            SettingsSlider::AppearanceUiFontSize => {
+                let Some(value) = self.settings_slider_value_from_position(
+                    settings_slider_anchor_id(slider),
+                    x,
+                    APPEARANCE_UI_FONT_SIZE_MIN,
+                    APPEARANCE_UI_FONT_SIZE_MAX,
+                ) else {
+                    return;
+                };
+                let value = value.round() as i64;
+                if self.settings_store.settings().appearance.ui_font_size != value {
+                    self.edit_settings(|settings| settings.appearance.ui_font_size = value, cx);
+                }
+            }
+            SettingsSlider::AppearanceBorderRadius
+            | SettingsSlider::OnboardingBorderRadius
+            | SettingsSlider::VersionMigrationBorderRadius => {
+                let Some(value) = self.settings_slider_value_from_position(
+                    settings_slider_anchor_id(slider),
+                    x,
+                    APPEARANCE_BORDER_RADIUS_MIN,
+                    APPEARANCE_BORDER_RADIUS_MAX,
+                ) else {
+                    return;
+                };
+                let value = value.round() as i64;
+                if self.settings_store.settings().appearance.border_radius != value {
+                    self.edit_settings(|settings| settings.appearance.border_radius = value, cx);
+                }
+            }
+            SettingsSlider::AppearanceWindowOpacity => {
+                let Some(value) = self.settings_slider_value_from_position(
+                    SelectAnchorId::SettingsAppearanceWindowOpacitySlider,
+                    x,
+                    (MIN_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                    (MAX_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                ) else {
+                    return;
+                };
+                let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
+                if self.settings_store.settings().appearance.window_opacity != value {
+                    self.edit_settings(|settings| settings.appearance.window_opacity = value, cx);
+                    // Detached windows consume the same setting on their next frame.
+                    cx.refresh_windows();
+                }
+            }
+            SettingsSlider::AppearanceBackgroundOpacity => {
+                let Some(value) = self.settings_slider_value_from_position(
+                    SelectAnchorId::SettingsAppearanceBackgroundOpacitySlider,
+                    x,
+                    (MIN_TERMINAL_BACKGROUND_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                    (MAX_TERMINAL_BACKGROUND_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                ) else {
+                    return;
+                };
+                let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
+                if self.settings_store.settings().terminal.background_opacity != value {
+                    self.edit_settings(|settings| settings.terminal.background_opacity = value, cx);
+                }
+            }
+            SettingsSlider::AppearanceBackgroundBlur => {
+                self.set_background_blur_preview_from_position(x, cx);
+            }
+        }
+    }
+
+    pub(in crate::workspace) fn finish_settings_slider_drag(&mut self, cx: &mut Context<Self>) {
+        if self.settings_slider_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::workspace) fn focus_settings_input(
+        &mut self,
+        input: SettingsInput,
+        current_value: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_settings_select();
+        let entity_owned_input = self
+            .settings_workspace
+            .read(cx)
+            .settings_entity_input_value(input)
+            .is_some();
+        if entity_owned_input {
+            if let Some(previous_input) = self.focused_settings_input.take() {
+                self.clear_settings_input_draft(previous_input);
+            }
+            self.settings_workspace.update(cx, |settings, cx| {
+                settings.focus_settings_entity_input(input, cx);
+            });
+            self.clear_ime_selection();
+            self.show_active_input_caret(cx);
+            cx.notify();
+            return;
+        }
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.blur_settings_entity_input(cx);
+        });
+        if let Some(previous_input) = self
+            .focused_settings_input
+            .filter(|previous| *previous != input)
+        {
+            self.clear_settings_input_draft(previous_input);
+        }
+        self.focused_settings_input = Some(input);
+        self.clear_ime_selection();
+        self.settings_input_draft = current_value;
+        self.show_active_input_caret(cx);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn close_settings_select(&mut self) {
+        browser_behavior::close_browser_trigger_select(
+            &mut self.open_settings_select,
+            &mut self.settings_select_focus_origin,
+        );
+    }
+
+    pub(in crate::workspace) fn clear_settings_input_draft(&mut self, input: SettingsInput) {
+        if input.is_secret() {
+            zeroize::Zeroize::zeroize(&mut self.settings_input_draft);
+        }
+        self.settings_input_draft.clear();
+    }
+
+    pub(in crate::workspace) fn current_settings_input_value(
+        &self,
+        input: SettingsInput,
+        cx: &Context<Self>,
+    ) -> String {
+        if input.is_secret() {
+            // Generic render/focus snapshots must never duplicate credentials.
+            // Secret owners expose masked views or move the draft at focus.
+            return String::new();
+        }
+        let settings = self.settings_store.settings();
+        if let Some(value) = persisted_settings_input_value(settings, input) {
+            return value;
+        }
+        if let Some(value) = self.terminal_trigger_settings_input_value(input) {
+            return value;
+        }
+        if let Some(value) = self
+            .settings_workspace
+            .read(cx)
+            .settings_entity_input_value(input)
+        {
+            // This copy is only made at an explicit focus/action boundary;
+            // render paths borrow the Entity-owned theme draft directly.
+            return value.to_owned();
+        }
+        match input {
+            SettingsInput::TerminalCommandSpecsJson => {
+                self.terminal_command_specs_editor_initial_value()
+            }
+            SettingsInput::PortableCurrentPassword
+            | SettingsInput::PortableNewPassword
+            | SettingsInput::PortableConfirmPassword => String::new(),
+            SettingsInput::ManagedKeyFilePath
+            | SettingsInput::ManagedKeyFileName
+            | SettingsInput::ManagedKeyFilePassphrase
+            | SettingsInput::ManagedKeyPasteName
+            | SettingsInput::ManagedKeyPastePrivateKey
+            | SettingsInput::ManagedKeyPastePassphrase
+            | SettingsInput::ManagedKeyRenameName
+            | SettingsInput::ConnectionImportTargetGroup => String::new(),
+            SettingsInput::LocalPrivilegeLabel
+            | SettingsInput::LocalPrivilegeUsernameHint
+            | SettingsInput::LocalPrivilegeSecret
+            | SettingsInput::LocalPrivilegePromptPatterns => String::new(),
+            _ => String::new(),
+        }
+    }
+
+    pub(in crate::workspace) fn apply_settings_input_draft(
+        &mut self,
+        input: SettingsInput,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next_settings = self.settings_store.settings().clone();
+        match apply_persisted_settings_input_draft(
+            &mut next_settings,
+            input,
+            &self.settings_input_draft,
+        ) {
+            SettingsInputDraftApply::Applied => {
+                self.edit_settings(move |settings| *settings = next_settings, cx);
+                return;
+            }
+            SettingsInputDraftApply::Invalid => {
+                cx.notify();
+                return;
+            }
+            SettingsInputDraftApply::Unhandled => {}
+        }
+
+        let terminal_trigger_input_draft = self.settings_input_draft.clone();
+        if self.apply_terminal_trigger_settings_input(input, &terminal_trigger_input_draft) {
+            cx.notify();
+            return;
+        }
+        match input {
+            SettingsInput::TerminalCommandSpecsJson => {
+                cx.notify();
+            }
+            SettingsInput::PortableCurrentPassword
+            | SettingsInput::PortableNewPassword
+            | SettingsInput::PortableConfirmPassword => {}
+            SettingsInput::ManagedKeyFilePath
+            | SettingsInput::ManagedKeyFileName
+            | SettingsInput::ManagedKeyFilePassphrase
+            | SettingsInput::ManagedKeyPasteName
+            | SettingsInput::ManagedKeyPastePrivateKey
+            | SettingsInput::ManagedKeyPastePassphrase
+            | SettingsInput::ManagedKeyRenameName
+            | SettingsInput::ConnectionImportTargetGroup => {}
+            SettingsInput::LocalPrivilegeLabel
+            | SettingsInput::LocalPrivilegeUsernameHint
+            | SettingsInput::LocalPrivilegeSecret
+            | SettingsInput::LocalPrivilegePromptPatterns => {}
+            SettingsInput::NetworkProxyPassword
+            | SettingsInput::NetworkProxyTestHost
+            | SettingsInput::NetworkProxyTestPort => {}
+            _ => {
+                cx.notify();
+            }
+        }
+    }
+
+    pub(in crate::workspace) fn edit_highlight_rule(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut HighlightRule),
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_settings(
+            move |settings| {
+                let rules = settings.terminal.effective_highlight_rules_mut();
+                if let Some(rule) = rules.get_mut(index) {
+                    edit(rule);
+                }
+                *rules = reindex_highlight_rules(rules.clone());
+            },
+            cx,
+        );
+    }
+
+    pub(in crate::workspace) fn add_highlight_rule(&mut self, cx: &mut Context<Self>) {
+        self.add_highlight_preset(vec![create_default_highlight_rule(|_| {})], cx);
+    }
+
+    pub(in crate::workspace) fn add_highlight_preset(
+        &mut self,
+        rules: Vec<HighlightRule>,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_settings(
+            move |settings| {
+                let active_rules = settings.terminal.effective_highlight_rules_mut();
+                active_rules.extend(rules);
+                *active_rules = reindex_highlight_rules(active_rules.clone())
+                    .into_iter()
+                    .take(MAX_HIGHLIGHT_RULES)
+                    .collect();
+            },
+            cx,
+        );
+    }
+
+    pub(in crate::workspace) fn remove_highlight_rule(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_settings(
+            move |settings| {
+                let rules = settings.terminal.effective_highlight_rules_mut();
+                if index < rules.len() {
+                    rules.remove(index);
+                }
+                *rules = reindex_highlight_rules(rules.clone());
+            },
+            cx,
+        );
+    }
+
+    pub(in crate::workspace) fn move_highlight_rule(
+        &mut self,
+        index: usize,
+        direction: isize,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_settings(
+            move |settings| {
+                let rules = settings.terminal.effective_highlight_rules_mut();
+                let len = rules.len();
+                let next = if direction < 0 {
+                    index.checked_sub(1)
+                } else if index + 1 < len {
+                    Some(index + 1)
+                } else {
+                    None
+                };
+                if let Some(next) = next {
+                    rules.swap(index, next);
+                }
+                *rules = reindex_highlight_rules(rules.clone());
+            },
+            cx,
+        );
+    }
+
+    pub(in crate::workspace) fn set_font_size_from_position(
+        &mut self,
+        x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self
+            .select_anchors
+            .get(&SelectAnchorId::SettingsTerminalFontSizeSlider)
+            .copied()
+        else {
+            return;
+        };
+        let left = f32::from(anchor.bounds.left());
+        let width = f32::from(anchor.bounds.size.width).max(1.0);
+        let percent =
+            slider_pointer_percent(x - left, width, self.tokens.metrics.ui_slider_thumb_size);
+        let value = (8.0 + percent * (32.0 - 8.0)).round() as i64;
+        if self.settings_store.settings().terminal.font_size != value {
+            self.edit_settings(|settings| settings.terminal.font_size = value, cx);
+        }
+    }
+
+    pub(in crate::workspace) fn settings_slider_value_from_position(
+        &self,
+        anchor_id: SelectAnchorId,
+        x: f32,
+        min: f32,
+        max: f32,
+    ) -> Option<f32> {
+        let Some(anchor) = self.select_anchors.get(&anchor_id).copied() else {
+            return None;
+        };
+        let left = f32::from(anchor.bounds.left());
+        let width = f32::from(anchor.bounds.size.width).max(1.0);
+        let percent =
+            slider_pointer_percent(x - left, width, self.tokens.metrics.ui_slider_thumb_size);
+        // Slider mousemove can fire many times inside one rounded setting step.
+        // Callers compare the resulting persisted value before notifying.
+        Some(min + percent * (max - min))
+    }
+
+    pub(in crate::workspace) fn set_background_blur_preview_from_position(
+        &mut self,
+        x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self
+            .select_anchors
+            .get(&SelectAnchorId::SettingsAppearanceBackgroundBlurSlider)
+            .copied()
+        else {
+            return;
+        };
+        let left = f32::from(anchor.bounds.left());
+        let width = f32::from(anchor.bounds.size.width).max(1.0);
+        let percent =
+            slider_pointer_percent(x - left, width, self.tokens.metrics.ui_slider_thumb_size);
+        let value = (percent * 20.0).round() as i64;
+        let persisted_background_blur = self.settings_store.settings().terminal.background_blur;
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.update_background_blur_preview(
+                persisted_background_blur,
+                value,
+                BACKGROUND_BLUR_COMMIT_DELAY,
+                cx,
+            );
+        });
+    }
+}
+
+pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectAnchorId) -> bool {
+    // Browser/Radix selects can synchronously read their trigger rect on the
+    // opening click. GPUI portals cannot, so modal select triggers keep a
+    // closed-state anchor cache without notifying; that makes first-click open
+    // immediate while scroll handlers still clear stale coordinates.
+    if anchor_id.is_settings_select_trigger()
+        || anchor_id.is_new_connection_select_trigger()
+    {
+        return true;
+    }
+
+    // Sliders and non-settings overlays also need an anchor before pointer-down
+    // can open or drag them.
+    matches!(
+        anchor_id,
+        SelectAnchorId::SettingsAppearanceUiFontSizeSlider
+            | SelectAnchorId::SettingsAppearanceBorderRadiusSlider
+            | SelectAnchorId::OnboardingBorderRadiusSlider
+            | SelectAnchorId::SettingsAppearanceWindowOpacitySlider
+            | SelectAnchorId::VersionMigrationBorderRadiusSlider
+            | SelectAnchorId::SettingsAppearanceBackgroundOpacitySlider
+            | SelectAnchorId::SettingsAppearanceBackgroundBlurSlider
+            | SelectAnchorId::SettingsTerminalFontSizeSlider
+            | SelectAnchorId::NewConnectionGroup
+            | SelectAnchorId::NewConnectionKeyAuthSource
+            | SelectAnchorId::NewConnectionManagedKey
+            | SelectAnchorId::NewConnectionJumpSavedConnection
+            | SelectAnchorId::NewConnectionRemoteDesktopSshGateway
+            | SelectAnchorId::NewConnectionJumpKeyAuthSource
+            | SelectAnchorId::NewConnectionJumpManagedKey
+            | SelectAnchorId::NewConnectionSerialPort
+            | SelectAnchorId::NewConnectionSerialDataBits
+            | SelectAnchorId::NewConnectionSerialStopBits
+            | SelectAnchorId::NewConnectionSerialParity
+            | SelectAnchorId::NewConnectionSerialFlowControl
+            | SelectAnchorId::IdeAgentStatus
+            // Broadcast targets are rendered through the root backdrop, but
+            // Tauri/Radix positions them from the trigger button. Keep the
+            // closed trigger rect warm so the first pointer-down opens at the
+            // command-bar/tabbar button.
+            | SelectAnchorId::TerminalBroadcastMenu
+            // Quick Commands uses Tauri's `min(860px, calc(100% - 1.5rem))`
+            // width against the command bar. Keep the bar rect warm so the
+            // first open and later resizes can compute the same adaptive width.
+            | SelectAnchorId::TerminalCommandBar
+            | SelectAnchorId::TerminalCwdMenu
+            | SelectAnchorId::TerminalGitBranchMenu
+            | SelectAnchorId::TerminalProjectMenu
+            | SelectAnchorId::TerminalCastSeekbar
+            | SelectAnchorId::RemoteDesktopResizeMenu(_)
+            // Session Manager toolbar menus use window-anchored overlays, so
+            // their trigger bounds must be cached before pointer-down.
+            | SelectAnchorId::SessionManagerViewMode
+            | SelectAnchorId::SessionManagerSort
+            | SelectAnchorId::SessionManagerBatchMove
+    )
+}

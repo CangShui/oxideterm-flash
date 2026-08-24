@@ -1,0 +1,44 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.xcuserstate
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+dist/
+*.o
+*.a
+*.dylib
+*.so
+*.dll
+__pycache__/
+*.py[cod]
+
+# Environment
+.env
+.env.local
+/docs/local
+/docs/tauri
+/docs/NodeSeek/
+.codex-private/
+.deps
+tasks/*
+.deepseek/*
+docs/design/*
+!docs/design/public-mcp-server-contract.zh-Hans.md
+audit-evidence-archive/ 
+docs/remote-agent-terminal-awareness-design.md
+.qoder/
+.hallmark/
+# Local implementation plans
+.planning/

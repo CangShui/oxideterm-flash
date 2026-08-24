@@ -1,0 +1,134 @@
+use oxideterm_gpui_platform::vibrancy::NativeVibrancyMode;
+use oxideterm_i18n::I18n;
+use oxideterm_render_policy::RenderProfile;
+use oxideterm_settings::{
+    AiThinkingStyle, AnimationSpeed, ConflictAction, FileTransferProtocolPreference, FontFamily,
+    FrostedGlassMode, IdeAgentMode, RemoteShellIntegrationMode, UiDensity,
+};
+
+pub fn file_transfer_protocol_label(
+    protocol: FileTransferProtocolPreference,
+    i18n: &I18n,
+) -> String {
+    match protocol {
+        FileTransferProtocolPreference::Auto => i18n.t("settings_view.sftp.protocol_auto"),
+        FileTransferProtocolPreference::Sftp => i18n.t("settings_view.sftp.protocol_sftp"),
+        FileTransferProtocolPreference::Scp => i18n.t("settings_view.sftp.protocol_scp"),
+    }
+}
+
+pub fn conflict_label(action: ConflictAction, i18n: &I18n) -> String {
+    match action {
+        ConflictAction::Ask => i18n.t("settings_view.sftp.conflict_ask"),
+        ConflictAction::Overwrite => i18n.t("settings_view.sftp.conflict_overwrite"),
+        ConflictAction::Skip => i18n.t("settings_view.sftp.conflict_skip"),
+        ConflictAction::Rename => i18n.t("settings_view.sftp.conflict_rename"),
+    }
+}
+
+pub fn remote_shell_integration_mode_label(
+    mode: RemoteShellIntegrationMode,
+    i18n: &I18n,
+) -> String {
+    match mode {
+        RemoteShellIntegrationMode::Ask => {
+            i18n.t("settings_view.connections.shell_integration.mode_ask")
+        }
+        RemoteShellIntegrationMode::Enabled => {
+            i18n.t("settings_view.connections.shell_integration.mode_enabled")
+        }
+        RemoteShellIntegrationMode::Disabled => {
+            i18n.t("settings_view.connections.shell_integration.mode_disabled")
+        }
+    }
+}
+
+pub fn ide_agent_label(mode: IdeAgentMode, i18n: &I18n) -> String {
+    match mode {
+        IdeAgentMode::Ask => i18n.t("settings_view.ide.agent_mode_ask"),
+        IdeAgentMode::Enabled => i18n.t("settings_view.ide.agent_mode_enabled"),
+        IdeAgentMode::Disabled => i18n.t("settings_view.ide.agent_mode_disabled"),
+    }
+}
+
+pub fn font_family_label(family: FontFamily) -> String {
+    match family {
+        FontFamily::Cascadia => "Cascadia Code".to_string(),
+        FontFamily::Consolas => "Consolas".to_string(),
+        FontFamily::Menlo => "Menlo".to_string(),
+        FontFamily::Custom => "Custom...".to_string(),
+    }
+}
+
+pub fn terminal_cjk_font_label(family: &str, i18n: &I18n) -> String {
+    let family = family.trim();
+    if family.is_empty() {
+        i18n.t("settings_view.terminal.cjk_font_auto")
+    } else {
+        family.to_string()
+    }
+}
+
+pub fn density_label(density: UiDensity, i18n: &I18n) -> String {
+    match density {
+        UiDensity::Compact => i18n.t("settings_view.appearance.density_compact"),
+        UiDensity::Comfortable => i18n.t("settings_view.appearance.density_comfortable"),
+        UiDensity::Spacious => i18n.t("settings_view.appearance.density_spacious"),
+    }
+}
+
+pub fn animation_label(speed: AnimationSpeed, i18n: &I18n) -> String {
+    match speed {
+        AnimationSpeed::Off => i18n.t("settings_view.appearance.animation_off"),
+        AnimationSpeed::Reduced => i18n.t("settings_view.appearance.animation_reduced"),
+        AnimationSpeed::Normal => i18n.t("settings_view.appearance.animation_normal"),
+        AnimationSpeed::Fast => i18n.t("settings_view.appearance.animation_fast"),
+    }
+}
+
+pub fn frosted_glass_mode_from_native(mode: NativeVibrancyMode) -> FrostedGlassMode {
+    match mode {
+        NativeVibrancyMode::Off => FrostedGlassMode::Off,
+        NativeVibrancyMode::System => FrostedGlassMode::System,
+        NativeVibrancyMode::Mica => FrostedGlassMode::Mica,
+        NativeVibrancyMode::Acrylic => FrostedGlassMode::Acrylic,
+    }
+}
+
+pub fn frosted_glass_label(mode: FrostedGlassMode, i18n: &I18n) -> String {
+    match mode {
+        FrostedGlassMode::Off => i18n.t("settings_view.appearance.frosted_glass_off"),
+        FrostedGlassMode::Css | FrostedGlassMode::Native | FrostedGlassMode::System => {
+            // Legacy "css" and "native" settings now resolve to the native
+            // glass label so the obsolete WebView-era blur mode never
+            // resurfaces in GPUI.
+            i18n.t("settings_view.appearance.frosted_glass_native")
+        }
+        FrostedGlassMode::Mica => "Mica".to_string(),
+        FrostedGlassMode::Acrylic => "Acrylic".to_string(),
+    }
+}
+
+pub fn render_profile_options() -> &'static [RenderProfile] {
+    &[
+        RenderProfile::Auto,
+        RenderProfile::Quality,
+        RenderProfile::LowPower,
+        RenderProfile::Compatibility,
+    ]
+}
+
+pub fn render_profile_label(profile: RenderProfile, i18n: &I18n) -> String {
+    match profile {
+        RenderProfile::Auto => i18n.t("settings_view.appearance.render_profile_auto"),
+        RenderProfile::Quality => i18n.t("settings_view.appearance.render_profile_quality"),
+        RenderProfile::LowPower => i18n.t("settings_view.appearance.render_profile_low_power"),
+        RenderProfile::Compatibility => {
+            i18n.t("settings_view.appearance.render_profile_compatibility")
+        }
+    }
+}
+
+pub fn ai_thinking_label(style: AiThinkingStyle) -> String {
+    format!("{style:?}")
+}
