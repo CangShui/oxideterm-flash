@@ -58,8 +58,22 @@ impl WorkspaceApp {
             );
             return;
         }
+        // A dedicated per-session subdirectory avoids stale-ACL issues on a
+        // shared folder (create_dir_all skips permission checks when the dir
+        // already exists, and the failure then surfaces only at file create).
         let unique = uuid::Uuid::new_v4();
-        let temp_path = temp_dir.join(format!("{unique}-{name}"));
+        let session_dir = temp_dir.join(unique.to_string());
+        if let Err(error) = std::fs::create_dir_all(&session_dir) {
+            eprintln!("[ext-edit] 3a session dir create failed: {error}");
+            self.push_sftp_toast(
+                self.i18n.t("sftp.external_edit.prepare_failed"),
+                Some(error.to_string()),
+                TerminalNoticeVariant::Error,
+                cx,
+            );
+            return;
+        }
+        let temp_path = session_dir.join(&name);
         eprintln!("[ext-edit] 3 backend ok, temp: {}", temp_path.display());
         let started = std::time::Instant::now();
 
@@ -164,6 +178,10 @@ impl WorkspaceApp {
                 }
             }
             drop(editor);
+            // Session ended (uploaded or lifetime cap): reclaim the temp copy.
+            if let Some(dir) = session.temp_path.parent() {
+                std::fs::remove_dir_all(dir).ok();
+            }
         })
         .detach();
     }
