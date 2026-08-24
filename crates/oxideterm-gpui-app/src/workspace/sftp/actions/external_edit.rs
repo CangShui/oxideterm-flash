@@ -60,6 +60,7 @@ impl WorkspaceApp {
         }
         let unique = uuid::Uuid::new_v4();
         let temp_path = temp_dir.join(format!("{unique}-{name}"));
+        eprintln!("[ext-edit] 3 backend ok, temp: {}", temp_path.display());
         let started = std::time::Instant::now();
 
         // scp_download_file uses tokio::fs internally, so the download must
@@ -76,7 +77,7 @@ impl WorkspaceApp {
                     .resolve_connection()
                     .await
                     .map_err(|e| e.to_string())?;
-                oxideterm_sftp::scp_download_file(
+                match oxideterm_sftp::scp_download_file(
                     &resolved,
                     &remote_path,
                     &temp_path.to_string_lossy(),
@@ -86,13 +87,23 @@ impl WorkspaceApp {
                     None,
                 )
                 .await
-                .map_err(|error| error.to_string())?;
-                Ok::<(), String>(())
+                {
+                    Ok(_) => {
+                        eprintln!("[ext-edit] 5 scp download done");
+                        Ok(())
+                    }
+                    Err(error) => {
+                        eprintln!("[ext-edit] 5 scp download failed: {error}");
+                        Err(error.to_string())
+                    }
+                }
             };
             let _ = download_tx.send(result.await).await;
+            eprintln!("[ext-edit] 6 tokio task exit");
         });
 
         cx.spawn(async move |this, cx| {
+            eprintln!("[ext-edit] 7 gpui: waiting download result");
             if let Err(error) = download_rx.recv().await.unwrap_or_else(|e| Err(e.to_string())) {
                 this.update(cx, |this, cx| {
                     this.push_sftp_toast(
@@ -106,6 +117,7 @@ impl WorkspaceApp {
                 return;
             }
 
+            eprintln!("[ext-edit] 8 launching editor");
             let mut baseline = file_signature(&temp_path);
             let editor = this.update(cx, |this, _cx| {
                 let editor = this
@@ -116,14 +128,19 @@ impl WorkspaceApp {
                     .trim()
                     .to_string();
                 if editor.is_empty() {
+                    eprintln!("[ext-edit] 9a system-default open");
                     let _ = open_path_in_external_app(&temp_path.to_string_lossy());
-                } else if std::process::Command::new(&editor)
-                    .arg(&temp_path)
-                    .spawn()
-                    .is_err()
-                {}
+                } else {
+                    match std::process::Command::new(&editor).arg(&temp_path).spawn() {
+                        Ok(_) => eprintln!("[ext-edit] 9b spawned: {editor}"),
+                        Err(error) => {
+                            eprintln!("[ext-edit] 9b spawn FAILED ({editor}): {error}")
+                        }
+                    }
+                }
             });
 
+            eprintln!("[ext-edit] 10 watching for saves");
             let session = ExternalEditSession { remote_path, temp_path };
             loop {
                 cx.background_executor()
@@ -135,6 +152,7 @@ impl WorkspaceApp {
                 let current = file_signature(&session.temp_path);
                 match (&baseline, &current) {
                     (Some(previous), Some(now)) if previous != now => {
+                        eprintln!("[ext-edit] 11 save detected, prompting upload");
                         baseline = current;
                         this.update(cx, |this, cx| {
                             this.prompt_external_edit_upload(session.clone(), cx);
