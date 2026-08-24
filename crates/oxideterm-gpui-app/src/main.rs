@@ -85,6 +85,7 @@ actions!(
 );
 
 fn main() {
+    eprintln!("[startup] 1 main enter");
     let native_launch_args = native_launch_args().unwrap_or_else(|error| {
         eprintln!("failed to read native connection launch argument: {error}");
         std::process::exit(2);
@@ -92,10 +93,12 @@ fn main() {
 
     // Match Tauri's startup ordering: portable detection and instance handling
     // happen before any settings or connection stores choose their data path.
+    eprintln!("[startup] 2 portable runtime init");
     if let Err(error) = oxideterm_portable_runtime::initialize_portable_runtime() {
         eprintln!("failed to initialize OxideTerm portable runtime: {error}");
         std::process::exit(1);
     }
+    eprintln!("[startup] 3 single-instance guard");
     let single_instance = single_instance::acquire_or_forward(
         native_launch_args.handoff_path.clone(),
         native_launch_args.connection_launch,
@@ -129,6 +132,7 @@ fn main() {
                 eprintln!("failed to read connection launch request: {error}");
                 std::process::exit(2);
             });
+    eprintln!("[startup] 4 loading settings");
     let startup_settings_store = SettingsStore::load_default();
     let startup_settings = startup_settings_store
         .as_ref()
@@ -171,6 +175,7 @@ fn main() {
         }
     });
 
+    eprintln!("[startup] 5 gpui application init");
     let application = oxideterm_gpui_platform::application().with_assets(NativeAssets);
     let url_event_receiver = single_instance_rx.clone();
     application.on_open_urls(move |urls, cx| {

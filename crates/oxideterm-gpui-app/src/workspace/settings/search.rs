@@ -429,41 +429,8 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
         settings_search_entry(
             SettingsTab::Ide,
             0,
-            "settings_view.ide.auto_save",
-            &["settings_view.ide.auto_save_hint"],
-        ),
-        settings_search_entry(
-            SettingsTab::Ide,
-            1,
-            "settings_view.ide.word_wrap",
-            &["settings_view.ide.word_wrap_hint"],
-        ),
-        settings_search_entry(
-            SettingsTab::Ide,
-            2,
-            "settings_view.ide.editor_typography",
-            &[
-                "settings_view.ide.font_size",
-                "settings_view.ide.line_height",
-            ],
-        ),
-        settings_search_entry(
-            SettingsTab::Ide,
-            3,
-            "settings_view.ide.agent_title",
-            &[
-                "settings_view.ide.agent_mode_label",
-                "settings_view.ide.agent_path_label",
-            ],
-        ),
-        settings_search_entry(
-            SettingsTab::Ide,
-            4,
-            "settings_view.ide.agent_transparency_title",
-            &[
-                "settings_view.ide.agent_privacy_label",
-                "settings_view.ide.agent_lifecycle_label",
-            ],
+            "settings_view.ide.external_editor",
+            &["settings_view.ide.external_editor_hint"],
         ),
         settings_search_entry(
             SettingsTab::Keybindings,

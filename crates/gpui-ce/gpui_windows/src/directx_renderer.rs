@@ -249,14 +249,22 @@ impl DirectXRenderer {
             .context("Creating DirectX devices")?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
 
-        let resources = DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
-            .context("Creating DirectX resources")?;
+        let mut composition_active = false;
+        let resources = DirectXResources::new(
+            &devices,
+            1,
+            1,
+            hwnd,
+            disable_direct_composition,
+            &mut composition_active,
+        )
+        .context("Creating DirectX resources")?;
         let globals = DirectXGlobalElements::new(&devices.device)
             .context("Creating DirectX global elements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
 
-        let direct_composition = if disable_direct_composition {
+        let direct_composition = if !composition_active {
             None
         } else {
             let composition = DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), hwnd)
@@ -368,12 +376,14 @@ impl DirectXRenderer {
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Recreating DirectX devices")?;
+        let mut composition_active = false;
         let resources = DirectXResources::new(
             &devices,
             self.width,
             self.height,
             self.hwnd,
             disable_direct_composition,
+            &mut composition_active,
         )
         .context("Creating DirectX resources")?;
         let globals = DirectXGlobalElements::new(&devices.device)
@@ -381,7 +391,7 @@ impl DirectXRenderer {
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectXRenderPipelines")?;
 
-        let direct_composition = if disable_direct_composition {
+        let direct_composition = if !composition_active {
             None
         } else {
             let composition =
@@ -1203,17 +1213,40 @@ impl DirectXResources {
         height: u32,
         hwnd: HWND,
         disable_direct_composition: bool,
+        composition_active: &mut bool,
     ) -> Result<Self> {
-        let swap_chain = if disable_direct_composition {
-            create_swap_chain(&devices.dxgi_factory, &devices.device, hwnd, width, height)?
+        // Direct Composition is unavailable on some remote-desktop/VM GPUs
+        // (DXGI returns E_NOTIMPL). Fall back to a plain HWND swap chain
+        // instead of aborting startup, so the app still opens there.
+        let (swap_chain, used_composition) = if disable_direct_composition {
+            (
+                create_swap_chain(&devices.dxgi_factory, &devices.device, hwnd, width, height)?,
+                false,
+            )
         } else {
-            create_swap_chain_for_composition(
+            match create_swap_chain_for_composition(
                 &devices.dxgi_factory,
                 &devices.device,
                 width,
                 height,
-            )?
+            ) {
+                Ok(chain) => (chain, true),
+                Err(error) => {
+                    log::warn!("Direct Composition unavailable, falling back to HWND swap chain: {error}");
+                    (
+                        create_swap_chain(
+                            &devices.dxgi_factory,
+                            &devices.device,
+                            hwnd,
+                            width,
+                            height,
+                        )?,
+                        false,
+                    )
+                }
+            }
         };
+        *composition_active = used_composition;
 
         let (
             render_target,

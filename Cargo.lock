@@ -7094,6 +7094,7 @@ name = "oxideterm-gpui-app"
 version = "1.0.1"
 dependencies = [
  "anyhow",
+ "async-channel",
  "async-trait",
  "base64 0.22.1",
  "chrono",

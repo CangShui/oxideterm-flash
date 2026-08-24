@@ -916,6 +916,8 @@
     "ide": {
       "title": "IDE Mode (Mini)",
       "description": "Configure the built-in code editor behavior.",
+      "external_editor": "External editor",
+      "external_editor_hint": "Path to the external editor used to edit remote files (empty = system default)",
       "auto_save": "Auto Save",
       "auto_save_hint": "Automatically save files when switching tabs or losing focus.",
       "word_wrap": "Word Wrap",

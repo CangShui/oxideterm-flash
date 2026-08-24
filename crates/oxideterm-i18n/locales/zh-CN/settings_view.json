@@ -916,6 +916,8 @@
     "ide": {
       "title": "IDE 模式 (Mini)",
       "description": "配置内置代码编辑器的行为。",
+      "external_editor": "外部编辑器",
+      "external_editor_hint": "用于编辑远程文件的外部编辑器路径（留空则使用系统默认）",
       "auto_save": "自动保存",
       "auto_save_hint": "切换标签页或失去焦点时自动保存文件。",
       "word_wrap": "自动换行",

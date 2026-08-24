@@ -15,33 +15,10 @@ impl WorkspaceApp {
             };
             self.set_sftp_path(pane, join_sftp_path(&base, &file.name), cx);
         } else if pane == SftpPane::Remote {
-            let generation = self.sftp_view.update(cx, |sftp, cx| {
-                sftp.active_pane = pane;
-                sftp.clear_context_menu_immediately();
-                sftp.stop_preview_media();
-                sftp.preview_generation = sftp.preview_generation.wrapping_add(1);
-                sftp.reset_preview_editor();
-                sftp.preview_pane = Some(pane);
-                sftp.preview_path = Some(file.path.clone());
-                sftp.preview_content = None;
-                sftp.preview_asset_owner = None;
-                sftp.preview_markdown_scroll = MarkdownVirtualListScrollHandle::new();
-                sftp.preview_document_scroll = ScrollHandle::new();
-                sftp.font_preview_scroll = ScrollHandle::new();
-                sftp.preview_error = None;
-                sftp.preview_loading = true;
-                sftp.preview_hex_loading_more = false;
-                sftp.preview_markdown_source_mode = false;
-                sftp.preview_font_family = None;
-                sftp.preview_font_error = None;
-                sftp.preview_font_size = SFTP_PREVIEW_FONT_DEFAULT_SIZE;
-                sftp.set_dialog(SftpDialog::Preview {
-                    name: file.name.clone(),
-                });
-                cx.notify();
-                sftp.preview_generation
-            });
-            self.spawn_remote_sftp_preview(file.path.clone(), generation, cx);
+            // Editing goes through the configured external editor (MobaXterm
+            // style): download to a temp copy, open it, watch for saves and
+            // offer to upload changes back.
+            self.open_sftp_file_in_external_editor(file.path.clone(), file.name.clone(), cx);
         }
     }
 
