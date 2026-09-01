@@ -18,7 +18,7 @@ impl WorkspaceApp {
         // Tauri TerminalCommandBarActions uses a shared h-6/w-6 rounded-md
         // button for split, broadcast, recording, and cast controls. Keep the
         // geometry local to the terminal bar while routing activation through
-        // the workspace button guard shared with FileManager/SFTP actions.
+        // the workspace button guard shared with SFTP actions.
         self.workspace_icon_action_button(
             icon,
             14.0,
@@ -362,20 +362,6 @@ impl WorkspaceApp {
             ),
         ];
         match scope {
-            Some(CurrentDirectoryScope::Local) => {
-                trailing.push(self.render_terminal_cwd_context_action(
-                    LucideIcon::FolderOpen,
-                    self.i18n.t("terminal.cwd.open_file_manager"),
-                    {
-                        let path = path;
-                        move |this, _event, window, cx| {
-                            this.open_terminal_cwd_path_in_file_manager(path.clone(), window, cx);
-                            cx.stop_propagation();
-                        }
-                    },
-                    cx,
-                ));
-            }
             Some(CurrentDirectoryScope::SshNode(node_id)) => {
                 trailing.push(self.render_terminal_cwd_context_action(
                     LucideIcon::Cloud,
@@ -395,20 +381,10 @@ impl WorkspaceApp {
                     },
                     cx,
                 ));
-                trailing.push(self.render_terminal_cwd_context_action(
-                    LucideIcon::FileCode,
-                    self.i18n.t("terminal.cwd.open_ide"),
-                    {
-                        let node_id = NodeId::new(node_id);
-                        let path = path;
-                        move |this, _event, _window, cx| {
-                            this.open_terminal_cwd_path_in_ide(node_id.clone(), path.clone(), cx);
-                            cx.stop_propagation();
-                        }
-                    },
-                    cx,
-                ));
             }
+            // Local directories no longer offer a follow-up open action;
+            // the local file manager tab that consumed them was removed.
+            Some(CurrentDirectoryScope::Local) => {}
             None => {}
         }
         entity_list_row(

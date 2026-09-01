@@ -45,8 +45,7 @@ const LAUNCHER_GRID_GAP_Y: f32 = 4.0; // Tauri gap-y-1.
 const LAUNCHER_WHITE_ALPHA_06: u32 = 0x0f; // Tauri bg-white/[0.06].
 const LAUNCHER_TEXT_MUTED_60_ALPHA: u32 = 0x99; // Tauri text-muted/60.
 const LAUNCHER_TEXT_SECONDARY_90_ALPHA: u32 = 0xe6; // Tauri text-secondary/90.
-const LAUNCHER_RED_400: u32 = 0xf87171; // Tauri red-400.
-const LAUNCHER_RED_500: u32 = 0xef4444; // Tauri red-500.
+// Status colors come from the theme tokens; only the alpha channel stays local.
 const LAUNCHER_RED_500_ALPHA_10: u32 = 0x1a; // Tauri red-500/10.
 const LAUNCHER_RED_500_ALPHA_20: u32 = 0x33; // Tauri red-500/20.
 const LAUNCHER_WSL_HEADER_PADDING_X: f32 = 16.0; // Tauri WSL header px-4.
@@ -58,7 +57,6 @@ const LAUNCHER_WSL_ROW_PADDING_Y: f32 = 12.0; // Tauri WSL row py-3.
 const LAUNCHER_WSL_ROW_GAP: f32 = 12.0; // Tauri WSL row/header gap-3.
 const LAUNCHER_WSL_BADGE_TEXT_SIZE: f32 = 10.0; // Tauri text-[10px].
 const LAUNCHER_WSL_DOT: f32 = 8.0; // Tauri w-2 h-2.
-const LAUNCHER_WSL_GREEN_500: u32 = 0x22c55e; // Tauri green-500.
 const LAUNCHER_WSL_BORDER_ALPHA_30: u32 = 0x4d; // Tauri border/30.
 const LAUNCHER_WSL_BORDER_ALPHA_50: u32 = 0x80; // Tauri border/50.
 const LAUNCHER_WSL_BG_HOVER_ALPHA_30: u32 = 0x4d; // Tauri bg-hover/30.
@@ -482,7 +480,7 @@ impl LauncherWorkspaceEntity {
                     .size(px(LAUNCHER_WSL_DOT))
                     .rounded(px(LAUNCHER_WSL_DOT / 2.0))
                     .bg(rgb(if distro.is_running {
-                        LAUNCHER_WSL_GREEN_500
+                        theme.success
                     } else {
                         theme.text_muted
                     })),
@@ -949,7 +947,7 @@ impl WorkspaceApp {
             return self.render_launcher_center_state(
                 LucideIcon::AlertCircle,
                 error,
-                LAUNCHER_RED_400,
+                self.tokens.ui.error,
                 Some(self.i18n.t("launcher.retry")),
                 cx,
             );
@@ -1367,8 +1365,8 @@ impl WorkspaceApp {
             .py(px(LAUNCHER_CONFIRM_PADDING_Y))
             .rounded(px(self.tokens.radii.md))
             .border_1()
-            .border_color(rgba((LAUNCHER_RED_500 << 8) | LAUNCHER_RED_500_ALPHA_20))
-            .bg(rgba((LAUNCHER_RED_500 << 8) | LAUNCHER_RED_500_ALPHA_10))
+            .border_color(rgba((self.tokens.ui.error << 8) | LAUNCHER_RED_500_ALPHA_20))
+            .bg(rgba((self.tokens.ui.error << 8) | LAUNCHER_RED_500_ALPHA_10))
             .flex()
             .items_center()
             .gap(px(12.0))
@@ -1376,7 +1374,7 @@ impl WorkspaceApp {
                 div()
                     .flex_1()
                     .text_size(px(12.0))
-                    .text_color(rgb(LAUNCHER_RED_400))
+                    .text_color(rgb(self.tokens.ui.error))
                     .child(self.i18n.t("launcher.disableConfirm")),
             )
             .child(
@@ -1451,7 +1449,7 @@ impl WorkspaceApp {
             return self.render_launcher_center_state(
                 LucideIcon::AlertCircle,
                 error,
-                LAUNCHER_RED_400,
+                self.tokens.ui.error,
                 Some(self.i18n.t("launcher.retry")),
                 cx,
             );

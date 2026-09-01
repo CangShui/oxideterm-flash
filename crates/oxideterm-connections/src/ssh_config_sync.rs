@@ -323,7 +323,9 @@ mod tests {
                 .options
                 .identity_agent
                 .as_deref()
-                .is_some_and(|path| path.ends_with("/.ssh/agent-b.sock"))
+                // Component comparison keeps the assertion separator-agnostic
+                // so it holds on POSIX and Windows home layouts alike.
+                .is_some_and(|path| std::path::Path::new(path).ends_with(".ssh/agent-b.sock"))
         );
         let _ = std::fs::remove_dir_all(directory);
     }

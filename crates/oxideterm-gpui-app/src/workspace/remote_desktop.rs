@@ -554,6 +554,12 @@ impl RemoteDesktopSessionEntity {
         self.profile.protocol
     }
 
+    /// The saved asset this session was launched from, used by the sidebar to
+    /// claim the profile's row instead of rendering a second one.
+    pub(in crate::workspace) fn saved_profile_id(&self) -> &str {
+        &self.profile.id
+    }
+
     pub(in crate::workspace) fn active_session_status(&self) -> RemoteDesktopSessionStatus {
         // The protocol entity remains the authoritative source for sidebar liveness.
         self.state.snapshot().status

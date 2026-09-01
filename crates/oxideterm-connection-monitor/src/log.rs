@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
-use crate::shell::shell_quote;
+use crate::shell::{posix_shell_command, shell_quote};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,15 +75,21 @@ pub fn build_log_snapshot_command(
     let limit = sanitize_log_limit(limit);
     let (command, capability) = match normalized_log_os(os_type) {
         LogOs::Linux => (
-            build_linux_log_snapshot_command(preset, limit),
+            // The account's login shell may be Fish/Csh/Nushell; run the probe
+            // through a stable POSIX parser like the other host tools.
+            posix_shell_command(&build_linux_log_snapshot_command(preset, limit)),
             LogCommandCapability::Full,
         ),
         LogOs::Mac => (
-            build_macos_log_snapshot_command(preset, limit),
+            // The account's login shell may be Fish/Csh/Nushell; run the probe
+            // through a stable POSIX parser like the other host tools.
+            posix_shell_command(&build_macos_log_snapshot_command(preset, limit)),
             LogCommandCapability::Partial,
         ),
         LogOs::Bsd => (
-            build_bsd_log_snapshot_command(preset, limit),
+            // The account's login shell may be Fish/Csh/Nushell; run the probe
+            // through a stable POSIX parser like the other host tools.
+            posix_shell_command(&build_bsd_log_snapshot_command(preset, limit)),
             LogCommandCapability::Partial,
         ),
         LogOs::Windows => (
@@ -108,15 +114,15 @@ pub fn build_log_follow_command(
 ) -> Result<LogCaptureCommand, String> {
     let (command, capability) = match normalized_log_os(os_type) {
         LogOs::Linux => (
-            build_linux_log_follow_command(preset),
+            posix_shell_command(&build_linux_log_follow_command(preset)),
             LogCommandCapability::Full,
         ),
         LogOs::Mac => (
-            build_macos_log_follow_command(preset),
+            posix_shell_command(&build_macos_log_follow_command(preset)),
             LogCommandCapability::Partial,
         ),
         LogOs::Bsd => (
-            build_bsd_log_follow_command(preset),
+            posix_shell_command(&build_bsd_log_follow_command(preset)),
             LogCommandCapability::Partial,
         ),
         LogOs::Windows => (
@@ -255,7 +261,7 @@ fn build_linux_log_snapshot_command(preset: LogPreset, limit: usize) -> String {
             "tail -n {limit} \"$oxide_log_file\" 2>/dev/null{file_filter} | awk -v src=\"$oxide_log_file\" '{{ gsub(/\\t/, \" \"); printf \"ROW\\t\\tinfo\\t%s\\t\\t%s\\n\", src, $0 }}'; ",
             "done | tail -n {limit}; ",
             "else echo '__OXIDE_LOG_UNAVAILABLE__'; ",
-            "fi; ",
+            "fi; fi; ",
             "echo '===HOST_LOGS_END==='"
         ),
         journal_args = journal_args,
@@ -806,6 +812,33 @@ mod tests {
                 !command.command.contains('\n'),
                 "{os_type} log command contains a literal newline: {}",
                 command.command
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_log_snapshot_scripts_have_valid_posix_shell_syntax() {
+        // A missing `fi` once made every Linux host fail with remote exit
+        // code 2 before any probe ran; parse the generated script itself so
+        // that class of defect cannot ship again.
+        let scripts = [
+            build_linux_log_snapshot_command(LogPreset::All, 300),
+            build_linux_log_snapshot_command(LogPreset::Errors, 300),
+            build_linux_log_snapshot_command(LogPreset::Auth, 300),
+            build_linux_log_snapshot_command(LogPreset::Kernel, 300),
+            build_linux_log_snapshot_command(LogPreset::System, 300),
+            build_macos_log_snapshot_command(LogPreset::All, 300),
+            build_bsd_log_snapshot_command(LogPreset::All, 300),
+        ];
+        for script in scripts {
+            let status = std::process::Command::new("sh")
+                .args(["-n", "-c", &script])
+                .status()
+                .expect("run POSIX shell syntax check");
+            assert!(
+                status.success(),
+                "log snapshot script should parse: {script}"
             );
         }
     }

@@ -73,17 +73,15 @@ pub enum SelectAnchorId {
     SettingsTerminalBackspaceSequence,
     SettingsTerminalDeleteSequence,
     SettingsTerminalCursorStyle,
-    SettingsRemoteShellIntegrationMode,
     SettingsTerminalTriggerMatchMode,
     SettingsTerminalTriggerAction,
     SettingsTerminalTriggerProcessMode,
     SettingsTerminalTriggerQuickCommand,
     SettingsTerminalTriggerTiming,
     SettingsTerminalTriggerScope,
-    SettingsIdeAgentMode,
+    SettingsCloudSyncMode,
     SettingsLocalShell,
     SettingsLocalShellSemanticScheme(usize),
-    SettingsLocalPrivilegeKind,
     SettingsConnectionIdleTimeout,
     SettingsReconnectMaxAttempts,
     SettingsReconnectBaseDelay,
@@ -129,7 +127,6 @@ pub enum SelectAnchorId {
     NewConnectionRemoteDesktopSshGateway,
     NewConnectionJumpKeyAuthSource,
     NewConnectionJumpManagedKey,
-    NewConnectionPrivilegeKind,
     NewConnectionUpstreamProxyPolicy,
     NewConnectionUpstreamProxyProtocol,
     NewConnectionUpstreamProxyAuth,
@@ -149,6 +146,7 @@ pub enum SelectAnchorId {
     NewConnectionTerminalHighlightRuleSet,
     SettingsConnectionImportSource,
     SettingsConnectionImportDuplicateStrategy,
+    SettingsSessionExportFormat,
     IdeAgentStatus,
     TerminalBroadcastMenu,
     TerminalHighlightRuleSet,
@@ -158,9 +156,6 @@ pub enum SelectAnchorId {
     TerminalProjectMenu,
     TerminalCastSeekbar,
     RemoteDesktopResizeMenu(u64),
-    SessionManagerViewMode,
-    SessionManagerSort,
-    SessionManagerBatchMove,
 }
 
 impl SelectAnchorId {
@@ -187,17 +182,15 @@ impl SelectAnchorId {
                 | Self::SettingsTerminalBackspaceSequence
                 | Self::SettingsTerminalDeleteSequence
                 | Self::SettingsTerminalCursorStyle
-                | Self::SettingsRemoteShellIntegrationMode
                 | Self::SettingsTerminalTriggerMatchMode
                 | Self::SettingsTerminalTriggerAction
                 | Self::SettingsTerminalTriggerProcessMode
                 | Self::SettingsTerminalTriggerQuickCommand
                 | Self::SettingsTerminalTriggerTiming
                 | Self::SettingsTerminalTriggerScope
-                | Self::SettingsIdeAgentMode
+                | Self::SettingsCloudSyncMode
                 | Self::SettingsLocalShell
                 | Self::SettingsLocalShellSemanticScheme(_)
-                | Self::SettingsLocalPrivilegeKind
                 | Self::SettingsConnectionIdleTimeout
                 | Self::SettingsReconnectMaxAttempts
                 | Self::SettingsReconnectBaseDelay
@@ -227,6 +220,7 @@ impl SelectAnchorId {
                 | Self::SettingsHighlightMatchScope(_)
                 | Self::SettingsConnectionImportSource
                 | Self::SettingsConnectionImportDuplicateStrategy
+                | Self::SettingsSessionExportFormat
         )
     }
 
@@ -244,7 +238,6 @@ impl SelectAnchorId {
                 | Self::NewConnectionRemoteDesktopSshGateway
                 | Self::NewConnectionJumpKeyAuthSource
                 | Self::NewConnectionJumpManagedKey
-                | Self::NewConnectionPrivilegeKind
                 | Self::NewConnectionUpstreamProxyPolicy
                 | Self::NewConnectionUpstreamProxyProtocol
                 | Self::NewConnectionUpstreamProxyAuth
@@ -717,7 +710,16 @@ fn select_item_with_state(
             .justify_center()
             .child(if selected { "✓" } else { "" }),
     )
-    .child(label.into())
+    .child(
+        // The checkmark is absolutely positioned on top of the row, so long
+        // labels must truncate before reaching it instead of sliding under.
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .mr(px(tokens.metrics.ui_select_check_size + tokens.spacing.one))
+            .truncate()
+            .child(label.into()),
+    )
 }
 
 pub fn select_label(tokens: &ThemeTokens, label: impl Into<String>) -> Div {

@@ -3,13 +3,9 @@ use super::*;
 pub(in crate::workspace) const TERMINAL_SETTINGS_SWITCHER_ID: &str =
     "terminal-settings-page-switcher";
 pub(in crate::workspace) const AI_SETTINGS_SWITCHER_ID: &str = "ai-settings-page-switcher";
-pub(in crate::workspace) const KEYBINDING_SCOPE_SWITCHER_ID: &str = "keybinding-scope-switcher";
 pub(in crate::workspace) const CLOUD_SYNC_SWITCHER_ID: &str = "cloud-sync-tab-bar";
 pub(in crate::workspace) const PLUGIN_MANAGER_SWITCHER_ID: &str = "plugin-manager-tab-bar";
-pub(in crate::workspace) const CONNECTION_RUNTIME_SWITCHER_ID: &str = "connection-runtime-tab-bar";
 pub(in crate::workspace) const HOST_TOOLS_SWITCHER_ID: &str = "host-tools-tab-bar";
-pub(in crate::workspace) const NOTIFICATION_CENTER_SWITCHER_ID: &str =
-    "notification-center-tab-bar";
 pub(in crate::workspace) const SETTINGS_NAVIGATION_ID: &str = "settings-navigation";
 pub(in crate::workspace) const FILE_MANAGER_NAVIGATION_ID: &str = "file-manager-navigation";
 pub(in crate::workspace) const NEW_CONNECTION_TRANSPORT_SELECTOR_ID: &str =
@@ -20,7 +16,6 @@ pub(in crate::workspace) const EDIT_CONNECTION_AUTH_SELECTOR_ID: &str =
     "edit-connection-auth-selector";
 pub(in crate::workspace) const PROMPT_CONNECTION_AUTH_SELECTOR_ID: &str =
     "prompt-connection-auth-selector";
-pub(in crate::workspace) const DRILL_DOWN_AUTH_SELECTOR_ID: &str = "drill-down-auth-selector";
 pub(in crate::workspace) const JUMP_CONNECTION_AUTH_SELECTOR_ID: &str =
     "jump-connection-auth-selector";
 pub(in crate::workspace) const VERSION_MIGRATION_MOTION_SWITCHER_ID: &str =

@@ -138,31 +138,23 @@ impl WorkspaceApp {
             || serial_edit_mode
             || telnet_edit_mode
             || standalone_sftp_edit_mode;
-        let drill_down_mode = self
-            .connection_form_state(cx)
-            .drill_down_parent_node_id
-            .is_some();
         let modal_max_height = f32::from(window.viewport_size().height)
             * self.tokens.metrics.modal_max_viewport_height_ratio;
         let local_terminal_mode = !prompt_mode
             && !duplicate_mode
             && !edit_properties_mode
-            && !drill_down_mode
             && form.transport == NewConnectionTransport::LocalTerminal;
         let serial_mode = !prompt_mode
             && !duplicate_mode
             && !edit_properties_mode
-            && !drill_down_mode
             && form.transport == NewConnectionTransport::Serial;
         let telnet_mode = !prompt_mode
             && !duplicate_mode
             && !edit_properties_mode
-            && !drill_down_mode
             && form.transport == NewConnectionTransport::Telnet;
         let standalone_sftp_mode = !prompt_mode
             && !duplicate_mode
             && !edit_properties_mode
-            && !drill_down_mode
             && form.transport == NewConnectionTransport::StandaloneSftp;
         if standalone_sftp_mode {
             return self.render_standalone_sftp_connection_modal(
@@ -171,20 +163,19 @@ impl WorkspaceApp {
                 cx,
             );
         }
-        let remote_desktop_protocol =
-            if !prompt_mode && !duplicate_mode && !edit_properties_mode && !drill_down_mode {
-                match form.transport {
-                    NewConnectionTransport::Rdp => {
-                        Some(oxideterm_remote_desktop::RemoteDesktopProtocol::Rdp)
-                    }
-                    NewConnectionTransport::Vnc => {
-                        Some(oxideterm_remote_desktop::RemoteDesktopProtocol::Vnc)
-                    }
-                    _ => None,
+        let remote_desktop_protocol = if !prompt_mode && !duplicate_mode && !edit_properties_mode {
+            match form.transport {
+                NewConnectionTransport::Rdp => {
+                    Some(oxideterm_remote_desktop::RemoteDesktopProtocol::Rdp)
                 }
-            } else {
-                None
-            };
+                NewConnectionTransport::Vnc => {
+                    Some(oxideterm_remote_desktop::RemoteDesktopProtocol::Vnc)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let local_transport_mode = serial_mode || telnet_mode;
         let remote_desktop_mode = remote_desktop_protocol.is_some();
         let ssh_submission_mode = !local_terminal_mode
@@ -194,14 +185,11 @@ impl WorkspaceApp {
         let shows_transport_selector = !prompt_mode
             && !duplicate_mode
             && !edit_properties_mode
-            && !saved_profile_edit_mode
-            && !drill_down_mode;
-        let shows_icon_field = connection_icon_field_visible(mode, drill_down_mode, form.transport);
+            && !saved_profile_edit_mode;
+        let shows_icon_field = connection_icon_field_visible(mode, form.transport);
         let title = if local_terminal_mode {
             self.i18n
                 .t("modals.new_connection.transport_local_terminal")
-        } else if drill_down_mode {
-            self.i18n.t("ssh.drill_down.title")
         } else if prompt_mode {
             self.i18n
                 .t("sessionManager.connect_prompt.title")
@@ -219,19 +207,6 @@ impl WorkspaceApp {
         let description = if local_terminal_mode {
             self.i18n
                 .t("modals.new_connection.local_terminal_description")
-        } else if drill_down_mode {
-            let parent_host = self
-                .connection_form_state(cx)
-                .drill_down_parent_node_id
-                .as_ref()
-                .and_then(|node_id| self.ssh_nodes.get(node_id))
-                .map(|node| node.title.clone())
-                .unwrap_or_default();
-            self.i18n
-                .t("ssh.drill_down.description")
-                .replace("{{host}}", &parent_host)
-                .replace("<host>", "")
-                .replace("</host>", "")
         } else if prompt_mode {
             format!("{}@{}:{}", form.username, form.host, form.port)
         } else if duplicate_mode {
@@ -293,9 +268,7 @@ impl WorkspaceApp {
         let primary_disabled = form.pending || !has_required_fields;
         let form_visible = self.connection_form_state(cx).presence.phase()
             == oxideterm_gpui_ui::motion::ExitPhase::Visible;
-        let base_modal_width = if drill_down_mode {
-            TAURI_DRILL_DOWN_MODAL_WIDTH
-        } else if prompt_mode || edit_properties_mode || saved_profile_edit_mode {
+        let base_modal_width = if prompt_mode || edit_properties_mode || saved_profile_edit_mode {
             TAURI_EDIT_MODAL_WIDTH
         } else if shows_transport_selector {
             self.tokens.metrics.modal_width
@@ -425,9 +398,7 @@ impl WorkspaceApp {
                                     )
                                 })
                                 .when(
-                                    (ssh_submission_mode || standalone_sftp_mode)
-                                        && !prompt_mode
-                                        && !drill_down_mode,
+                                    (ssh_submission_mode || standalone_sftp_mode) && !prompt_mode,
                                     |content| {
                                         let basic = div()
                                             .flex()
@@ -510,7 +481,7 @@ impl WorkspaceApp {
                                         ))
                                     },
                                 )
-                                .when(prompt_mode && !drill_down_mode, |content| {
+                                .when(prompt_mode, |content| {
                                     content.child(self.render_connection_group_select(
                                         if edit_properties_mode {
                                             self.i18n.t("sessionManager.edit_properties.group")
@@ -520,47 +491,6 @@ impl WorkspaceApp {
                                         &form.group,
                                         cx,
                                     ))
-                                })
-                                .when(drill_down_mode, |content| {
-                                    content
-                                        .child(self.render_drill_saved_next_hop_picker(cx))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .gap(px(self.tokens.metrics.form_host_port_gap))
-                                                .child(div().flex_1().child(
-                                                    self.render_connection_field(
-                                                        self.i18n.t("ssh.drill_down.target_host"),
-                                                        &form.host,
-                                                        self.i18n
-                                                            .t("ssh.drill_down.target_host_placeholder"),
-                                                        NewConnectionField::Host,
-                                                        false,
-                                                        cx,
-                                                    ),
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .w(px(self.tokens.metrics.form_port_width))
-                                                        .child(self.render_connection_field(
-                                                            self.i18n.t("ssh.drill_down.port"),
-                                                            &form.port,
-                                                            SSH_DEFAULT_PORT_TEXT.to_string(),
-                                                            NewConnectionField::Port,
-                                                            false,
-                                                            cx,
-                                                        )),
-                                                ),
-                                        )
-                                        .child(self.render_connection_field(
-                                            self.i18n.t("ssh.drill_down.username"),
-                                            &form.username,
-                                            self.i18n.t("ssh.drill_down.username_placeholder"),
-                                            NewConnectionField::Username,
-                                            false,
-                                            cx,
-                                        ))
                                 })
                                 .when_some(
                                     if prompt_mode {
@@ -580,8 +510,6 @@ impl WorkspaceApp {
                                         form.auth_tab,
                                         if prompt_mode {
                                             AuthSelectorContext::Prompt
-                                        } else if drill_down_mode {
-                                            AuthSelectorContext::DrillDown
                                         } else if mode == NewConnectionFormMode::EditProperties
                                             || standalone_sftp_edit_mode
                                         {
@@ -689,13 +617,6 @@ impl WorkspaceApp {
                                             NewConnectionField::Password,
                                             cx,
                                         ))
-                                    } else if drill_down_mode {
-                                        content.child(self.render_connection_secret_field(
-                                            self.i18n.t("ssh.drill_down.password"),
-                                            String::new(),
-                                            NewConnectionField::Password,
-                                            cx,
-                                        ))
                                     } else if standalone_sftp_edit_mode {
                                         content
                                             .child(self.render_connection_secret_field(
@@ -715,19 +636,14 @@ impl WorkspaceApp {
                                                 },
                                             )
                                     } else {
-                                        content
-                                            .child(self.render_connection_secret_field(
-                                                self.i18n.t("ssh.form.password"),
-                                                String::new(),
-                                                NewConnectionField::Password,
-                                                cx,
-                                            ))
-                                            .child(self.render_connection_checkbox(
-                                                self.i18n.t("ssh.form.save_password"),
-                                                form.save_password,
-                                                |form| form.save_password = !form.save_password,
-                                                cx,
-                                            ))
+                                        // Main SSH passwords use the same always-save keychain
+                                        // contract as RDP/VNC; omit the divergent opt-out checkbox.
+                                        content.child(self.render_connection_secret_field(
+                                            self.i18n.t("ssh.form.password"),
+                                            String::new(),
+                                            NewConnectionField::Password,
+                                            cx,
+                                        ))
                                     }
                                 })
                                 .when(
@@ -755,20 +671,15 @@ impl WorkspaceApp {
                                             || standalone_sftp_edit_mode)
                                             && form.auth_tab == SshAuthTab::DefaultKey),
                                     |content| {
-                                        let key_label = if drill_down_mode {
-                                            self.i18n.t("ssh.drill_down.key_path")
-                                        } else if edit_properties_mode
+                                        let key_label = if edit_properties_mode
                                             || standalone_sftp_edit_mode
                                         {
                                             self.i18n.t("sessionManager.edit_properties.key_path")
                                         } else {
                                             self.i18n.t("ssh.form.key_file")
                                         };
-                                        let key_placeholder = if drill_down_mode {
-                                            self.i18n.t("ssh.drill_down.key_path_placeholder")
-                                        } else {
-                                            "~/.ssh/id_ed25519".to_string()
-                                        };
+                                        let key_placeholder: String =
+                                            "~/.ssh/id_ed25519".to_string();
                                         let key_field = if prompt_mode {
                                             self.render_connection_field(
                                                 key_label,
@@ -790,11 +701,7 @@ impl WorkspaceApp {
                                         content
                                             .child(key_field)
                                             .child(self.render_connection_secret_field(
-                                                if drill_down_mode {
-                                                    self.i18n.t("ssh.drill_down.passphrase")
-                                                } else {
-                                                    self.i18n.t("ssh.form.passphrase")
-                                                },
+                                                self.i18n.t("ssh.form.passphrase"),
                                                 self.i18n.t("ssh.form.passphrase_placeholder"),
                                                 NewConnectionField::Passphrase,
                                                 cx,
@@ -895,11 +802,9 @@ impl WorkspaceApp {
                                 })
                                 .when(form.auth_tab == SshAuthTab::Agent, |content| {
                                     let content = content
-                                        .child(self.render_connection_hint(if drill_down_mode {
-                                            self.i18n.t("ssh.drill_down.agent_desc")
-                                        } else {
-                                            self.i18n.t("ssh.form.agent_desc")
-                                        }))
+                                        .child(self.render_connection_hint(
+                                            self.i18n.t("ssh.form.agent_desc"),
+                                        ))
                                         .when(!prompt_mode, |content| {
                                             content
                                                 .child(self.render_connection_field(
@@ -914,17 +819,11 @@ impl WorkspaceApp {
                                                 .child(self.render_connection_hint(
                                                     self.i18n.t("ssh.form.agent_endpoint_hint"),
                                                 ))
-                                                .when(!drill_down_mode, |content| {
-                                                    content.child(self.render_agent_status(
-                                                        form.agent_available,
-                                                    ))
-                                                })
+                                                .child(self.render_agent_status(
+                                                    form.agent_available,
+                                                ))
                                         });
-                                    if drill_down_mode {
-                                        content.child(self.render_connection_hint(
-                                            self.i18n.t("ssh.drill_down.agent_hint"),
-                                        ))
-                                    } else if !prompt_mode {
+                                    if !prompt_mode {
                                         content.child(self.render_connection_hint(
                                             self.i18n.t("ssh.form.agent_hint"),
                                         ))
@@ -953,7 +852,6 @@ impl WorkspaceApp {
                                 .into_any_element();
                                     if (ssh_submission_mode || standalone_sftp_mode)
                                         && !prompt_mode
-                                        && !drill_down_mode
                                     {
                                         self.render_connection_form_section(
                                             ConnectionFormSection::Authentication,
@@ -965,9 +863,7 @@ impl WorkspaceApp {
                                     }
                                 })
                                 .when(
-                                    !prompt_mode
-                                        && !drill_down_mode
-                                        && !standalone_sftp_mode,
+                                    !prompt_mode && !standalone_sftp_mode,
                                     |content| {
                                     let route_body = div()
                                         .flex()
@@ -1178,7 +1074,6 @@ impl WorkspaceApp {
                         .when(
                             !edit_properties_mode
                                 && self.connection_form_state(cx).saved_connection_prompt_action.is_none()
-                                && !drill_down_mode
                                 && (ssh_submission_mode || standalone_sftp_mode),
                             |footer| {
                                 footer.child(self.render_connection_button(
@@ -1210,8 +1105,6 @@ impl WorkspaceApp {
                                             self.i18n.t("modals.new_connection.local_open")
                                         } else if standalone_sftp_mode {
                                             self.i18n.t("sftp.standalone.open")
-                                        } else if drill_down_mode {
-                                            self.i18n.t("ssh.drill_down.connect")
                                         } else {
                                             self.i18n.t("ssh.form.connect")
                                         },
@@ -1225,8 +1118,6 @@ impl WorkspaceApp {
                                             self.i18n.t("modals.new_connection.local_save_and_open")
                                         } else if standalone_sftp_mode {
                                             self.i18n.t("sftp.standalone.save_and_open")
-                                        } else if form.pending && drill_down_mode {
-                                            self.i18n.t("ssh.drill_down.connecting")
                                         } else {
                                             self.i18n.t("ssh.form.save_and_connect")
                                         },
@@ -1328,166 +1219,5 @@ impl WorkspaceApp {
             )
         })
         .into_any_element()
-    }
-
-    fn render_drill_saved_next_hop_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = self.tokens.ui;
-        let Some(parent_node_id) = self
-            .connection_form_state(cx)
-            .drill_down_parent_node_id
-            .clone()
-        else {
-            return div().into_any_element();
-        };
-        let parent_title = self
-            .ssh_nodes
-            .get(&parent_node_id)
-            .map(|node| node.title.clone())
-            .unwrap_or_default();
-        let description = self
-            .i18n
-            .t("sessions.saved_next_hop.description")
-            .replace("{{host}}", &parent_title);
-        let connections = self.connection_store.connection_infos();
-        let has_connections = !connections.is_empty();
-        let mut list = div().flex().flex_col().gap(px(4.0));
-        for connection in connections {
-            list = list.child(self.render_drill_saved_next_hop_row(
-                parent_node_id.clone(),
-                connection,
-                cx,
-            ));
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .rounded(px(self.tokens.radii.md))
-            .border_1()
-            .border_color(rgba((theme.border << 8) | 0x80))
-            .bg(rgba((theme.bg_card << 8) | 0x66))
-            .p(px(12.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(self.tokens.metrics.ui_text_sm))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(theme.text))
-                            .child(self.i18n.t("sessions.saved_next_hop.title")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(self.tokens.metrics.ui_text_xs))
-                            .text_color(rgb(theme.text_muted))
-                            .child(description),
-                    ),
-            )
-            .when(!has_connections, |section| {
-                section.child(
-                    self.render_connection_hint(self.i18n.t("sessions.saved_next_hop.empty")),
-                )
-            })
-            .when(has_connections, |section| {
-                section.child(
-                    div()
-                        .id("drill-saved-next-hop-scroll")
-                        .max_h(px(180.0))
-                        .selectable_overflow_y_scroll(
-                            &self.selectable_text_scroll_handle("drill-saved-next-hop-scroll"),
-                        )
-                        .child(list),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_drill_saved_next_hop_row(
-        &self,
-        parent_node_id: oxideterm_ssh::NodeId,
-        connection: oxideterm_connections::ConnectionInfo,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let connection_id = connection.id.clone();
-        let detail = format!(
-            "{}@{}:{}",
-            connection.username, connection.host, connection.port
-        );
-        let proxy_hop_count = connection.proxy_chain.len();
-        let proxy_badge = self
-            .i18n
-            .t("sessions.saved_next_hop.proxy_chain_badge")
-            .replace("{{count}}", &proxy_hop_count.to_string());
-
-        div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .rounded(px(self.tokens.radii.sm))
-            .px(px(8.0))
-            .py(px(6.0))
-            .cursor_pointer()
-            .hover(|row| row.bg(rgb(theme.bg_hover)))
-            .child(Self::render_lucide_icon(
-                LucideIcon::Server,
-                13.0,
-                rgb(theme.text_muted),
-            ))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(self.tokens.metrics.ui_text_xs))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(theme.text))
-                            .child(connection.name),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(10.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(detail),
-                    ),
-            )
-            .when(proxy_hop_count > 0, |row| {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .rounded(px(self.tokens.radii.sm))
-                        .bg(rgba((theme.accent << 8) | 0x1a))
-                        .px(px(6.0))
-                        .py(px(2.0))
-                        .text_size(px(10.0))
-                        .text_color(rgb(theme.accent))
-                        .child(proxy_badge),
-                )
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    this.connect_saved_connection_as_next_hop(
-                        parent_node_id.clone(),
-                        connection_id.clone(),
-                        window,
-                        cx,
-                    );
-                    cx.stop_propagation();
-                }),
-            )
-            .into_any_element()
     }
 }

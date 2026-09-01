@@ -1,5 +1,36 @@
 use gpui::{Pixels, Point, ScrollHandle, ScrollWheelEvent, px};
 
+/// Clears a stale horizontal offset once the previously measured content no
+/// longer overflows the container, so a path that shrank cannot stay
+/// translated out of view. Returns true when the offset changed.
+pub(in crate::workspace) fn reset_breadcrumb_scroll_if_content_fits(
+    scroll_handle: &ScrollHandle,
+) -> bool {
+    let offset = scroll_handle.offset();
+    breadcrumb_scroll_reset_offset(
+        f32::from(scroll_handle.max_offset().x),
+        f32::from(offset.x),
+        f32::from(offset.y),
+    )
+    .map(|next| {
+        scroll_handle.set_offset(next);
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Returns the corrective offset when previously measured content fits the
+/// container while the scroll offset is still non-zero.
+fn breadcrumb_scroll_reset_offset(max_scroll_x: f32, offset_x: f32, offset_y: f32) -> Option<Point<Pixels>> {
+    if max_scroll_x > 0.0 {
+        return None;
+    }
+    if offset_x == 0.0 && offset_y == 0.0 {
+        return None;
+    }
+    Some(Point::default())
+}
+
 /// Applies dominant wheel movement to a measured horizontal breadcrumb viewport.
 pub(super) fn scroll_breadcrumb_by_wheel(
     scroll_handle: &ScrollHandle,
@@ -53,5 +84,19 @@ mod tests {
         assert_eq!(breadcrumb_scroll_after_wheel(0.0, -24.0, 100.0), 24.0);
         assert_eq!(breadcrumb_scroll_after_wheel(90.0, -24.0, 100.0), 100.0);
         assert_eq!(breadcrumb_scroll_after_wheel(10.0, 24.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn breadcrumb_scroll_resets_only_when_content_fits_with_a_stale_offset() {
+        // Previously measured content no longer overflows while the bar is
+        // still translated: the stale offset must be cleared.
+        assert_eq!(
+            breadcrumb_scroll_reset_offset(0.0, -120.0, 0.0),
+            Some(Point::default())
+        );
+        // Overflowing content keeps any scroll offset.
+        assert_eq!(breadcrumb_scroll_reset_offset(80.0, -40.0, 0.0), None);
+        // An already-centered bar needs no correction.
+        assert_eq!(breadcrumb_scroll_reset_offset(0.0, 0.0, 0.0), None);
     }
 }

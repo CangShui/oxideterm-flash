@@ -33,10 +33,8 @@ mod editor_integration;
 mod local_graphics_event_loop;
 mod local_shell;
 mod local_shell_integration;
-mod privilege_prompt;
 mod process;
 mod process_lifecycle;
-mod remote_shell_integration;
 mod search;
 mod session;
 mod shell_completion;
@@ -70,16 +68,7 @@ pub use oxideterm_terminal_encoding::{
     TerminalInputEncoder as RawTerminalInputEncoder, TerminalOutputDecoder,
 };
 pub use oxideterm_trzsz::{TrzszTransferDirection, TrzszTransferPolicy, TrzszTransferSelection};
-pub use privilege_prompt::{
-    TerminalPrivilegePrompt, TerminalPrivilegePromptEvent, detect_terminal_privilege_prompt,
-};
 pub use process::{TerminalLifecycle, TerminalProcessInfo, TerminalProcessProbe};
-pub use remote_shell_integration::{
-    REMOTE_SHELL_INTEGRATION_RELATIVE_DIR, REMOTE_SHELL_INTEGRATION_VERSION,
-    RemoteShellIntegrationState, RemoteShellIntegrationStatus, RemoteShellKind,
-    inspect_remote_shell_integration, install_remote_shell_integration,
-    remove_remote_shell_integration,
-};
 pub use search::TerminalSearchSource;
 pub use session::{
     SerialControlLine, SerialControlState, SerialDisplayMode, SerialError, SerialErrorCode,

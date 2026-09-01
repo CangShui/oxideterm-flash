@@ -293,7 +293,7 @@ impl WorkspaceApp {
         let existing_editor = self.sftp_view.read(cx).preview_editor.clone();
         let editor = existing_editor.unwrap_or_else(|| {
             let tokens = self.tokens;
-            let runtime_settings = self.ide_runtime_settings();
+            let runtime_settings = self.sftp_editor_runtime_settings();
             let preview_path = self.sftp_view.read(cx).preview_path.clone();
             let name = preview_path
                 .as_deref()
@@ -304,9 +304,9 @@ impl WorkspaceApp {
                 sftp_editor_language_id(language, preview_path.as_deref(), name, source);
             let context_menu_labels = EditorContextMenuLabels {
                 copy: self.i18n.t("menu.copy"),
-                cut: self.i18n.t("fileManager.cut"),
+                cut: self.i18n.t("menu.cut"),
                 paste: self.i18n.t("menu.paste"),
-                select_all: self.i18n.t("fileManager.selectAll"),
+                select_all: self.i18n.t("menu.select_all"),
             };
             let (editor_text, _) = normalize_text_line_endings(source);
             let editor = cx.new(|cx| {

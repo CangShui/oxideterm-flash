@@ -2,7 +2,7 @@ use super::*;
 use crate::workspace::root::init::terminal_highlight_rules;
 use crate::workspace::root::init::terminal_preference_overrides;
 
-const SETTINGS_CONNECTION_IMPORTERS_SECTION_INDEX: usize = 5;
+const SETTINGS_SESSION_IMPORT_SECTION_INDEX: usize = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SettingsNavSelectionMotion {
@@ -58,7 +58,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         self.settings_workspace.update(cx, |settings, cx| {
-            settings.set_active_tab(SettingsTab::Connections, cx);
+            settings.set_active_tab(SettingsTab::SessionIO, cx);
         });
         self.close_settings_select();
         self.focused_settings_input = None;
@@ -66,11 +66,11 @@ impl WorkspaceApp {
         self.clear_ime_selection();
         self.sync_settings_section_list_state(cx);
         // Target the importer row directly so callers do not merely land at
-        // the top of a long Connections settings page.
+        // the top of a long Session I/O settings page.
         self.settings_section_list_state
             .scroll_to(gpui::ListOffset {
                 item_ix: SETTINGS_SECTION_HEADER_ITEM_COUNT
-                    + SETTINGS_CONNECTION_IMPORTERS_SECTION_INDEX,
+                    + SETTINGS_SESSION_IMPORT_SECTION_INDEX,
                 offset_in_item: px(0.0),
             });
         self.open_settings(window, cx);
@@ -133,6 +133,10 @@ impl WorkspaceApp {
             .when_some(
                 self.render_settings_select_overlay(cx),
                 |surface, overlay| surface.child(overlay),
+            )
+            .when_some(
+                self.render_cloud_sync_delete_prompt(cx),
+                |surface, prompt| surface.child(prompt),
             )
             .into_any_element()
     }
@@ -277,8 +281,6 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn settings_section_list_identity(&self, cx: &App) -> String {
-        // Nested settings pages own distinct row sets. Keybinding filtering is
-        // handled by per-row signatures so its toolbar can retain animation state.
         let route = self.settings_workspace.read(cx).route_snapshot();
         settings_model_section_list_identity(route.active_tab, route.terminal_page)
     }
@@ -331,6 +333,7 @@ impl WorkspaceApp {
             SettingsTab::Sftp => {
                 settings.sftp.speed_limit_enabled.hash(&mut hasher);
             }
+            SettingsTab::CloudSync => {}
             SettingsTab::Appearance => {
                 // App icon selection only changes paint state. Keeping it out
                 // of the height signature prevents scroll anchoring from
@@ -370,58 +373,19 @@ impl WorkspaceApp {
                     .managed_key_status()
                     .is_some()
                     .hash(&mut hasher);
+            }
+            SettingsTab::SessionIO => {
                 if settings_connection_importers_list_item(index) {
-                    // Importer state only changes the final importer card. Invalidating
-                    // earlier measured rows makes GPUI move the current scroll anchor.
+                    // Importer state only changes the first Session I/O card.
+                    // Invalidating earlier measured rows makes GPUI move the
+                    // current scroll anchor.
                     self.settings_workspace
                         .read(cx)
                         .connection_import_list_signature()
                         .hash(&mut hasher);
                 }
+                self.session_export_format(cx).tag().hash(&mut hasher);
             }
-            SettingsTab::Privilege => {
-                self.connection_store.connections().len().hash(&mut hasher);
-                self.connection_store
-                    .connections()
-                    .iter()
-                    .map(|connection| connection.privilege_credentials.len())
-                    .sum::<usize>()
-                    .hash(&mut hasher);
-                self.connection_store
-                    .list_privilege_credentials(LOCAL_SHELL_PRIVILEGE_CONNECTION_ID)
-                    .map(|credentials| credentials.len())
-                    .unwrap_or(0)
-                    .hash(&mut hasher);
-                self.settings_workspace
-                    .read(cx)
-                    .privilege_layout_flags()
-                    .hash(&mut hasher);
-            }
-            SettingsTab::Portable => {
-                let portable = self.settings_workspace.read(cx).portable_status_snapshot();
-                portable.refresh_pending.hash(&mut hasher);
-                portable.error.is_some().hash(&mut hasher);
-                portable.exportable_secret_count.hash(&mut hasher);
-                if let Some(status) = portable.status.as_ref() {
-                    status.is_portable.hash(&mut hasher);
-                    format!("{:?}", status.status).hash(&mut hasher);
-                    status.is_unlocked.hash(&mut hasher);
-                }
-            }
-            SettingsTab::Keybindings => {
-                // The toolbar owns the moving scope indicator. Keep row zero
-                // mounted while filtered table rows are replaced underneath it.
-                if index > 0 {
-                    let keybinding_state = self.settings_workspace.read(cx);
-                    format!("{:?}", keybinding_state.keybinding_scope_filter()).hash(&mut hasher);
-                    keybinding_state
-                        .keybinding_search_query()
-                        .trim()
-                        .hash(&mut hasher);
-                }
-                settings.keybindings.overrides.len().hash(&mut hasher);
-            }
-            _ => {}
         }
 
         hasher.finish()
@@ -439,40 +403,7 @@ impl WorkspaceApp {
         let route = self.settings_workspace.read(cx).route_snapshot();
         SettingsDynamicSectionCounts {
             terminal_page: route.terminal_page,
-            visible_keybinding_scope_count: self.visible_keybinding_scope_count(cx),
         }
-    }
-
-    pub(in crate::workspace) fn visible_keybinding_scope_count(&self, cx: &App) -> usize {
-        let keybinding_state = self.settings_workspace.read(cx);
-        let query = keybinding_state
-            .keybinding_search_query()
-            .trim()
-            .to_lowercase();
-        let scope_filter = keybinding_state.keybinding_scope_filter();
-        [
-            crate::keybindings::ActionScope::Global,
-            crate::keybindings::ActionScope::Terminal,
-            crate::keybindings::ActionScope::Split,
-            crate::keybindings::ActionScope::Palette,
-        ]
-        .into_iter()
-        .filter(|scope| {
-            crate::keybindings::ACTION_DEFINITIONS
-                .iter()
-                .filter(|definition| definition.scope == *scope)
-                .filter(|definition| {
-                    settings_keybinding_scope_matches(scope_filter, definition.scope)
-                })
-                .any(|definition| {
-                    if query.is_empty() {
-                        return true;
-                    }
-                    let label = self.i18n.t(&definition.label_key()).to_lowercase();
-                    label.contains(&query) || definition.id.to_lowercase().contains(&query)
-                })
-        })
-        .count()
     }
 
     pub(in crate::workspace) fn render_settings_tab_section(
@@ -486,17 +417,13 @@ impl WorkspaceApp {
         // settings Vec and discarding every non-visible card.
         match tab {
             SettingsTab::General => self.settings_general_section(section_index, cx),
-            SettingsTab::Portable => self.settings_portable_section(section_index, cx),
             SettingsTab::Terminal => self.settings_terminal_section(section_index, cx),
             SettingsTab::Appearance => self.settings_appearance_section(section_index, cx),
             SettingsTab::Connections => self.settings_connections_section(section_index, cx),
-            SettingsTab::Privilege => {
-                self.settings_privilege_credentials_section(section_index, cx)
-            }
             SettingsTab::Network => self.settings_network_section(section_index, cx),
             SettingsTab::Sftp => self.settings_sftp_section(section_index, cx),
-            SettingsTab::Ide => self.settings_ide_section(section_index, cx),
-            SettingsTab::Keybindings => self.settings_keybindings_section(section_index, cx),
+            SettingsTab::CloudSync => self.settings_cloud_sync_section(cx),
+            SettingsTab::SessionIO => self.settings_session_io_section(section_index, cx),
             SettingsTab::Help => self.settings_help_section(section_index, cx),
         }
     }
@@ -795,9 +722,6 @@ impl WorkspaceApp {
                         #[cfg(not(target_os = "macos"))]
                         this.refresh_launch_at_login_status(cx);
                     }
-                    if tab == SettingsTab::Portable {
-                        this.refresh_portable_settings_snapshot(true, cx);
-                    }
                     cx.stop_propagation();
                     cx.notify();
                 }),
@@ -852,25 +776,6 @@ impl WorkspaceApp {
                         cx,
                     )),
             )
-            .when(tab == SettingsTab::Keybindings, |header| {
-                let note = self.i18n.t("settings_view.keybindings.intl_keyboard_note");
-                header.child(
-                    div()
-                        .mt(px(2.0))
-                        .w_full()
-                        .min_w(px(0.0))
-                        .text_size(px(self.tokens.metrics.ui_text_xs))
-                        .text_color(rgba((self.tokens.ui.text_muted << 8) | 0xb3))
-                        .line_height(px((self.tokens.metrics.ui_text_xs + 4.0).max(16.0)))
-                        .child(self.render_selectable_text_scoped(
-                            "settings-keybindings-note",
-                            "keybindings",
-                            note,
-                            self.tokens.ui.text_muted,
-                            cx,
-                        )),
-                )
-            })
             .into_any_element()
     }
 
@@ -887,6 +792,22 @@ impl WorkspaceApp {
         self.settings_workspace.update(cx, |settings, _cx| {
             settings.acknowledge_external_store_state()
         });
+        self.sync_tab_titles(cx);
+        cx.notify();
+    }
+
+    /// Live-editing variant for pointer-driven controls such as slider drags.
+    /// Runtime state updates every step, while the disk write coalesces into
+    /// one save when the interaction finishes (see finish_settings_slider_drag).
+    pub(in crate::workspace) fn edit_settings_deferring_save(
+        &mut self,
+        edit: impl FnOnce(&mut PersistedSettings),
+        cx: &mut Context<Self>,
+    ) {
+        edit(self.settings_store.settings_mut());
+        let settings = self.settings_store.settings().clone();
+        self.apply_loaded_settings_to_runtime(&settings, cx);
+        self.settings_save_pending = true;
         self.sync_tab_titles(cx);
         cx.notify();
     }
@@ -931,20 +852,32 @@ impl WorkspaceApp {
     ) {
         install_application_proxy_policy_from_settings(settings, &self.connection_store);
         crate::app_icon::install_runtime_app_icon(settings.appearance.app_icon);
+        let previous_locale = self.i18n.locale();
         self.i18n
             .set_locale(locale_from_settings(settings.general.language));
+        if self.i18n.locale() != previous_locale {
+            // The native menu bar renders outside GPUI surfaces, so it keeps
+            // the previous language until menus are rebuilt on locale change.
+            cx.set_menus(crate::platform::app_menus(&self.i18n));
+        }
         oxideterm_desktop_presence::set_keep_running_on_close(
             settings.general.minimize_to_tray_on_close,
         );
-        self.tokens = tokens_from_settings(&settings);
-        self.render_policy = compute_render_policy(
+        let render_policy = compute_render_policy(
             self.render_profile_override
                 .unwrap_or(settings.appearance.render_profile),
             &self.detected_graphics,
         );
         // Settings changes can flip the render profile while a modal is open;
         // update the shared backdrop gate before the next top-layer render.
-        set_tauri_backdrop_blur_allowed(self.render_policy.allow_background_blur);
+        set_tauri_backdrop_blur_allowed(render_policy.allow_background_blur);
+        // Tokens resolve motion through the render policy, so the policy must
+        // be recomputed before the theme refresh.
+        self.tokens = tokens_from_settings(&settings, &render_policy);
+        crate::workspace::detached_tab_window::set_detached_window_bootstrap_background(
+            self.tokens.ui.bg,
+        );
+        self.render_policy = render_policy;
         self.sftp_transfer_manager
             .apply_settings(sftp_runtime_settings_from_settings(&settings));
         if !settings.terminal.command_bar.enabled || !settings.terminal.command_bar.project_tasks {
@@ -968,10 +901,6 @@ impl WorkspaceApp {
                 reconnect_timing_from_settings(&settings),
                 reconnect_max_attempts_from_settings(&settings),
                 cx,
-            );
-            runtime.configure_remote_shell_integration(
-                settings.terminal.remote_shell_integration_mode,
-                settings.terminal.command_bar.current_directory_awareness,
             );
         });
         self.tab_host.update(cx, |tab_host, _cx| {
@@ -1082,10 +1011,6 @@ impl WorkspaceApp {
                 }
             });
         }
-        // Tauri's IDE reads Settings.ide live from settingsStore. Native IDE
-        // surfaces keep their own GPUI owners, so push typography/wrap/autosave
-        // changes into each open surface after the settings store changes.
-        self.apply_ide_runtime_settings_to_surfaces(cx);
         self.sync_terminal_command_sender_appearance(cx);
         self.sync_active_terminal_metadata_context(cx);
     }
@@ -1094,7 +1019,7 @@ impl WorkspaceApp {
 fn settings_connection_importers_list_item(list_index: usize) -> bool {
     list_index
         .checked_sub(SETTINGS_SECTION_HEADER_ITEM_COUNT)
-        .is_some_and(|section_index| section_index == SETTINGS_CONNECTION_IMPORTERS_SECTION_INDEX)
+        .is_some_and(|section_index| section_index == SETTINGS_SESSION_IMPORT_SECTION_INDEX)
 }
 
 const SETTINGS_TERMINAL_FOCUS_HANDOFF_SECTION_INDEX: usize = 1;

@@ -1,10 +1,6 @@
 use std::path::PathBuf;
 
 pub(crate) fn default_ssh_dir() -> Option<PathBuf> {
-    if let Ok(Some(ssh_dir)) = oxideterm_portable_runtime::portable_ssh_dir() {
-        return Some(ssh_dir);
-    }
-
     local_home_dir().map(|home| home.join(".ssh"))
 }
 

@@ -46,20 +46,17 @@ impl WorkspaceApp {
     ) {
         if previous_active_tab_id != active_tab_id {
             if let Some(tab_id) = previous_active_tab_id {
-                self.sync_ide_surface_mount(tab_id, cx);
                 self.sync_remote_desktop_frame_visibility(tab_id, cx);
             }
             if let Some(tab_id) = active_tab_id {
-                self.sync_ide_surface_mount(tab_id, cx);
                 self.sync_remote_desktop_frame_visibility(tab_id, cx);
             }
             // Host Tools owns its timer; root only pushes mount visibility changes.
-            self.sync_host_tools_lifecycle(false, cx);
+            self.sync_host_tools_lifecycle(cx);
             // Forwarding owns its sampler; root only pushes aggregate mount visibility.
             self.sync_forwarding_sampling_visibility(cx);
             self.sync_active_terminal_metadata_context(cx);
             self.sync_active_terminal_recording_elapsed_tick(cx);
-            self.sync_active_privilege_prompt_inline_hint(cx);
         }
     }
 

@@ -62,8 +62,15 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.tokens.ui;
-        let compact = self.sftp_view.read(cx).current_surface_id == Some(SftpSurfaceId::Sidebar);
+        // Metadata columns render on every surface; the sidebar is wide enough
+        // and MobaXterm-style operators expect size/time/owner at a glance.
         let drag_over = self.sftp_view.read(cx).drag_over_pane == Some(pane);
+        // Non-root remote listings pin a ".." parent row at the top so
+        // navigating one level up never requires the toolbar.
+        let show_parent_row = pane == SftpPane::Remote && {
+            let path = self.sftp_view.read(cx).remote_path.clone();
+            !path.is_empty() && path != "/"
+        };
         let list = div()
             .id(("sftp-file-list-scroll", pane as u64))
             .flex_1()
@@ -182,7 +189,10 @@ impl WorkspaceApp {
         }
 
         let visible_indices = self.sftp_view.read(cx).visible_file_indices(pane);
-        if visible_indices.is_empty() {
+        // A non-root empty directory must still offer the pinned parent row,
+        // otherwise ".." is the only way out and it would vanish exactly when
+        // the operator needs it.
+        if visible_indices.is_empty() && !show_parent_row {
             return list
                 .child(
                     div()
@@ -221,9 +231,46 @@ impl WorkspaceApp {
             SftpPane::Local => self.sftp_view.read(cx).local_file_scroll.clone(),
             SftpPane::Remote => self.sftp_view.read(cx).remote_file_scroll.clone(),
         };
-        let row_count = visible_indices.len();
+        let row_count = visible_indices.len() + usize::from(show_parent_row);
 
-        list.child(tauri_virtual_uniform_list(
+        list.child(
+            div()
+                .flex_none()
+                .w_full()
+                .h(px(22.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(8.0))
+                .border_b_1()
+                .border_color(rgba((theme.border << 8) | 0x80))
+                .bg(rgb(theme.bg_panel))
+                .text_size(px(10.0))
+                .text_color(rgb(theme.text_muted))
+                .child(div().flex_1().min_w(px(0.0)).truncate().child(self.i18n.t("sftp.columns.name")))
+                .child(
+                    div()
+                        .w(px(SFTP_SIZE_COL))
+                        .flex_none()
+                        .text_align(gpui::TextAlign::Right)
+                        .child(self.i18n.t("sftp.columns.size")),
+                )
+                .child(
+                    div()
+                        .w(px(SFTP_MODIFIED_COL))
+                        .flex_none()
+                        .text_align(gpui::TextAlign::Right)
+                        .child(self.i18n.t("sftp.columns.modified")),
+                )
+                .child(
+                    div()
+                        .w(px(SFTP_OWNER_COL))
+                        .flex_none()
+                        .text_align(gpui::TextAlign::Right)
+                        .child(self.i18n.t("sftp.columns.owner")),
+                ),
+        )
+        .child(tauri_virtual_uniform_list(
             ("sftp-file-list-virtual", pane as u64),
             row_count,
             scroll_handle,
@@ -231,7 +278,91 @@ impl WorkspaceApp {
             move |range, _window, _cx| {
                 range
                     .map(|index| {
-                        let source_index = visible_indices[index];
+                        // The pinned parent row occupies index 0 of non-root
+                        // remote listings and navigates one level up.
+                        if show_parent_row && index == 0 {
+                            let sftp_view = sftp_view.clone();
+                            return div()
+                                .id("sftp-parent-row")
+                                .w_full()
+                                .h(px(SFTP_ROW_HEIGHT))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .border_b_1()
+                                .border_color(rgba(theme.border << 8))
+                                .text_size(px(SFTP_TEXT_XS))
+                                .text_color(rgb(theme.text))
+                                .bg(rgba(theme.bg << 8))
+                                .hover(move |row| {
+                                    row.bg(sftp_hover_bg(theme.bg_hover, has_background))
+                                })
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(Self::render_lucide_icon(
+                                            LucideIcon::Folder,
+                                            SFTP_ICON_MD,
+                                            rgb(SFTP_FOLDER_BLUE),
+                                        ))
+                                        .child(div().truncate().child("..")),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(SFTP_SIZE_COL))
+                                        .flex_none()
+                                        .text_align(gpui::TextAlign::Right)
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("-"),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(SFTP_MODIFIED_COL))
+                                        .flex_none()
+                                        .text_align(gpui::TextAlign::Right)
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("-"),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(SFTP_OWNER_COL))
+                                        .flex_none()
+                                        .text_align(gpui::TextAlign::Right)
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("-"),
+                                )
+                                .on_mouse_down(MouseButton::Left, {
+                                    let sftp_view = sftp_view.clone();
+                                    move |event: &MouseDownEvent, _window, cx| {
+                                        // Same double-click contract as file rows;
+                                        // the workspace normalizes ".." to the parent.
+                                        if event.click_count >= 2 {
+                                            sftp_view.update(cx, |sftp, cx| {
+                                                sftp.activate_file(
+                                                    pane,
+                                                    parent_directory_entry(),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                        cx.stop_propagation();
+                                    }
+                                })
+                                .into_any_element();
+                        }
+                        let source_index = if show_parent_row {
+                            visible_indices[index - 1]
+                        } else {
+                            visible_indices[index]
+                        };
                         let (file, is_selected) = {
                             let sftp = sftp_view.read(_cx);
                             let (files, selected) = match pane {
@@ -252,8 +383,11 @@ impl WorkspaceApp {
                         } else {
                             file.name.clone()
                         };
-                        let _metadata_fields_consumed =
-                            (&file.permissions, &file.owner, &file.group);
+                        let owner_text = file
+                            .owner
+                            .as_deref()
+                            .map(|owner| if owner == "0" { "root".to_string() } else { owner.to_string() })
+                            .unwrap_or_else(|| "-".to_string());
                         let size_text = if file.file_type == SftpFileType::Directory {
                             "-".to_string()
                         } else {
@@ -261,6 +395,9 @@ impl WorkspaceApp {
                         };
                         let modified_text = format_modified(file.modified);
                         div()
+                            // Virtualized rows need a stable identity so GPUI
+                            // repaints their hover state on every mouse transition.
+                            .id(format!("sftp-file-row-{}-{source_index}", pane as u8))
                             .w_full()
                             .h(px(SFTP_ROW_HEIGHT))
                             .flex()
@@ -313,26 +450,30 @@ impl WorkspaceApp {
                                     // root selectable-text adapter here.
                                     .child(div().truncate().child(display_name)),
                             )
-                            .when(!compact, |row| {
-                                row.child(
-                                    div()
-                                        .w(px(SFTP_SIZE_COL))
-                                        .flex_none()
-                                        .text_align(gpui::TextAlign::Right)
-                                        .text_color(rgb(theme.text_muted))
-                                        .child(size_text),
-                                )
-                            })
-                            .when(!compact, |row| {
-                                row.child(
-                                    div()
-                                        .w(px(SFTP_MODIFIED_COL))
-                                        .flex_none()
-                                        .text_align(gpui::TextAlign::Right)
-                                        .text_color(rgb(theme.text_muted))
-                                        .child(modified_text),
-                                )
-                            })
+                            .child(
+                                div()
+                                    .w(px(SFTP_SIZE_COL))
+                                    .flex_none()
+                                    .text_align(gpui::TextAlign::Right)
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(size_text),
+                            )
+                            .child(
+                                div()
+                                    .w(px(SFTP_MODIFIED_COL))
+                                    .flex_none()
+                                    .text_align(gpui::TextAlign::Right)
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(modified_text),
+                            )
+                            .child(
+                                div()
+                                    .w(px(SFTP_OWNER_COL))
+                                    .flex_none()
+                                    .text_align(gpui::TextAlign::Right)
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(owner_text),
+                            )
                             .on_mouse_down(MouseButton::Left, {
                                 let sftp_view = sftp_view.clone();
                                 move |event: &MouseDownEvent, _window, cx| {

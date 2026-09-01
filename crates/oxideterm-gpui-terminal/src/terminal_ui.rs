@@ -328,6 +328,7 @@ pub struct TerminalCommandSelectionLabels {
     pub copy: String,
     pub copy_title: String,
     pub copy_command: String,
+    pub copied_confirmation: String,
     pub fill_command_bar: String,
     pub insert_selection_into_command: String,
     pub replace_command_with_selection: String,
@@ -347,6 +348,7 @@ impl Default for TerminalCommandSelectionLabels {
             copy: "Copy".to_string(),
             copy_title: "Copy command output".to_string(),
             copy_command: "Copy command".to_string(),
+            copied_confirmation: "Copied to clipboard".to_string(),
             fill_command_bar: "Fill command bar".to_string(),
             insert_selection_into_command: "Insert selection here".to_string(),
             replace_command_with_selection: "Replace command with selection".to_string(),
@@ -370,6 +372,16 @@ pub struct TerminalModemLabels {
     pub ymodem_receive: String,
     pub zmodem_upload: String,
     pub zmodem_receive: String,
+    pub select_upload_files_title: String,
+    pub select_download_directory_title: String,
+    pub completed_title: String,
+    pub cancelled_title: String,
+    pub failed_title: String,
+    pub connection_lost_title: String,
+    pub invalid_selection: String,
+    pub invalid_file_name: String,
+    pub wrong_direction: String,
+    pub worker_stopped: String,
 }
 
 impl Default for TerminalModemLabels {
@@ -382,6 +394,19 @@ impl Default for TerminalModemLabels {
             ymodem_receive: "YMODEM receive".to_string(),
             zmodem_upload: "ZMODEM upload".to_string(),
             zmodem_receive: "ZMODEM receive".to_string(),
+            select_upload_files_title: "Select files for the modem transfer".to_string(),
+            select_download_directory_title: "Select download location".to_string(),
+            completed_title: "Modem transfer completed".to_string(),
+            cancelled_title: "Modem transfer cancelled".to_string(),
+            failed_title: "Modem transfer failed".to_string(),
+            connection_lost_title: "Modem transfer interrupted by connection loss".to_string(),
+            invalid_selection: "The selected paths do not match the requested modem transfer."
+                .to_string(),
+            invalid_file_name: "A local file name could not be used for this modem transfer."
+                .to_string(),
+            wrong_direction: "The remote side is waiting for an X/YMODEM upload, not a download."
+                .to_string(),
+            worker_stopped: "The modem worker stopped unexpectedly.".to_string(),
         }
     }
 }
@@ -509,7 +534,7 @@ impl Default for TerminalTrzszLabels {
             completed_title: "Transfer completed".to_string(),
             completed_description: "The trzsz transfer completed successfully.".to_string(),
             failed_title: "Transfer failed".to_string(),
-            failed_description: "oxideterm-flash could not complete this trzsz transfer.".to_string(),
+            failed_description: "OxideTerm could not complete this trzsz transfer.".to_string(),
             connection_lost_title: "Transfer interrupted by connection loss".to_string(),
             connection_lost_description:
                 "The SSH connection changed while the trzsz transfer was running. Reconnect and start the transfer again."
@@ -524,7 +549,7 @@ impl Default for TerminalTrzszLabels {
                     .to_string(),
             path_invalid_title: "Download path rejected".to_string(),
             path_invalid_description:
-                "oxideterm-flash blocked this trzsz transfer because the selected path is invalid or outside the allowed download root."
+                "OxideTerm blocked this trzsz transfer because the selected path is invalid or outside the allowed download root."
                     .to_string(),
             symlink_not_supported_title: "Symlink transfer is not supported".to_string(),
             symlink_not_supported_description:
@@ -728,6 +753,12 @@ impl TerminalUiTheme {
             header_foreground: tokens.terminal.cursor,
             tokens,
         }
+    }
+
+    // Reduced and Off motion profiles disable continuous decorative motion such
+    // as cursor blinking; spatial_enabled is false for exactly those profiles.
+    pub fn reduced_motion(&self) -> bool {
+        !self.tokens.motion.enabled || !self.tokens.motion.spatial_enabled
     }
 }
 

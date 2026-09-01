@@ -250,7 +250,6 @@ fn apply_oxide_import_with_options_inner(
     result.restored_key_passphrases = credential_counts.restored_key_passphrases;
     result.restored_managed_keys = credential_counts.restored_managed_keys;
     result.restored_managed_key_passphrases = credential_counts.restored_managed_key_passphrases;
-    result.restored_privilege_credentials = credential_counts.restored_privilege_credentials;
     result.skipped_sensitive_credentials = credential_counts.skipped_sensitive_credentials;
     let mut seen_source_connection_ids = HashSet::new();
     for connection in &selected_connections {
@@ -510,7 +509,6 @@ struct SensitiveCredentialImportCounts {
     restored_key_passphrases: usize,
     restored_managed_keys: usize,
     restored_managed_key_passphrases: usize,
-    restored_privilege_credentials: usize,
     skipped_sensitive_credentials: usize,
 }
 
@@ -520,7 +518,6 @@ impl SensitiveCredentialImportCounts {
         self.restored_key_passphrases += other.restored_key_passphrases;
         self.restored_managed_keys += other.restored_managed_keys;
         self.restored_managed_key_passphrases += other.restored_managed_key_passphrases;
-        self.restored_privilege_credentials += other.restored_privilege_credentials;
     }
 
     fn restored_total(&self) -> usize {
@@ -528,7 +525,6 @@ impl SensitiveCredentialImportCounts {
             + self.restored_key_passphrases
             + self.restored_managed_keys
             + self.restored_managed_key_passphrases
-            + self.restored_privilege_credentials
     }
 }
 
@@ -558,11 +554,6 @@ fn count_sensitive_credentials_for_connection(
     for hop in &connection.proxy_chain {
         count_sensitive_credentials_for_auth(&hop.auth, options, &mut counts);
     }
-    counts.restored_privilege_credentials += connection
-        .privilege_credentials
-        .iter()
-        .filter(|credential| credential.secret.is_some())
-        .count();
     counts
 }
 
@@ -658,7 +649,6 @@ fn encrypted_connection_to_saved(
     import_options: &OxideImportOptions,
 ) -> Result<(SavedConnection, Vec<OxideForwardRecord>), OxideFileError> {
     let id = id_override.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let credential_connection_id = id.clone();
     let forward_records = import_forwards(&id, conn.forwards);
     let mut options = conn.options;
     options.jump_host = None;
@@ -704,36 +694,9 @@ fn encrypted_connection_to_saved(
             icon: conn.icon,
             tags: conn.tags,
             post_connect_command: None,
-            privilege_credentials: import_privilege_credentials(
-                &credential_connection_id,
-                conn.privilege_credentials,
-            ),
         },
         forward_records,
     ))
-}
-
-fn import_privilege_credentials(
-    connection_id: &str,
-    credentials: Vec<EncryptedPrivilegeCredential>,
-) -> Vec<SavedPrivilegeCredential> {
-    credentials
-        .into_iter()
-        .map(|credential| SavedPrivilegeCredential {
-            id: credential.id,
-            connection_id: connection_id.to_string(),
-            label: credential.label,
-            kind: credential.kind,
-            username_hint: credential.username_hint,
-            prompt_patterns: credential.prompt_patterns,
-            keychain_id: None,
-            plaintext_secret: credential.secret.map(SecretString::from),
-            enabled: credential.enabled,
-            require_click_to_send: credential.require_click_to_send,
-            created_at: credential.created_at,
-            updated_at: credential.updated_at,
-        })
-        .collect()
 }
 
 fn import_forwards(

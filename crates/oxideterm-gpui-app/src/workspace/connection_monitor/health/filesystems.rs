@@ -507,6 +507,7 @@ impl HostToolsEntity {
         let read_only = host_filesystem_read_only_display(i18n, entry.read_only);
 
         div()
+            .id(("host-filesystem-row", index))
             .w_full()
             .min_w_0()
             .border_b_1()

@@ -84,6 +84,17 @@ impl SftpWorkspaceEntity {
         cx.notify();
     }
 
+    pub(in crate::workspace::sftp) fn open_new_file_dialog(
+        &mut self,
+        pane: SftpPane,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog_value.clear();
+        self.set_dialog(SftpDialog::NewFile { pane });
+        self.focused_input = Some(SftpInput::DialogValue);
+        cx.notify();
+    }
+
     fn selected_transfer_names(&self, pane: SftpPane) -> Vec<String> {
         match pane {
             SftpPane::Local => self.local_selected.iter().cloned().collect(),
@@ -239,6 +250,7 @@ impl SftpWorkspaceEntity {
                 size: transfer.source.size.max(1),
                 transferred: 0,
                 speed: 0,
+                smoothed_speed: 0,
                 state: SftpTransferState::Pending,
                 error: None,
             });

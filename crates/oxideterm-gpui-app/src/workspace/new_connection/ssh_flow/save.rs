@@ -1,10 +1,8 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
+use crate::workspace::new_connection::form_state::{form_from_remote_desktop_profile, form_from_serial_profile, form_from_telnet_profile};
 use super::*;
-use crate::workspace::{
-    WorkspaceNotificationKind, WorkspaceNotificationScope, WorkspaceNotificationSeverity,
-};
 use gpui::App;
 use oxideterm_connections::{
     ConnectionStore, SavedAuth, SavedConnection, SavedProxyHop, StandaloneSftpEndpoint,
@@ -586,9 +584,12 @@ impl WorkspaceApp {
             connection_flow.set_form_feedback(Some(false), Some(message.clone()), cx)
         });
         if !reported_to_form {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(message), cx);
-            });
+            self.push_command_palette_toast(
+                message,
+                None,
+                TerminalNoticeVariant::Error,
+                cx,
+            );
         }
         cx.notify();
     }
@@ -601,16 +602,22 @@ impl WorkspaceApp {
     ) {
         let Some(title) = self.ssh_nodes.get(&node_id).map(|node| node.title.clone()) else {
             let message = self.i18n.t("ssh.form.runtime_node_missing");
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(message), cx);
-            });
+            self.push_command_palette_toast(
+                message,
+                None,
+                TerminalNoticeVariant::Error,
+                cx,
+            );
             return;
         };
         let Some(runtime_snapshot) = self.node_router.node_runtime_snapshot(&node_id) else {
             let message = self.i18n.t("ssh.form.runtime_node_missing");
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(message), cx);
-            });
+            self.push_command_palette_toast(
+                message,
+                None,
+                TerminalNoticeVariant::Error,
+                cx,
+            );
             return;
         };
         let parent_id = runtime_snapshot.parent_id.clone();
@@ -622,9 +629,12 @@ impl WorkspaceApp {
             Ok(hops) => hops.unwrap_or_default(),
             Err(error) => {
                 let message = error.to_string();
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(Some(message), cx);
-                });
+                self.push_command_palette_toast(
+                    message,
+                    None,
+                    TerminalNoticeVariant::Error,
+                    cx,
+                );
                 return;
             }
         };
@@ -730,11 +740,22 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (transport, drill_down_parent_id, mode) = {
+        // Footer buttons disable themselves while a submission is in flight,
+        // but the Enter path reaches this shared dispatcher without that gate.
+        // Re-entry would start a second concurrent handshake and duplicate the
+        // credential upsert, so enforce the same pending guard here.
+        if self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .is_some_and(|form| form.pending)
+        {
+            return;
+        }
+        let (transport, mode) = {
             let state = self.connection_form_state(cx);
             (
                 state.form.as_ref().map(|form| form.transport),
-                state.drill_down_parent_node_id.clone(),
                 state.mode(),
             )
         };
@@ -757,71 +778,27 @@ impl WorkspaceApp {
             return;
         }
         if transport == Some(NewConnectionTransport::Serial)
-            && drill_down_parent_id.is_none()
             && mode == NewConnectionFormMode::NewConnection
         {
             self.submit_serial_connection_form(action, window, cx);
             return;
         }
         if transport == Some(NewConnectionTransport::Telnet)
-            && drill_down_parent_id.is_none()
             && mode == NewConnectionFormMode::NewConnection
         {
             self.submit_telnet_connection_form(action, window, cx);
             return;
         }
-        if transport == Some(NewConnectionTransport::StandaloneSftp)
-            && drill_down_parent_id.is_none()
-        {
+        if transport == Some(NewConnectionTransport::StandaloneSftp) {
             self.submit_standalone_sftp_connection_form(action, window, cx);
             return;
         }
         if transport
             .and_then(remote_desktop_protocol_for_transport)
             .is_some()
-            && drill_down_parent_id.is_none()
             && mode == NewConnectionFormMode::NewConnection
         {
             self.submit_remote_desktop_connection_form(action, window, cx);
-            return;
-        }
-        if let Some(parent_id) = drill_down_parent_id {
-            match action {
-                NewConnectionSubmitAction::Save => {
-                    self.save_new_connection_without_connecting(Some(&parent_id), window, cx);
-                    return;
-                }
-                NewConnectionSubmitAction::SaveAndConnect => {
-                    let Some(handoff) = self.save_current_connection_form(Some(&parent_id), cx)
-                    else {
-                        return;
-                    };
-                    self.start_saved_form_connection_flow(handoff, Some(parent_id), window, cx);
-                    return;
-                }
-                NewConnectionSubmitAction::Connect => {
-                    self.update_connection_form_state(cx, |state| {
-                        if let Some(form) = state.form.as_mut() {
-                            form.save_connection = false;
-                        }
-                    });
-                }
-            }
-            let terminal_options = self
-                .connection_form_state(cx)
-                .form
-                .as_ref()
-                .map(SshTerminalConnectionOptions::from_form)
-                .unwrap_or_default();
-            self.start_new_connection_flow(
-                SshConnectionIntent::DrillDown {
-                    parent_id,
-                    saved_connection_id: None,
-                    terminal_options,
-                },
-                window,
-                cx,
-            );
             return;
         }
         match mode {
@@ -854,13 +831,13 @@ impl WorkspaceApp {
                     );
                 }
                 NewConnectionSubmitAction::Save => {
-                    self.save_new_connection_without_connecting(None, window, cx);
+                    self.save_new_connection_without_connecting(window, cx);
                 }
                 NewConnectionSubmitAction::SaveAndConnect => {
-                    let Some(handoff) = self.save_current_connection_form(None, cx) else {
+                    let Some(handoff) = self.save_current_connection_form(cx) else {
                         return;
                     };
-                    self.start_saved_form_connection_flow(handoff, None, window, cx);
+                    self.start_saved_form_connection_flow(handoff, window, cx);
                 }
             },
         }
@@ -868,25 +845,20 @@ impl WorkspaceApp {
 
     pub(super) fn save_new_connection_without_connecting(
         &mut self,
-        drill_down_parent_id: Option<&NodeId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .save_current_connection_form(drill_down_parent_id, cx)
-            .is_some()
-        {
+        if self.save_current_connection_form(cx).is_some() {
             self.close_new_connection_form(window, cx);
         }
     }
 
     pub(super) fn save_current_connection_form(
         &mut self,
-        drill_down_parent_id: Option<&NodeId>,
         cx: &mut Context<Self>,
     ) -> Option<SavedConnectionRuntimeHandoff> {
-        self.ensure_new_connection_save_name_is_unique(drill_down_parent_id, cx);
-        let request = match self.save_request_for_current_form(drill_down_parent_id, cx) {
+        self.ensure_new_connection_save_name_is_unique(cx);
+        let request = match self.save_request_for_current_form(cx) {
             Some(Ok(request)) => request,
             Some(Err(error)) => {
                 self.update_connection_form_state(cx, |state| {
@@ -933,7 +905,6 @@ impl WorkspaceApp {
     fn start_saved_form_connection_flow(
         &mut self,
         handoff: SavedConnectionRuntimeHandoff,
-        drill_down_parent_id: Option<NodeId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -951,42 +922,7 @@ impl WorkspaceApp {
             self.report_saved_next_hop_error("modals.new_connection.save_failed", cx);
             return;
         };
-        let intent = if let Some(parent_id) = drill_down_parent_id {
-            let prefix_count = match self.runtime_proxy_hops_for_parent_path(&parent_id) {
-                Ok(hops) => hops.len(),
-                Err(error) => {
-                    self.report_saved_next_hop_message(error.to_string(), cx);
-                    return;
-                }
-            };
-            if prefix_count > 0 {
-                let Some(proxy_chain) = config.proxy_chain.as_mut() else {
-                    self.report_saved_next_hop_error("modals.new_connection.save_failed", cx);
-                    return;
-                };
-                if proxy_chain.len() < prefix_count {
-                    self.report_saved_next_hop_error("modals.new_connection.save_failed", cx);
-                    return;
-                }
-                // Existing parent nodes already own the persisted prefix path.
-                proxy_chain.drain(..prefix_count);
-                if proxy_chain.is_empty() {
-                    config.proxy_chain = None;
-                }
-            }
-            SshConnectionIntent::DrillDown {
-                parent_id,
-                saved_connection_id: Some(connection.id.clone()),
-                terminal_options: SshTerminalConnectionOptions {
-                    terminal: connection.options.terminal,
-                    dedicated_new_terminal_connection: connection
-                        .options
-                        .dedicated_new_terminal_connection,
-                },
-            }
-        } else {
-            SshConnectionIntent::ConnectSaved(connection.id.clone())
-        };
+        let intent = SshConnectionIntent::ConnectSaved(connection.id.clone());
         self.update_connection_form_state(cx, |state| {
             if let Some(form) = state.form.as_mut() {
                 form.save_connection = false;
@@ -995,15 +931,19 @@ impl WorkspaceApp {
         self.start_new_connection_config_flow(config, connection.name, intent, window, cx);
     }
 
-    pub(super) fn ensure_new_connection_save_name_is_unique(
-        &mut self,
-        _drill_down_parent_id: Option<&NodeId>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn ensure_new_connection_save_name_is_unique(&mut self, cx: &mut Context<Self>) {
+        let editing_id = self
+            .connection_form_state(cx)
+            .editing_saved_connection_id
+            .clone();
         let occupied_names: Vec<String> = self
             .connection_store
             .connections()
             .iter()
+            // Editing or re-prompting an existing connection must match its own
+            // name; otherwise the uniqueness pass rewrites the draft to a
+            // "Copy 2" and a later upsert creates a sibling catalog entry.
+            .filter(|connection| connection.id != editing_id.as_deref().unwrap_or_default())
             .map(|connection| connection.name.clone())
             .collect();
         self.update_connection_form_state(cx, |state| {
@@ -1039,16 +979,8 @@ impl WorkspaceApp {
 
     pub(super) fn save_request_for_current_form(
         &mut self,
-        drill_down_parent_id: Option<&NodeId>,
         cx: &mut Context<Self>,
     ) -> Option<anyhow::Result<SaveConnectionRequest>> {
-        let mut runtime_proxy_hops = match drill_down_parent_id {
-            Some(parent_id) => match self.runtime_proxy_hops_for_parent_path(parent_id) {
-                Ok(hops) => hops,
-                Err(error) => return Some(Err(error)),
-            },
-            None => Vec::new(),
-        };
         self.with_connection_form_mut(cx, |this, form, _cx| {
             let form = form?;
             Some((|| {
@@ -1059,15 +991,22 @@ impl WorkspaceApp {
                     &form.proxy_hops,
                     &missing_credentials_message,
                 )?;
-                let runtime_proxy_hop_count = runtime_proxy_hops.len();
-                let mut request = save_request_from_form_with_proxy_hop_prefix(
+                let editing_id = this
+                    .connection_form_state(_cx)
+                    .editing_saved_connection_id
+                    .clone();
+                let existing_auth = editing_id
+                    .as_deref()
+                    .and_then(|id| this.connection_store.get(id))
+                    .map(|conn| conn.auth.clone());
+                let mut request = save_request_from_form_with_existing_auth(
                     form,
-                    &mut runtime_proxy_hops,
-                    None,
+                    editing_id,
+                    existing_auth.as_ref(),
                 )?;
                 apply_saved_proxy_hop_auth_copies(
                     &mut request,
-                    runtime_proxy_hop_count,
+                    0,
                     auth_copies,
                 );
                 Ok(request)
@@ -1123,7 +1062,10 @@ impl WorkspaceApp {
                     name: serial_profile_name_or_port(&form.serial_profile_name, &port_path),
                     group: serial_profile_group_from_form(&form.group, &this.i18n),
                     notes: saved_profile_notes(&form.notes),
-                    icon: asset_icon_from_form(&form.icon),
+                    icon: asset_icon_from_form_or_transport(
+                        &form.icon,
+                        NewConnectionTransport::Serial,
+                    ),
                     color: asset_color_from_form(&form.color),
                     icon_background_color: asset_color_from_form(&form.icon_background_color),
                     port_path,
@@ -1204,9 +1146,12 @@ impl WorkspaceApp {
                                 "{}: {error}",
                                 self.i18n.t("modals.new_connection.serial_save_failed")
                             );
-                            self.session_manager.update(cx, |session_manager, cx| {
-                                session_manager.set_status(Some(message), cx);
-                            });
+                            self.push_command_palette_toast(
+                                message,
+                                None,
+                                TerminalNoticeVariant::Error,
+                                cx,
+                            );
                         }
                     }
                 }
@@ -1261,7 +1206,10 @@ impl WorkspaceApp {
                     name: telnet_profile_name_or_endpoint(&form.telnet_profile_name, &host, port),
                     group: serial_profile_group_from_form(&form.group, &this.i18n),
                     notes: saved_profile_notes(&form.notes),
-                    icon: asset_icon_from_form(&form.icon),
+                    icon: asset_icon_from_form_or_transport(
+                        &form.icon,
+                        NewConnectionTransport::Telnet,
+                    ),
                     color: asset_color_from_form(&form.color),
                     icon_background_color: asset_color_from_form(&form.icon_background_color),
                     host: host.clone(),
@@ -1341,9 +1289,12 @@ impl WorkspaceApp {
                                 "{}: {error}",
                                 self.i18n.t("modals.new_connection.telnet_save_failed")
                             );
-                            self.session_manager.update(cx, |session_manager, cx| {
-                                session_manager.set_status(Some(message), cx);
-                            });
+                            self.push_command_palette_toast(
+                                message,
+                                None,
+                                TerminalNoticeVariant::Error,
+                                cx,
+                            );
                         }
                     }
                 }
@@ -1682,7 +1633,9 @@ impl WorkspaceApp {
                 } else {
                     None
                 };
-                let save_credential = form.save_password;
+                // The remote desktop form has no save-password opt-out: an
+                // entered password always persists, mirroring SSH's edit flow.
+                let save_credential = true;
                 let ssh_gateway_connection_id =
                     form.remote_desktop_ssh_gateway_connection_id.clone();
                 let should_save =
@@ -1701,12 +1654,19 @@ impl WorkspaceApp {
                 let read_only = existing_profile
                     .as_ref()
                     .is_some_and(|profile| profile.read_only);
+                let transport = match protocol {
+                    RemoteDesktopProtocol::Rdp => NewConnectionTransport::Rdp,
+                    RemoteDesktopProtocol::Vnc => NewConnectionTransport::Vnc,
+                };
                 let save_request = should_save.then(|| SaveRemoteDesktopProfileRequest {
-                    id: editing_profile_id,
+                    id: editing_profile_id.clone(),
                     name: label.clone(),
                     group: serial_profile_group_from_form(&form.group, &this.i18n),
                     notes: saved_profile_notes(&form.notes),
-                    icon: asset_icon_from_form(&form.icon),
+                    icon: asset_icon_from_form_or_transport(
+                        &form.icon,
+                        transport,
+                    ),
                     color: asset_color_from_form(&form.color),
                     icon_background_color: asset_color_from_form(&form.icon_background_color),
                     protocol,
@@ -1723,8 +1683,12 @@ impl WorkspaceApp {
                     read_only,
                     session_options: form.remote_desktop_session_options,
                 });
+                // Connecting an existing asset keeps its id so the sidebar's
+                // running row claims the catalog row instead of adding one.
                 let profile = RemoteDesktopConnectionProfile {
-                    id: format!("new-remote-desktop-{}", uuid::Uuid::new_v4()),
+                    id: editing_profile_id
+                        .clone()
+                        .unwrap_or_else(|| format!("new-remote-desktop-{}", uuid::Uuid::new_v4())),
                     label,
                     protocol,
                     endpoint: RemoteDesktopEndpoint::new(host, port),
@@ -1863,23 +1827,19 @@ impl WorkspaceApp {
         }
         let mut config = config;
         if let Err(error) = prepare_tree_connect_config(&mut config) {
+            let reported_error = error.clone();
             let reported_to_form = self.connection_flow.update(cx, |connection_flow, cx| {
-                connection_flow.set_form_feedback(None, Some(error.clone()), cx)
+                connection_flow.set_form_feedback(None, Some(reported_error.clone()), cx)
             });
             if !reported_to_form {
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(Some(error), cx);
-                });
+                self.push_command_palette_toast(
+                    error,
+                    None,
+                    TerminalNoticeVariant::Error,
+                    cx,
+                );
             }
             cx.notify();
-            return;
-        }
-        if matches!(&intent, SshConnectionIntent::DrillDown { .. }) {
-            // Tauri DrillDownDialog calls tree_drill_down and then
-            // connect_tree_node; it does not run a local direct host-key
-            // preflight because the child may only be reachable through the
-            // parent tunnel. Native keeps that node-only path here.
-            self.continue_verified_ssh_flow(config, title, intent, window, cx);
             return;
         }
         self.update_connection_form_state(cx, |state| {
@@ -1917,14 +1877,6 @@ impl WorkspaceApp {
             tracing::warn!("Saved connection lookup failed before opening");
             let title = self.i18n.t("sessionManager.toast.connection_not_found");
             self.push_command_palette_toast(title.clone(), None, TerminalNoticeVariant::Error, cx);
-            self.push_notification_entry(
-                WorkspaceNotificationKind::Connection,
-                WorkspaceNotificationSeverity::Error,
-                title,
-                None,
-                WorkspaceNotificationScope::Global,
-                Some("saved-connection-not-found".to_string()),
-            );
             cx.notify();
             return;
         };
@@ -1950,6 +1902,32 @@ impl WorkspaceApp {
         };
         let title = conn.name.clone();
         self.start_saved_connection_flow(id.to_string(), config, title, window, cx);
+    }
+
+    /// Sidebar double-click contract: every activation opens one new terminal
+    /// tab on the shared node. A focused existing tab would make repeated
+    /// double-clicks feel like a no-op, so reuse is intentionally skipped.
+    pub(in crate::workspace) fn open_saved_connection_new_terminal(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conn) = saved_connection_for_open(&self.connection_store, id) else {
+            // Saved rows can outlive an external store update. Report the
+            // stale reference without exposing its identifier or connection data.
+            tracing::warn!("Saved connection lookup failed before opening");
+            let title = self.i18n.t("sessionManager.toast.connection_not_found");
+            self.push_command_palette_toast(title.clone(), None, TerminalNoticeVariant::Error, cx);
+            cx.notify();
+            return;
+        };
+        // If the node is already connected and ready, duplicate it immediately to
+        // open an independent new terminal tab (a fresh connection per activation).
+        if self.open_new_terminal_for_existing_saved_node(id, &conn, window, cx) {
+            return;
+        }
+        self.open_saved_connection(id, window, cx);
     }
 
     pub(in crate::workspace) fn open_saved_connection_prompt(
@@ -2071,6 +2049,16 @@ impl WorkspaceApp {
             SavedConnectionPromptAction::Test => RuntimeSecretHandoff::CopyForTest,
             SavedConnectionPromptAction::Connect => RuntimeSecretHandoff::Move,
         };
+        // Persist the entered password before building the runtime config:
+        // build_new_connection_config owns and zeroizes the draft, so it must
+        // run after the single keychain upsert that moves the secret.
+        if action == SavedConnectionPromptAction::Connect && self.save_password_requested(cx) {
+            let Some(handoff) = self.save_current_connection_form(cx) else {
+                return;
+            };
+            self.start_saved_form_connection_flow(handoff, window, cx);
+            return;
+        }
         let Some((mut config, title)) = self.build_new_connection_config(secret_handoff, cx) else {
             return;
         };
@@ -2114,6 +2102,13 @@ impl WorkspaceApp {
                 self.start_ssh_test_flow(config, title, cx);
             }
         }
+    }
+
+    fn save_password_requested(&self, cx: &Context<Self>) -> bool {
+        self.connection_form_state(cx)
+            .form
+            .as_ref()
+            .is_some_and(|form| form.save_password)
     }
 
     pub(super) fn sync_saved_connection_node_title(&mut self, saved_connection_id: &str) -> bool {
@@ -2233,9 +2228,12 @@ impl WorkspaceApp {
                             }
                         } else {
                             let message = self.i18n.t("sessionManager.edit_properties.save");
-                            self.session_manager.update(cx, |session_manager, cx| {
-                                session_manager.set_status(Some(message), cx);
-                            });
+                            self.push_command_palette_toast(
+                                message,
+                                None,
+                                TerminalNoticeVariant::Success,
+                                cx,
+                            );
                             self.focus_active_pane(window, cx);
                         }
                     }
@@ -2338,9 +2336,12 @@ impl WorkspaceApp {
                 Ok(_) => {
                     self.update_connection_form_state(cx, ConnectionFormState::clear);
                     let message = self.i18n.t("sessionManager.toast.connection_duplicated");
-                    self.session_manager.update(cx, |session_manager, cx| {
-                        session_manager.set_status(Some(message), cx);
-                    });
+                    self.push_command_palette_toast(
+                        message,
+                        None,
+                        TerminalNoticeVariant::Success,
+                        cx,
+                    );
                     self.focus_active_pane(window, cx);
                 }
                 Err(error) => {
@@ -2375,17 +2376,16 @@ impl WorkspaceApp {
                 connection_flow.set_form_feedback(None, Some(error.clone()), cx)
             });
             if !reported_to_form {
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(Some(error), cx);
-                });
+                self.push_command_palette_toast(
+                    error,
+                    None,
+                    TerminalNoticeVariant::Error,
+                    cx,
+                );
             }
             cx.notify();
             return;
         }
-        let message = self.i18n.t("ssh.form.checking_host_key");
-        self.session_manager.update(cx, |session_manager, cx| {
-            session_manager.set_status(Some(message), cx);
-        });
         if config.proxy_chain.is_some() {
             self.start_proxy_session_tree_connect(
                 config,
@@ -2448,9 +2448,12 @@ impl WorkspaceApp {
         {
             Ok(secrets) => secrets,
             Err(error) => {
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(Some(error.to_string()), cx);
-                });
+                self.push_command_palette_toast(
+                    error.to_string(),
+                    None,
+                    TerminalNoticeVariant::Error,
+                    cx,
+                );
                 return;
             }
         };
@@ -2462,10 +2465,12 @@ impl WorkspaceApp {
             runtime_secrets,
             None,
         ) else {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager
-                    .set_status(Some(self.i18n.t("sftp.standalone.missing_credentials")), cx);
-            });
+            self.push_command_palette_toast(
+                self.i18n.t("sftp.standalone.missing_credentials"),
+                None,
+                TerminalNoticeVariant::Error,
+                cx,
+            );
             return;
         };
         let secondary_config = match (
@@ -2488,10 +2493,12 @@ impl WorkspaceApp {
         if profile.transfer_mode == StandaloneSftpTransferMode::RemoteRemote
             && secondary_config.is_none()
         {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager
-                    .set_status(Some(self.i18n.t("sftp.standalone.missing_credentials")), cx);
-            });
+            self.push_command_palette_toast(
+                self.i18n.t("sftp.standalone.missing_credentials"),
+                None,
+                TerminalNoticeVariant::Error,
+                cx,
+            );
             return;
         }
         let pair_launch_token = secondary_config.map(|secondary_config| {
@@ -2512,9 +2519,12 @@ impl WorkspaceApp {
             );
             token
         });
-        self.session_manager.update(cx, |session_manager, cx| {
-            session_manager.set_status(Some(self.i18n.t("ssh.form.checking_host_key")), cx);
-        });
+        self.push_command_palette_toast(
+            self.i18n.t("ssh.form.checking_host_key"),
+            None,
+            TerminalNoticeVariant::Default,
+            cx,
+        );
         self.start_ssh_preflight(
             config,
             profile.name,
@@ -2721,5 +2731,80 @@ mod saved_connection_open_tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "missing proxy credentials");
+    }
+}
+
+impl WorkspaceApp {
+    /// Opens the Telnet editor. Non-SSH profiles must NOT set the SSH-only
+    /// editing_saved_connection_id: doing so flips the modal into
+    /// EditProperties, which renders the SSH form and routes the submit into
+    /// the SSH store where the Telnet id silently disappears. The form's own
+    /// telnet_profile_id carries the edit identity.
+    pub(in crate::workspace) fn open_telnet_profile_editor(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self
+            .connection_store
+            .telnet_profiles()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let ungrouped_label = self.i18n.t("sessionManager.edit_properties.ungrouped");
+        self.open_new_connection_form(window, cx);
+        let form = form_from_telnet_profile(&profile, ungrouped_label);
+        self.update_connection_form_state(cx, |state| state.replace_with_new_form(form));
+        cx.notify();
+    }
+
+    /// Opens the serial editor with the same non-SSH isolation as Telnet.
+    pub(in crate::workspace) fn open_serial_profile_editor(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self
+            .connection_store
+            .serial_profiles()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let ungrouped_label = self.i18n.t("sessionManager.edit_properties.ungrouped");
+        self.open_new_connection_form(window, cx);
+        let form = form_from_serial_profile(&profile, ungrouped_label);
+        self.update_connection_form_state(cx, |state| state.replace_with_new_form(form));
+        cx.notify();
+    }
+
+    /// Opens the RDP/VNC editor with the same non-SSH isolation as Telnet.
+    pub(in crate::workspace) fn open_remote_desktop_profile_editor(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self
+            .connection_store
+            .remote_desktop_profiles()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let ungrouped_label = self.i18n.t("sessionManager.edit_properties.ungrouped");
+        self.open_new_connection_form(window, cx);
+        let form = form_from_remote_desktop_profile(&profile, ungrouped_label);
+        self.update_connection_form_state(cx, |state| state.replace_with_new_form(form));
+        cx.notify();
     }
 }

@@ -42,20 +42,42 @@ fn app_icon_variant_ico_file_name(variant: AppIconVariant) -> String {
 pub(crate) fn app_icon_variant_resource_path(variant: AppIconVariant) -> PathBuf {
     let file_name = app_icon_variant_file_name(variant);
     for root in app_icon_resource_roots() {
-        let candidate = root.join("variants").join(file_name);
+        let candidate = root.join("variants").join(&file_name);
         if candidate.exists() {
             return candidate;
         }
     }
 
-    // Development runs from the workspace root should still show previews even
-    // before package resources are copied next to the executable.
-    PathBuf::from("crates")
-        .join("oxideterm-gpui-app")
-        .join("resources")
-        .join("icons")
-        .join("variants")
-        .join(file_name)
+    // Packaged apps and detached launches have no repo-relative resources;
+    // fall back to the binary-embedded copy materialized into a cache file.
+    match materialized_icon_cache_path(&file_name, app_icon_variant_png(variant)) {
+        Ok(path) => path,
+        // Cache writes are best effort; degrade to the legacy relative path so
+        // callers keep their existing missing-file handling.
+        Err(_) => PathBuf::from("crates")
+            .join("oxideterm-gpui-app")
+            .join("resources")
+            .join("icons")
+            .join("variants")
+            .join(file_name),
+    }
+}
+
+// Icon assets ship inside the binary, so runtime switching never depends on
+// the working directory; the cache copy exists only for file-path loaders
+// such as Win32 LoadImageW and GPUI's img element.
+fn materialized_icon_cache_path(file_name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join("oxideterm-app-icons");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(file_name);
+    // Rewrite when missing or size-changed so updated bundled assets propagate.
+    let stale = std::fs::metadata(&path)
+        .map(|meta| meta.len() as usize != bytes.len())
+        .unwrap_or(true);
+    if stale {
+        std::fs::write(&path, bytes)?;
+    }
+    Ok(path)
 }
 
 fn app_icon_resource_roots() -> Vec<PathBuf> {
@@ -78,7 +100,6 @@ fn app_icon_resource_roots() -> Vec<PathBuf> {
     roots
 }
 
-#[cfg(target_os = "macos")]
 fn app_icon_variant_png(variant: AppIconVariant) -> &'static [u8] {
     match variant {
         AppIconVariant::Default => include_bytes!("../resources/icons/variants/default.png"),
@@ -111,6 +132,36 @@ fn app_icon_variant_png(variant: AppIconVariant) -> &'static [u8] {
 }
 
 #[cfg(target_os = "windows")]
+fn app_icon_variant_ico(variant: AppIconVariant) -> &'static [u8] {
+    match variant {
+        AppIconVariant::Default => include_bytes!("../resources/icons/variants/default.ico"),
+        AppIconVariant::WhiteBlue => include_bytes!("../resources/icons/variants/white-blue.ico"),
+        AppIconVariant::WhiteGraphite => {
+            include_bytes!("../resources/icons/variants/white-graphite.ico")
+        }
+        AppIconVariant::WhiteGreen => include_bytes!("../resources/icons/variants/white-green.ico"),
+        AppIconVariant::WhitePurple => {
+            include_bytes!("../resources/icons/variants/white-purple.ico")
+        }
+        AppIconVariant::WhiteRed => include_bytes!("../resources/icons/variants/white-red.ico"),
+        AppIconVariant::FilledOrange => {
+            include_bytes!("../resources/icons/variants/filled-orange.ico")
+        }
+        AppIconVariant::FilledBlue => include_bytes!("../resources/icons/variants/filled-blue.ico"),
+        AppIconVariant::FilledGraphite => {
+            include_bytes!("../resources/icons/variants/filled-graphite.ico")
+        }
+        AppIconVariant::FilledGreen => {
+            include_bytes!("../resources/icons/variants/filled-green.ico")
+        }
+        AppIconVariant::FilledPurple => {
+            include_bytes!("../resources/icons/variants/filled-purple.ico")
+        }
+        AppIconVariant::FilledRed => include_bytes!("../resources/icons/variants/filled-red.ico"),
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn app_icon_variant_ico_resource_path(variant: AppIconVariant) -> PathBuf {
     let file_name = app_icon_variant_ico_file_name(variant);
     for root in app_icon_resource_roots() {
@@ -120,13 +171,17 @@ fn app_icon_variant_ico_resource_path(variant: AppIconVariant) -> PathBuf {
         }
     }
 
-    // Keep cargo run behavior aligned with packaged Windows resources.
-    PathBuf::from("crates")
-        .join("oxideterm-gpui-app")
-        .join("resources")
-        .join("icons")
-        .join("variants")
-        .join(file_name)
+    // LoadImageW needs a file path, so materialize the embedded icon into the
+    // cache directory instead of failing on repo-relative resources.
+    match materialized_icon_cache_path(&file_name, app_icon_variant_ico(variant)) {
+        Ok(path) => path,
+        Err(_) => PathBuf::from("crates")
+            .join("oxideterm-gpui-app")
+            .join("resources")
+            .join("icons")
+            .join("variants")
+            .join(file_name),
+    }
 }
 
 #[cfg(target_os = "macos")]

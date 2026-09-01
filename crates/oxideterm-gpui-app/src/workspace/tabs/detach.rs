@@ -4,13 +4,12 @@ use super::*;
 use oxideterm_gpui_ui::button::ButtonVariant;
 use oxideterm_gpui_ui::context_menu::{
     ContextMenuItemKind, context_menu_content, context_menu_event_boundary, context_menu_item,
-    context_menu_separator,
+    context_menu_item_height_estimate, context_menu_separator,
+    context_menu_separator_height_estimate,
 };
 use oxideterm_gpui_ui::modal::overlay_content_boundary;
 
 const TAB_CONTEXT_MENU_WIDTH: f32 = 228.0;
-const TAB_CONTEXT_MENU_HEIGHT: f32 = 136.0;
-const TAB_CONTEXT_MENU_RENAME_HEIGHT: f32 = 168.0;
 const TAB_CONTEXT_MENU_MARGIN: f32 = 8.0;
 const TAB_RENAME_DIALOG_WIDTH: f32 = 420.0;
 const TAB_HANDOFF_PREVIEW_WIDTH_EXTRA: f32 = 96.0;
@@ -20,6 +19,9 @@ const TAB_HANDOFF_PREVIEW_HEIGHT: f32 = 48.0;
 const TAB_HANDOFF_VIEWPORT_MARGIN: f32 = 8.0;
 const TAB_HANDOFF_POINTER_OFFSET_Y: f32 = 14.0;
 const TAB_HANDOFF_CORNER_RADIUS: f32 = 16.0;
+// Baseline for the detach and return preview pulse; scaled_duration adapts it
+// to the user's motion profile.
+const TAB_HANDOFF_PULSE_BASELINE_MS: u64 = 760;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TabWindowHandoffRect {
@@ -90,7 +92,6 @@ fn tab_return_visible_insertion_index(pointer_x: f32, tab_widths: &[f32]) -> usi
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DetachedTabSurfaceRoute {
     Settings,
-    Ide(TabId),
     Sftp(TabId),
     Forwards(TabId),
     Other,
@@ -101,7 +102,6 @@ fn detached_tab_surface_route(tab_id: TabId, kind: &TabKind) -> DetachedTabSurfa
     // of consulting the main window's active-tab slot.
     match kind {
         TabKind::Settings => DetachedTabSurfaceRoute::Settings,
-        TabKind::Ide => DetachedTabSurfaceRoute::Ide(tab_id),
         TabKind::Sftp => DetachedTabSurfaceRoute::Sftp(tab_id),
         TabKind::Forwards => DetachedTabSurfaceRoute::Forwards(tab_id),
         _ => DetachedTabSurfaceRoute::Other,
@@ -167,11 +167,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(title) = self.tab_by_id(tab_id, cx).and_then(|tab| {
-            matches!(
-                tab.kind,
-                TabKind::SshTerminal
-            )
-            .then(|| tab.title.clone())
+            is_terminal_tab_kind(&tab.kind).then(|| tab.title.clone())
         }) else {
             return false;
         };
@@ -406,6 +402,7 @@ impl WorkspaceApp {
         self.focus_active_pane(window, cx);
 
         let session = cx.entity();
+        let drag_watch_session = session.clone();
         let bounds = window.bounds();
         let entry_handoff_duration = oxideterm_gpui_ui::motion::duration(
             &self.tokens,
@@ -436,6 +433,24 @@ impl WorkspaceApp {
 
         match open_result {
             Ok(handle) => {
+                // Windows moves detached windows through native HTCAPTION
+                // handling, so GPUI never sees the pointer during the drag.
+                // Watch native window bounds instead to keep the drag-back
+                // gesture state fresh. The observer is owned by the detached
+                // window and dies with it; the captured entity handle is weak
+                // at the callback boundary, so nothing outlives the workspace.
+                if cfg!(target_os = "windows") {
+                    let move_session = drag_watch_session;
+                    let move_tab_id = tab_id;
+                    let _ = handle.update(cx, move |_detached, window, cx| {
+                        cx.observe_window_bounds(window, move |_detached, window, cx| {
+                            move_session.update(cx, |session, cx| {
+                                session.track_detached_window_drag_move(move_tab_id, window, cx);
+                            });
+                        })
+                        .detach();
+                    });
+                }
                 let detached_window_handle = handle.into();
                 let window_registered =
                     self.commit_workspace_window(window_registration, detached_window_handle, cx);
@@ -472,8 +487,7 @@ impl WorkspaceApp {
                     cx.notify();
                     return;
                 }
-                self.sync_ide_surface_mount(tab_id, cx);
-                self.sync_host_tools_lifecycle(false, cx);
+                self.sync_host_tools_lifecycle(cx);
                 self.bind_remote_desktop_window(tab_id, detached_window_handle, cx);
                 self.resume_remote_desktop_frame_delivery(tab_id, cx);
                 if let Some(exiting_visual) = exiting_visual {
@@ -707,6 +721,52 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    /// Tracks a detached window during a native HTCAPTION drag (Windows).
+    /// GPUI receives no pointer events while the modal move loop owns the
+    /// drag, so the moved window's titlebar centre stands in for the pointer
+    /// when previewing the drop zone. The gesture still finishes from the
+    /// synthesized non-client mouse-up, which carries the real release point.
+    pub(in crate::workspace) fn track_detached_window_drag_move(
+        &mut self,
+        tab_id: TabId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.tab_host.read(cx).is_detached(tab_id) {
+            return;
+        }
+        let previous_placeholder = self.detached_tab_return_placeholder(cx);
+        let window_bounds = window.bounds();
+        let current_screen_x =
+            f32::from(window_bounds.origin.x) + f32::from(window_bounds.size.width) / 2.0;
+        let current_screen_y =
+            f32::from(window_bounds.origin.y) + self.tokens.metrics.titlebar_height / 2.0;
+        match self.detached_tab_return_drag {
+            Some(mut drag) if drag.tab_id == tab_id => {
+                drag.current_screen_x = current_screen_x;
+                drag.current_screen_y = current_screen_y;
+                drag.active = true;
+                self.detached_tab_return_drag = Some(drag);
+            }
+            _ => {
+                self.detached_tab_return_drag = Some(DetachedTabReturnDrag {
+                    tab_id,
+                    start_screen_x: current_screen_x,
+                    start_screen_y: current_screen_y,
+                    current_screen_x,
+                    current_screen_y,
+                    active: true,
+                });
+            }
+        }
+        let next_placeholder = self.detached_tab_return_placeholder(cx);
+        if previous_placeholder != next_placeholder {
+            // Repaint only when the preview enters/leaves the drop strip or
+            // crosses an insertion midpoint, not for every native window move.
+            cx.notify();
+        }
+    }
+
     pub(in crate::workspace) fn update_detached_tab_return_drag(
         &mut self,
         tab_id: TabId,
@@ -925,7 +985,7 @@ impl WorkspaceApp {
         let tab_title = self
             .tab_by_id(drag.tab_id, cx)
             .map(|tab| self.tab_display_title(tab))
-            .unwrap_or_else(|| "oxideterm-flash".to_string());
+            .unwrap_or_else(|| self.i18n.t("layout.empty.title"));
         let theme = self.tokens.ui;
         let accent = theme.accent;
         let geometry = tab_window_handoff_rect(
@@ -995,7 +1055,7 @@ impl WorkspaceApp {
                     ("tab-detach-drag-preview", drag.tab_id.0),
                     Animation::new(oxideterm_gpui_ui::motion::scaled_duration(
                         &self.tokens,
-                        760,
+                        TAB_HANDOFF_PULSE_BASELINE_MS,
                     ))
                     .repeat(),
                     |preview, delta| {
@@ -1031,7 +1091,7 @@ impl WorkspaceApp {
         let tab_title = self
             .tab_by_id(drag.tab_id, cx)
             .map(|tab| self.tab_display_title(tab))
-            .unwrap_or_else(|| "oxideterm-flash".to_string());
+            .unwrap_or_else(|| self.i18n.t("layout.empty.title"));
         let theme = self.tokens.ui;
         let accent = theme.accent;
         let viewport = window.viewport_size();
@@ -1100,7 +1160,7 @@ impl WorkspaceApp {
                     ("detached-tab-return-drag-preview", drag.tab_id.0),
                     Animation::new(oxideterm_gpui_ui::motion::scaled_duration(
                         &self.tokens,
-                        760,
+                        TAB_HANDOFF_PULSE_BASELINE_MS,
                     ))
                     .repeat(),
                     |preview, delta| {
@@ -1128,19 +1188,19 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let menu = self.main_window_tabs.context_menu?;
-        let renamable = self.tab_by_id(menu.tab_id, cx).is_some_and(|tab| {
-            matches!(
-                tab.kind,
-                TabKind::SshTerminal
-            )
-        });
+        let renamable = self
+            .tab_by_id(menu.tab_id, cx)
+            .is_some_and(|tab| is_terminal_tab_kind(&tab.kind));
+        let duplicable = self.tab_duplicate_source_node(menu.tab_id, cx).is_some();
         self.tab_by_id(menu.tab_id, cx)?;
         let viewport = window.viewport_size();
-        let menu_height = if renamable {
-            TAB_CONTEXT_MENU_RENAME_HEIGHT
-        } else {
-            TAB_CONTEXT_MENU_HEIGHT
-        };
+        // Height is derived from the rendered items so placement clamping
+        // stays correct as menu entries vary per tab kind: four fixed items
+        // plus optional rename/duplicate entries and one separator.
+        let item_count = 4 + usize::from(renamable) + usize::from(duplicable);
+        let menu_height = self.tokens.metrics.ui_menu_padding * 2.0
+            + item_count as f32 * context_menu_item_height_estimate(&self.tokens)
+            + context_menu_separator_height_estimate(&self.tokens);
         let placement = browser_behavior::clamp_context_menu_position(
             menu.x,
             menu.y,
@@ -1151,72 +1211,126 @@ impl WorkspaceApp {
             TAB_CONTEXT_MENU_MARGIN,
         );
         let detached = self.tab_host.read(cx).is_detached(menu.tab_id);
-        let menu_body = context_menu_event_boundary(
-            context_menu_content(&self.tokens)
-                .w(px(TAB_CONTEXT_MENU_WIDTH))
-                .when(renamable, |content| {
-                    content.child(
-                        context_menu_item(
-                            &self.tokens,
-                            self.i18n.t("tabbar.rename_tab"),
-                            ContextMenuItemKind::Plain,
-                            false,
-                            false,
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, window, cx| {
-                                this.begin_tab_rename(menu.tab_id, window, cx);
-                                cx.stop_propagation();
-                            }),
-                        ),
-                    )
-                })
-                .child(
-                    context_menu_item(
-                        &self.tokens,
-                        if detached {
-                            self.i18n.t("tabbar.return_to_main_window")
-                        } else {
-                            self.i18n.t("tabbar.detach_to_window")
-                        },
-                        ContextMenuItemKind::Plain,
-                        false,
-                        false,
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event, window, cx| {
-                            this.close_tab_context_menu();
-                            if detached {
-                                this.return_detached_tab_to_main(menu.tab_id, window, cx);
-                            } else {
-                                this.detach_tab_to_window(menu.tab_id, None, window, cx);
-                            }
-                            cx.stop_propagation();
-                        }),
-                    ),
+        let mut menu_body = context_menu_content(&self.tokens).w(px(TAB_CONTEXT_MENU_WIDTH));
+        if renamable {
+            menu_body = menu_body.child(
+                context_menu_item(
+                    &self.tokens,
+                    self.i18n.t("tabbar.rename_tab"),
+                    ContextMenuItemKind::Plain,
+                    false,
+                    false,
                 )
-                .child(context_menu_separator(&self.tokens))
-                .child(
-                    context_menu_item(
-                        &self.tokens,
-                        self.i18n.t("tabbar.close_tab"),
-                        ContextMenuItemKind::Plain,
-                        false,
-                        false,
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event, window, cx| {
-                            this.close_tab_context_menu();
-                            this.close_tab_by_id(menu.tab_id, window, cx);
-                            cx.stop_propagation();
-                        }),
-                    ),
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, window, cx| {
+                        this.begin_tab_rename(menu.tab_id, window, cx);
+                        cx.stop_propagation();
+                    }),
                 ),
-        );
-        let menu_body = overlay_content_boundary(menu_body);
+            );
+        }
+        if duplicable {
+            menu_body = menu_body.child(
+                context_menu_item(
+                    &self.tokens,
+                    self.i18n.t("tabbar.duplicate_tab"),
+                    ContextMenuItemKind::Plain,
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, window, cx| {
+                        this.close_tab_context_menu();
+                        this.duplicate_tab(menu.tab_id, window, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            );
+        }
+        menu_body = menu_body
+            .child(
+                context_menu_item(
+                    &self.tokens,
+                    if detached {
+                        self.i18n.t("tabbar.return_to_main_window")
+                    } else {
+                        self.i18n.t("tabbar.detach_to_window")
+                    },
+                    ContextMenuItemKind::Plain,
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, window, cx| {
+                        this.close_tab_context_menu();
+                        if detached {
+                            this.return_detached_tab_to_main(menu.tab_id, window, cx);
+                        } else {
+                            this.detach_tab_to_window(menu.tab_id, None, window, cx);
+                        }
+                        cx.stop_propagation();
+                    }),
+                ),
+            )
+            .child(context_menu_separator(&self.tokens))
+            .child(
+                context_menu_item(
+                    &self.tokens,
+                    self.i18n.t("tabbar.close_tab"),
+                    ContextMenuItemKind::Plain,
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, window, cx| {
+                        this.close_tab_context_menu();
+                        this.request_close_tab_by_id(menu.tab_id, window, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            )
+            .child(
+                context_menu_item(
+                    &self.tokens,
+                    self.i18n.t("tabbar.close_tabs_to_right"),
+                    ContextMenuItemKind::Plain,
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, window, cx| {
+                        this.close_tab_context_menu();
+                        this.request_close_tabs_right_of(menu.tab_id, window, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            )
+            .child(
+                context_menu_item(
+                    &self.tokens,
+                    self.i18n.t("tabbar.close_other_tabs"),
+                    ContextMenuItemKind::Plain,
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, window, cx| {
+                        this.close_tab_context_menu();
+                        // The shared close-other action keeps the target tab,
+                        // so the menu target becomes the active tab first.
+                        this.set_active_tab(menu.tab_id, window, cx);
+                        this.request_close_other_tabs_or_active_pane(window, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            );
+        let menu_body = overlay_content_boundary(context_menu_event_boundary(menu_body));
 
         Some(
             self.workspace_context_menu_backdrop(
@@ -1251,7 +1365,8 @@ impl WorkspaceApp {
                 tab.root_pane.clone(),
             )
         }) else {
-            return self.render_detached_tab_message("oxideterm-flash", "tabbar.detached_tab_closed", cx);
+            let app_title = self.i18n.t("layout.empty.title");
+            return self.render_detached_tab_message(&app_title, "tabbar.detached_tab_closed", cx);
         };
         window.set_window_title(&SharedString::from(title.clone()));
 
@@ -1313,6 +1428,28 @@ impl WorkspaceApp {
         });
         let tab_window_modals = self.render_tab_window_modals(tab_id, &tab_kind, window, cx);
 
+        // Native caption close (Windows HTCLOSE, Alt+F4, taskbar close) reaches
+        // this window as WM_CLOSE. Route the request through the same tab close
+        // confirmation as in-app close requests; returning false keeps the
+        // native window open, and the confirmed close tears it down through the
+        // tab-removal mount cleanup instead.
+        let close_session = cx.entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            close_session.update(cx, |session, cx| {
+                session.request_close_tab_by_id(tab_id, window, cx);
+            });
+            false
+        });
+        // The shared close confirmation must render inside the window that
+        // owns the pending close request.
+        let tab_close_confirm_for_window = matches!(
+            self.tab_host.read(cx).close_confirm(),
+            Some(
+                TabCloseConfirm::Single { tab_id: confirm_tab_id }
+                    | TabCloseConfirm::LocalChildProcess { tab_id: confirm_tab_id }
+            ) if *confirm_tab_id == tab_id
+        );
+
         // Keep the native window base opaque while its workspace content fades in.
         div()
             .size_full()
@@ -1322,6 +1459,9 @@ impl WorkspaceApp {
             .when_some(entry_handoff, |root, handoff| root.child(handoff))
             // Detached tabs use their own native window root as the modal portal.
             .children(tab_window_modals)
+            .when(tab_close_confirm_for_window, |root| {
+                root.child(self.render_tab_close_confirm_dialog(cx))
+            })
             .into_any_element()
     }
 
@@ -1335,9 +1475,6 @@ impl WorkspaceApp {
     ) -> AnyElement {
         match detached_tab_surface_route(tab_id, kind) {
             DetachedTabSurfaceRoute::Settings => return self.render_settings_surface(cx),
-            DetachedTabSurfaceRoute::Ide(tab_id) => {
-                return self.render_ide_surface_for_tab(tab_id, cx);
-            }
             DetachedTabSurfaceRoute::Sftp(tab_id) => {
                 return self.render_sftp_surface_for_tab(tab_id, window, cx);
             }
@@ -1347,20 +1484,7 @@ impl WorkspaceApp {
             DetachedTabSurfaceRoute::Other => {}
         }
         match (kind, root_pane) {
-            (TabKind::FileManager, _) => self.render_file_manager_surface(window, cx),
             (TabKind::Launcher, _) => self.render_launcher_surface(window, cx),
-            (TabKind::Runtime, _) => self.render_connection_runtime_surface(cx),
-            (TabKind::ConnectionPool, _) => {
-                // Detached windows can outlive the UI route that created them.
-                // Preserve compatibility by rendering the runtime overview.
-                self.host_tools.update(cx, |host_tools, _cx| {
-                    host_tools.reset_runtime_section();
-                });
-                self.render_connection_runtime_surface(cx)
-            }
-            (TabKind::Topology, _) => self.render_topology_surface(cx),
-            (TabKind::NotificationCenter, _) => self.render_notification_center_surface(cx),
-            (TabKind::SessionManager, _) => self.render_session_manager_surface(window, cx),
             (TabKind::RemoteDesktop, _) => self.render_remote_desktop_surface(tab_id, window, cx),
             (_, Some(root_pane)) => self.render_detached_terminal_surface(tab_id, root_pane, cx),
             _ => self.render_empty_workspace(f32::from(window.viewport_size().width), cx),
@@ -1398,7 +1522,21 @@ impl WorkspaceApp {
                     // Windows moves client-decorated windows through native
                     // HTCAPTION handling; consuming mouse-down in GPUI blocks it.
                     .when(cfg!(target_os = "windows"), |region| {
-                        region.window_control_area(gpui::WindowControlArea::Drag)
+                        region
+                            .window_control_area(gpui::WindowControlArea::Drag)
+                            // The platform synthesizes a client mouse-up from
+                            // WM_NCLBUTTONUP when the native drag ends, so the
+                            // drag-back gesture can finish even though GPUI
+                            // never saw the drag itself.
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
+                                    this.finish_detached_tab_return_drag(
+                                        tab_id, event, window, cx,
+                                    );
+                                    cx.stop_propagation();
+                                }),
+                            )
                     })
                     .when(!cfg!(target_os = "windows"), |region| {
                         region
@@ -1468,7 +1606,7 @@ impl WorkspaceApp {
 
     fn render_detached_tab_message(
         &self,
-        title: &'static str,
+        title: &str,
         message_key: &'static str,
         _cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1485,7 +1623,7 @@ impl WorkspaceApp {
                     .px(px(16.0))
                     .border_b_1()
                     .border_color(rgb(self.tokens.ui.border))
-                    .child(title),
+                    .child(title.to_string()),
             )
             .child(
                 div()
@@ -1518,14 +1656,6 @@ mod tests {
     fn detached_shared_surfaces_route_without_main_active_tab_state() {
         let tab_id = TabId(42);
 
-        assert_eq!(
-            detached_tab_surface_route(tab_id, &TabKind::Settings),
-            DetachedTabSurfaceRoute::Settings
-        );
-        assert_eq!(
-            detached_tab_surface_route(tab_id, &TabKind::Ide),
-            DetachedTabSurfaceRoute::Ide(tab_id)
-        );
         assert_eq!(
             detached_tab_surface_route(tab_id, &TabKind::Sftp),
             DetachedTabSurfaceRoute::Sftp(tab_id)

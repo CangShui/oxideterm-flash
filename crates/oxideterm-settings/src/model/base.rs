@@ -24,8 +24,6 @@ pub enum Language {
     ZhCn,
     #[serde(rename = "en")]
     En,
-    #[serde(rename = "zh-TW")]
-    ZhTw,
 }
 
 impl Default for Language {
@@ -39,7 +37,6 @@ impl Language {
         match self {
             Self::ZhCn => "zh-CN",
             Self::En => "en",
-            Self::ZhTw => "zh-TW",
         }
     }
 }
@@ -298,21 +295,12 @@ pub enum ConflictAction {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum IdeAgentMode {
+#[serde(rename_all = "kebab-case")]
+pub enum CloudSyncMode {
     #[default]
-    Ask,
-    Enabled,
-    Disabled,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteShellIntegrationMode {
-    #[default]
-    Ask,
-    Enabled,
-    Disabled,
+    Auto,
+    Relay,
+    PeerToPeer,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

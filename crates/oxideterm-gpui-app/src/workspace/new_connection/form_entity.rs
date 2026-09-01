@@ -15,7 +15,6 @@ pub(in crate::workspace) struct ConnectionFormState {
     pub(in crate::workspace) presence: oxideterm_gpui_ui::motion::ExitPresence,
     pub(in crate::workspace) jump_server_presence: oxideterm_gpui_ui::motion::ExitPresence,
     pub(in crate::workspace) jump_server_exit_commits: bool,
-    pub(in crate::workspace) drill_down_parent_node_id: Option<NodeId>,
     pub(in crate::workspace) editing_saved_connection_id: Option<String>,
     pub(in crate::workspace) editing_saved_connection_connect_after_save_node_id: Option<NodeId>,
     pub(in crate::workspace) duplicating_saved_connection_id: Option<String>,
@@ -31,7 +30,6 @@ impl ConnectionFormState {
             presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
             jump_server_presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
             jump_server_exit_commits: false,
-            drill_down_parent_node_id: None,
             editing_saved_connection_id: None,
             editing_saved_connection_connect_after_save_node_id: None,
             duplicating_saved_connection_id: None,
@@ -58,7 +56,6 @@ impl ConnectionFormState {
     pub(in crate::workspace) fn replace_with_new_form(&mut self, form: NewConnectionForm) {
         // Replacing the draft drops and scrubs the previous secret-bearing form.
         self.form = Some(form);
-        self.drill_down_parent_node_id = None;
         self.editing_saved_connection_id = None;
         self.editing_saved_connection_connect_after_save_node_id = None;
         self.duplicating_saved_connection_id = None;
@@ -70,7 +67,6 @@ impl ConnectionFormState {
     pub(in crate::workspace) fn clear(&mut self) {
         // Dropping the form is the final UI boundary for all draft credentials.
         self.form = None;
-        self.drill_down_parent_node_id = None;
         self.editing_saved_connection_id = None;
         self.editing_saved_connection_connect_after_save_node_id = None;
         self.duplicating_saved_connection_id = None;

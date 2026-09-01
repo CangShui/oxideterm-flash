@@ -112,6 +112,8 @@ struct TerminalFontSizeHud {
     font_size: i64,
     generation: u64,
     expires_at: Instant,
+    phase: oxideterm_gpui_ui::motion::ExitPhase,
+    remove_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -274,6 +276,8 @@ impl WorkspaceOverlayEntity {
                     font_size,
                     generation: self.terminal_font_size_hud_generation,
                     expires_at: Instant::now() + ttl,
+                    phase: oxideterm_gpui_ui::motion::ExitPhase::Visible,
+                    remove_at: None,
                 });
                 true
             }
@@ -797,12 +801,28 @@ impl WorkspaceOverlayEntity {
             self.zen_hint_expires_at = None;
             changed = true;
         }
-        if self
-            .terminal_font_size_hud
-            .is_some_and(|hud| hud.expires_at <= now)
-        {
-            self.terminal_font_size_hud = None;
-            changed = true;
+        if let Some(hud) = self.terminal_font_size_hud.as_mut() {
+            if hud.phase == oxideterm_gpui_ui::motion::ExitPhase::Visible
+                && hud.expires_at <= now
+            {
+                // Mirror the toast exit: fade out over the control exit tier
+                // instead of cutting the HUD the moment its dwell elapses.
+                hud.phase = oxideterm_gpui_ui::motion::ExitPhase::Exiting;
+                if self.control_exit_duration.is_zero() {
+                    self.terminal_font_size_hud = None;
+                } else {
+                    hud.remove_at = Some(now + self.control_exit_duration);
+                }
+                changed = true;
+            }
+            if self
+                .terminal_font_size_hud
+                .as_ref()
+                .is_some_and(|hud| hud.remove_at.is_some_and(|remove_at| remove_at <= now))
+            {
+                self.terminal_font_size_hud = None;
+                changed = true;
+            }
         }
 
         let standard_expired = self
@@ -888,7 +908,16 @@ impl WorkspaceOverlayEntity {
     fn next_deadline(&self) -> Option<Instant> {
         let mut next = self.tooltip_pending.as_ref().map(|pending| pending.show_at);
         next = min_deadline(next, self.zen_hint_expires_at);
-        next = min_deadline(next, self.terminal_font_size_hud.map(|hud| hud.expires_at));
+        next = min_deadline(
+            next,
+            self.terminal_font_size_hud.as_ref().and_then(|hud| {
+                if hud.phase == oxideterm_gpui_ui::motion::ExitPhase::Visible {
+                    Some(hud.expires_at)
+                } else {
+                    hud.remove_at
+                }
+            }),
+        );
         for toast in &self.standard_toasts {
             next = min_deadline(
                 next,
@@ -941,11 +970,13 @@ impl WorkspaceOverlayEntity {
         if let Some(connection_cards) = self.render_connection_cards(tokens, i18n, cx) {
             layers.push(connection_cards);
         }
-        if let Some(hud) = self.terminal_font_size_hud {
+        if let Some(hud) = self.terminal_font_size_hud.clone() {
             layers.push(render_terminal_font_size_hud(
                 tokens,
+                i18n,
                 mono_font_family,
                 hud.font_size,
+                hud.phase,
             ));
         }
         layers
@@ -1479,6 +1510,10 @@ fn render_tooltip(tokens: &ThemeTokens, tooltip: WorkspaceTooltip) -> AnyElement
             .anchor(Corner::TopLeft)
             .position(gpui::point(px(tooltip.x), px(tooltip.y)))
             .position_mode(AnchoredPositionMode::Window)
+            // Window-anchored tooltips sit next to the cursor and can overflow
+            // the viewport; snap_to_window clamps the laid-out bounds back
+            // inside the window on every edge.
+            .snap_to_window()
             .child(tooltip_content(tokens, tooltip.label, None)),
     )
     .with_priority(oxideterm_gpui_ui::modal::TAURI_TOOLTIP_LAYER_PRIORITY)
@@ -1517,8 +1552,10 @@ fn render_zen_hint(tokens: &ThemeTokens, i18n: &I18n) -> AnyElement {
 
 fn render_terminal_font_size_hud(
     tokens: &ThemeTokens,
+    i18n: &I18n,
     mono_font_family: SharedString,
     font_size: i64,
+    phase: oxideterm_gpui_ui::motion::ExitPhase,
 ) -> AnyElement {
     let card = div()
         .rounded(px(tokens.radii.sm))
@@ -1546,7 +1583,7 @@ fn render_terminal_font_size_hud(
                 .text_size(px(TERMINAL_FONT_SIZE_HUD_UNIT_TEXT_SIZE))
                 .font_weight(gpui::FontWeight::NORMAL)
                 .text_color(rgb(tokens.ui.text_muted))
-                .child("px"),
+                .child(i18n.t("terminal.font_size_unit")),
         );
     let layer = div()
         .absolute()
@@ -1558,11 +1595,14 @@ fn render_terminal_font_size_hud(
         .items_center()
         .justify_center()
         .child(card);
-    deferred(oxideterm_gpui_ui::motion::fade_in(
+    // The exit phase reuses the shared fade so dismissal eases out instead of
+    // cutting after the dwell time elapses.
+    deferred(oxideterm_gpui_ui::motion::fade(
         tokens,
         "terminal-font-size-hud",
         layer,
         oxideterm_gpui_ui::motion::MotionDuration::Control,
+        phase == oxideterm_gpui_ui::motion::ExitPhase::Visible,
     ))
     .with_priority(oxideterm_gpui_ui::modal::TAURI_TOOLTIP_LAYER_PRIORITY)
     .into_any_element()

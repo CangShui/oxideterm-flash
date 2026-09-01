@@ -108,28 +108,6 @@ class PortableArchiveTests(unittest.TestCase):
                 path, "x86_64-pc-windows-msvc", "2.0.0"
             )
 
-    def test_linux_portable_archive_rejects_missing_agent_notice(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "root"
-            root.mkdir()
-            for name in self.required_entries("OxideTerm", "oxideterm-native"):
-                if name.endswith("AGENT_THIRD_PARTY_NOTICES.md"):
-                    continue
-                path = root / name
-                if name.endswith("/"):
-                    path.mkdir(parents=True, exist_ok=True)
-                else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(self.entry_bytes(name, "oxideterm-native"))
-            archive_path = Path(directory) / "portable.tar.gz"
-            with tarfile.open(archive_path, "w:gz") as archive:
-                archive.add(root / "OxideTerm", arcname="OxideTerm")
-
-            with self.assertRaisesRegex(RuntimeError, "AGENT_THIRD_PARTY_NOTICES"):
-                verify_native_package.verify_portable_archive(
-                    archive_path, "x86_64-unknown-linux-gnu", "2.0.0"
-                )
-
     def test_portable_archive_rejects_wrong_internal_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "portable.zip"

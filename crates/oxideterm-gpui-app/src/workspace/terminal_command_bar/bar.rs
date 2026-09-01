@@ -46,12 +46,6 @@ impl WorkspaceApp {
         let is_local_terminal = self
             .active_tab(cx)
             .is_some_and(|tab| tab.kind == TabKind::Telnet || tab.kind == TabKind::Serial);
-        let can_configure_remote_integration = self.active_ssh_terminal_node_id(cx).is_some();
-        let remote_integration_pending = self.remote_shell_integration_pending(cx);
-        let remote_integration_tooltip_id = "terminal-command-configure-directory-tracking";
-        let remote_integration_tooltip_title = self
-            .i18n
-            .t("settings_view.connections.shell_integration.toolbar_action");
         let target_indicator_is_local =
             is_local_terminal && target_label == self.i18n.t("terminal.command_bar.local_shell");
         let can_split = self.active_tab(cx).is_some_and(|tab| {
@@ -286,21 +280,6 @@ impl WorkspaceApp {
                                         },
                                         cx,
                                     ))
-                            })
-                            .when(can_configure_remote_integration, |actions| {
-                                actions.child(self.terminal_command_action_button(
-                                    LucideIcon::FolderSync,
-                                    rgb(theme.text_muted),
-                                    remote_integration_pending,
-                                    None,
-                                    remote_integration_tooltip_id,
-                                    remote_integration_tooltip_title,
-                                    |this, _event, _window, cx| {
-                                        this.open_remote_shell_integration_confirm(cx);
-                                        cx.stop_propagation();
-                                    },
-                                    cx,
-                                ))
                             })
                             .child(self.terminal_command_action_button(
                                 LucideIcon::ListChecks,
@@ -955,5 +934,70 @@ impl WorkspaceApp {
             listener,
             cx,
         )
+    }
+    pub(in crate::workspace) fn render_terminal_surface(
+        &self,
+        root_pane: &PaneNode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let terminal = self.render_pane_tree(root_pane, cx);
+        let recording_status = self.active_terminal_recording_status(cx);
+        let recording_active = recording_status.state != TerminalRecordingState::Idle;
+        if !self.settings_store.settings().terminal.command_bar.enabled {
+            return div()
+                .size_full()
+                .relative()
+                .child(terminal)
+                .when(recording_active, |surface| {
+                    surface.child(self.render_terminal_recording_controls(recording_status, cx))
+                })
+                .into_any_element();
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .child(terminal)
+                    .when(recording_active, |surface| {
+                        surface.child(self.render_terminal_recording_controls(recording_status, cx))
+                    }),
+            )
+            .when(
+                self.settings_store
+                    .settings()
+                    .terminal
+                    .command_bar
+                    .quick_bar_enabled,
+                |surface| surface.child(self.render_terminal_quick_bar(window, cx)),
+            )
+            .child(self.render_terminal_command_bar(cx))
+            // The toolbar is the sender header. Hidden, compact, and expanded
+            // layouts all retain the same document and running jobs below it.
+            .child(self.render_terminal_command_sender_panel(window, cx))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn render_detached_terminal_surface(
+        &self,
+        tab_id: TabId,
+        root_pane: &PaneNode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Detached windows share terminal pane entities with the workspace, but
+        // the command bar still uses the main active-tab pipeline. Keep the
+        // first detachable surface pane-only so commands cannot target the
+        // wrong tab while the UI ownership model is being made window-aware.
+        div()
+            .size_full()
+            .relative()
+            .child(self.render_pane_tree_for_tab(Some(tab_id), root_pane, cx))
+            .into_any_element()
     }
 }

@@ -22,8 +22,7 @@ impl WorkspaceApp {
         let active_tab = self.settings_workspace.read(cx).route_snapshot().active_tab;
 
         let popup = match (active_tab, open_select) {
-            (SettingsTab::General, SettingsSelect::Language) => {
-                let mut popup = select_overlay_popup(&self.tokens, width);
+            (SettingsTab::General, SettingsSelect::Language) => {                let mut popup = select_overlay_popup(&self.tokens, width);
                 for language in language_options() {
                     let label = self.language_label(language);
                     popup = popup.child(select_option_action(
@@ -398,6 +397,30 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
+            (SettingsTab::General, SettingsSelect::CloudSyncMode) => {
+                let mut popup = select_overlay_popup(&self.tokens, width);
+                for mode in [
+                    CloudSyncMode::Auto,
+                    CloudSyncMode::Relay,
+                    CloudSyncMode::PeerToPeer,
+                ] {
+                    popup = popup.child(select_option_action(
+                        select_option(
+                            &self.tokens,
+                            cloud_sync_mode_label(mode, &self.i18n),
+                            mode == settings.cloud_sync.mode,
+                        ),
+                        false,
+                        false,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.close_settings_select();
+                            this.edit_settings(|settings| settings.cloud_sync.mode = mode, cx);
+                            cx.stop_propagation();
+                        }),
+                    ));
+                }
+                Some(popup)
+            }
             (SettingsTab::Terminal, SettingsSelect::TerminalCursorStyle) => {
                 let mut popup = select_overlay_popup(&self.tokens, width);
                 for &style in cursor_style_options() {
@@ -415,58 +438,6 @@ impl WorkspaceApp {
                                 |settings| settings.terminal.cursor_style = style,
                                 cx,
                             );
-                            cx.stop_propagation();
-                        }),
-                    ));
-                }
-                Some(popup)
-            }
-            (SettingsTab::Ide, SettingsSelect::IdeAgentMode) => {
-                let mut popup = select_overlay_popup(&self.tokens, width);
-                for mode in [
-                    IdeAgentMode::Ask,
-                    IdeAgentMode::Enabled,
-                    IdeAgentMode::Disabled,
-                ] {
-                    popup = popup.child(select_option_action(
-                        select_option(
-                            &self.tokens,
-                            ide_agent_label(mode, &self.i18n),
-                            mode == settings.ide.agent_mode,
-                        ),
-                        false,
-                        false,
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.close_settings_select();
-                            this.edit_settings(|settings| settings.ide.agent_mode = mode, cx);
-                            cx.stop_propagation();
-                        }),
-                    ));
-                }
-                Some(popup)
-            }
-            (SettingsTab::Terminal, SettingsSelect::RemoteShellIntegrationMode) => {
-                let mut popup = select_overlay_popup(&self.tokens, width);
-                for mode in [
-                    RemoteShellIntegrationMode::Ask,
-                    RemoteShellIntegrationMode::Enabled,
-                    RemoteShellIntegrationMode::Disabled,
-                ] {
-                    popup = popup.child(select_option_action(
-                        select_option(
-                            &self.tokens,
-                            remote_shell_integration_mode_label(mode, &self.i18n),
-                            mode == settings.terminal.remote_shell_integration_mode,
-                        ),
-                        false,
-                        false,
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.close_settings_select();
-                            this.edit_settings(
-                                |settings| settings.terminal.remote_shell_integration_mode = mode,
-                                cx,
-                            );
-                            this.remote_shell_integration_mode_changed(mode, cx);
                             cx.stop_propagation();
                         }),
                     ));
@@ -941,33 +912,6 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
-            (SettingsTab::Privilege, SettingsSelect::LocalPrivilegeKind) => {
-                let mut popup = select_overlay_popup(&self.tokens, width);
-                let current_kind = self.settings_workspace.read(cx).privilege_kind();
-                for kind in [
-                    PrivilegeCredentialKind::SudoPassword,
-                    PrivilegeCredentialKind::SuPassword,
-                    PrivilegeCredentialKind::CustomPrompt,
-                ] {
-                    popup = popup.child(select_option_action(
-                        select_option(
-                            &self.tokens,
-                            self.settings_privilege_kind_label(kind),
-                            current_kind == kind,
-                        ),
-                        false,
-                        false,
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.close_settings_select();
-                            this.settings_workspace.update(cx, |settings, cx| {
-                                settings.set_privilege_kind(kind, cx);
-                            });
-                            cx.stop_propagation();
-                        }),
-                    ));
-                }
-                Some(popup)
-            }
             (SettingsTab::Connections, SettingsSelect::ConnectionIdleTimeout) => {
                 let mut popup = select_overlay_popup(&self.tokens, width);
                 for (seconds, label) in connection_idle_timeout_options(&self.i18n) {
@@ -991,7 +935,7 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
-            (SettingsTab::Connections, SettingsSelect::ConnectionImportSource) => {
+            (SettingsTab::SessionIO, SettingsSelect::ConnectionImportSource) => {
                 let selected_source = self.settings_workspace.read(cx).connection_import_source();
                 let mut popup = select_overlay_popup(&self.tokens, width);
                 for source in connection_import_source_options().iter().copied() {
@@ -1012,7 +956,7 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
-            (SettingsTab::Connections, SettingsSelect::ConnectionImportDuplicateStrategy) => {
+            (SettingsTab::SessionIO, SettingsSelect::ConnectionImportDuplicateStrategy) => {
                 let selected_strategy = self
                     .settings_workspace
                     .read(cx)
@@ -1035,6 +979,27 @@ impl WorkspaceApp {
                             this.settings_workspace.update(cx, |settings, cx| {
                                 settings.set_connection_import_duplicate_strategy(strategy, cx);
                             });
+                            cx.stop_propagation();
+                        }),
+                    ));
+                }
+                Some(popup)
+            }
+            (SettingsTab::SessionIO, SettingsSelect::SessionExportFormat) => {
+                let selected_format = self.settings_workspace.read(cx).session_export_format();
+                let mut popup = select_overlay_popup(&self.tokens, width);
+                for format in session_export_format_options().iter().copied() {
+                    popup = popup.child(select_option_action(
+                        select_option(
+                            &self.tokens,
+                            session_export_format_label(format, &self.i18n),
+                            format == selected_format,
+                        ),
+                        false,
+                        false,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.close_settings_select();
+                            this.set_session_export_format(format, cx);
                             cx.stop_propagation();
                         }),
                     ));

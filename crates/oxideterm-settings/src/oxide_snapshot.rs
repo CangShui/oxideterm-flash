@@ -122,7 +122,6 @@ const LOCAL_TERMINAL_KEYS: &[&str] = &[
     "ohMyPoshTheme",
 ];
 const NATIVE_PREFERENCES_KEYS: &[&str] = &[
-    "keybindings",
     "customThemes",
     "launcher",
     "experimental",
@@ -475,7 +474,7 @@ mod tests {
             parsed["settings"]["localTerminal"]["defaultCwd"].as_str(),
             Some("/tmp")
         );
-        assert!(parsed["settings"].get("keybindings").is_some());
+        assert!(parsed["settings"].get("keybindings").is_none());
         assert!(parsed["settings"].get("customThemes").is_some());
         assert!(parsed["settings"].get("launcher").is_some());
         assert!(parsed["settings"].get("experimental").is_some());

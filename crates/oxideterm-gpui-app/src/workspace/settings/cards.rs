@@ -563,12 +563,6 @@ impl WorkspaceApp {
                 && self.terminal.read(cx).git_panel_open())
             || (anchor.id == SelectAnchorId::TerminalProjectMenu
                 && self.terminal.read(cx).project_panel_open())
-            || (anchor.id == SelectAnchorId::SessionManagerViewMode
-                && self.session_manager.read(cx).view_mode_menu_open)
-            || (anchor.id == SelectAnchorId::SessionManagerSort
-                && self.session_manager.read(cx).sort_menu_open)
-            || (anchor.id == SelectAnchorId::SessionManagerBatchMove
-                && self.session_manager.read(cx).show_batch_move)
             || (matches!(anchor.id, SelectAnchorId::RemoteDesktopResizeMenu(_))
                 && self.remote_desktop_resize_menu_tab_id.is_some())
             || self
@@ -711,8 +705,8 @@ impl WorkspaceApp {
         if self.close_terminal_git_branch_picker(cx) {
             changed = true;
         }
-        if self.session_manager.update(cx, |session_manager, cx| {
-            session_manager.clear_input_focus(cx)
+        if self.connection_workspace.update(cx, |connection_workspace, cx| {
+            connection_workspace.clear_input_focus(cx)
         }) {
             self.ime_marked_text = None;
             changed = true;
@@ -720,13 +714,6 @@ impl WorkspaceApp {
         if self
             .forwarding
             .update(cx, |forwarding, _cx| forwarding.clear_input_focus())
-        {
-            self.ime_marked_text = None;
-            changed = true;
-        }
-        if self
-            .file_manager
-            .update(cx, |file_manager, cx| file_manager.clear_input_focus(cx))
         {
             self.ime_marked_text = None;
             changed = true;
@@ -798,7 +785,7 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as i64;
                 if self.settings_store.settings().appearance.ui_font_size != value {
-                    self.edit_settings(|settings| settings.appearance.ui_font_size = value, cx);
+                    self.edit_settings_deferring_save(|settings| settings.appearance.ui_font_size = value, cx);
                 }
             }
             SettingsSlider::AppearanceBorderRadius
@@ -814,7 +801,7 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as i64;
                 if self.settings_store.settings().appearance.border_radius != value {
-                    self.edit_settings(|settings| settings.appearance.border_radius = value, cx);
+                    self.edit_settings_deferring_save(|settings| settings.appearance.border_radius = value, cx);
                 }
             }
             SettingsSlider::AppearanceWindowOpacity => {
@@ -828,7 +815,7 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
                 if self.settings_store.settings().appearance.window_opacity != value {
-                    self.edit_settings(|settings| settings.appearance.window_opacity = value, cx);
+                    self.edit_settings_deferring_save(|settings| settings.appearance.window_opacity = value, cx);
                     // Detached windows consume the same setting on their next frame.
                     cx.refresh_windows();
                 }
@@ -844,7 +831,7 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
                 if self.settings_store.settings().terminal.background_opacity != value {
-                    self.edit_settings(|settings| settings.terminal.background_opacity = value, cx);
+                    self.edit_settings_deferring_save(|settings| settings.terminal.background_opacity = value, cx);
                 }
             }
             SettingsSlider::AppearanceBackgroundBlur => {
@@ -855,6 +842,13 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn finish_settings_slider_drag(&mut self, cx: &mut Context<Self>) {
         if self.settings_slider_drag.take().is_some() {
+            if self.settings_save_pending {
+                self.settings_save_pending = false;
+                let _ = self.settings_store.save();
+                self.settings_workspace.update(cx, |settings, _cx| {
+                    settings.acknowledge_external_store_state()
+                });
+            }
             cx.notify();
         }
     }
@@ -911,6 +905,7 @@ impl WorkspaceApp {
             zeroize::Zeroize::zeroize(&mut self.settings_input_draft);
         }
         self.settings_input_draft.clear();
+        self.invalid_settings_input.remove(&input);
     }
 
     pub(in crate::workspace) fn current_settings_input_value(
@@ -943,9 +938,6 @@ impl WorkspaceApp {
             SettingsInput::TerminalCommandSpecsJson => {
                 self.terminal_command_specs_editor_initial_value()
             }
-            SettingsInput::PortableCurrentPassword
-            | SettingsInput::PortableNewPassword
-            | SettingsInput::PortableConfirmPassword => String::new(),
             SettingsInput::ManagedKeyFilePath
             | SettingsInput::ManagedKeyFileName
             | SettingsInput::ManagedKeyFilePassphrase
@@ -954,10 +946,6 @@ impl WorkspaceApp {
             | SettingsInput::ManagedKeyPastePassphrase
             | SettingsInput::ManagedKeyRenameName
             | SettingsInput::ConnectionImportTargetGroup => String::new(),
-            SettingsInput::LocalPrivilegeLabel
-            | SettingsInput::LocalPrivilegeUsernameHint
-            | SettingsInput::LocalPrivilegeSecret
-            | SettingsInput::LocalPrivilegePromptPatterns => String::new(),
             _ => String::new(),
         }
     }
@@ -974,10 +962,20 @@ impl WorkspaceApp {
             &self.settings_input_draft,
         ) {
             SettingsInputDraftApply::Applied => {
+                self.invalid_settings_input.remove(&input);
                 self.edit_settings(move |settings| *settings = next_settings, cx);
                 return;
             }
             SettingsInputDraftApply::Invalid => {
+                // A rejected draft would otherwise be dropped silently when
+                // focus moves on; surface the rejection once per transition.
+                if self.invalid_settings_input.insert(input) {
+                    self.push_settings_toast(
+                        self.i18n.t("settings_view.general.invalid_value"),
+                        TerminalNoticeVariant::Warning,
+                        cx,
+                    );
+                }
                 cx.notify();
                 return;
             }
@@ -993,9 +991,6 @@ impl WorkspaceApp {
             SettingsInput::TerminalCommandSpecsJson => {
                 cx.notify();
             }
-            SettingsInput::PortableCurrentPassword
-            | SettingsInput::PortableNewPassword
-            | SettingsInput::PortableConfirmPassword => {}
             SettingsInput::ManagedKeyFilePath
             | SettingsInput::ManagedKeyFileName
             | SettingsInput::ManagedKeyFilePassphrase
@@ -1004,10 +999,6 @@ impl WorkspaceApp {
             | SettingsInput::ManagedKeyPastePassphrase
             | SettingsInput::ManagedKeyRenameName
             | SettingsInput::ConnectionImportTargetGroup => {}
-            SettingsInput::LocalPrivilegeLabel
-            | SettingsInput::LocalPrivilegeUsernameHint
-            | SettingsInput::LocalPrivilegeSecret
-            | SettingsInput::LocalPrivilegePromptPatterns => {}
             SettingsInput::NetworkProxyPassword
             | SettingsInput::NetworkProxyTestHost
             | SettingsInput::NetworkProxyTestPort => {}
@@ -1118,7 +1109,7 @@ impl WorkspaceApp {
             slider_pointer_percent(x - left, width, self.tokens.metrics.ui_slider_thumb_size);
         let value = (8.0 + percent * (32.0 - 8.0)).round() as i64;
         if self.settings_store.settings().terminal.font_size != value {
-            self.edit_settings(|settings| settings.terminal.font_size = value, cx);
+            self.edit_settings_deferring_save(|settings| settings.terminal.font_size = value, cx);
         }
     }
 
@@ -1220,10 +1211,5 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
             | SelectAnchorId::TerminalProjectMenu
             | SelectAnchorId::TerminalCastSeekbar
             | SelectAnchorId::RemoteDesktopResizeMenu(_)
-            // Session Manager toolbar menus use window-anchored overlays, so
-            // their trigger bounds must be cached before pointer-down.
-            | SelectAnchorId::SessionManagerViewMode
-            | SelectAnchorId::SessionManagerSort
-            | SelectAnchorId::SessionManagerBatchMove
     )
 }

@@ -83,7 +83,7 @@ impl WorkspaceApp {
                             hover_background: Some(rgb(theme.bg_hover)),
                             // Tauri disables media playback when preview decode fails. The
                             // shared action wrapper keeps that disabled guard identical to
-                            // FileManager preview controls.
+                            // the other SFTP preview controls.
                             ..IconButtonOptions::opaque_toolbar(32.0, ButtonRadius::Md)
                         },
                         |this, _event, _window, cx| {

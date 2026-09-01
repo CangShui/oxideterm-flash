@@ -138,8 +138,11 @@ impl HostToolsEntity {
 
         let gpu_updated = latest_gpu_update.is_some();
         if let Some(update) = latest_gpu_update {
-            self.host_gpu.snapshot_connection_id = Some(update.connection_id);
-            self.host_gpu.snapshot = Some(update.snapshot);
+            // Store per host so a late update refreshes only its own frozen
+            // slot; the currently visible host is never overwritten by another.
+            self.host_gpu
+                .snapshots
+                .insert(update.connection_id.clone(), update.snapshot);
         }
         if profiler_updated || gpu_updated {
             cx.notify();

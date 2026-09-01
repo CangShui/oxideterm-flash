@@ -1,5 +1,4 @@
 use super::nodes_reconnect_helpers::{
-    event_log_severity_for_connection_status, event_log_title_for_node_readiness,
     node_readiness_became_ready, node_readiness_became_unavailable,
     reconnect_cascade_child_should_start,
 };
@@ -68,16 +67,7 @@ impl WorkspaceApp {
             runtime_entity::WorkspaceRuntimeEffect::ContinueReconnectCascade => {
                 self.start_next_reconnect_cascade_node(cx)
             }
-            runtime_entity::WorkspaceRuntimeEffect::RetryNodeConnect {
-                node_id,
-                attempt,
-                max_attempts,
-            } => {
-                self.log_reconnect_phase(
-                    &node_id,
-                    ReconnectPhase::SshConnect,
-                    Some(format!("starting retry {attempt}/{max_attempts}")),
-                );
+            runtime_entity::WorkspaceRuntimeEffect::RetryNodeConnect { node_id, .. } => {
                 self.start_reconnect_cascade_after_grace_expired(&node_id, cx);
                 true
             }
@@ -189,32 +179,18 @@ impl WorkspaceApp {
                 } => {
                     let mut resume_transfers_without_forwards = false;
                     if reconnecting {
-                        self.log_connection_event(
-                            &node_id,
-                            Some(connection_id.clone()),
-                            "event_log.events.connected",
-                            WorkspaceEventSeverity::Info,
-                            None,
-                            "connect_node",
-                        );
-                        self.resolve_connection_notifications_for_node(&node_id);
-                        self.log_reconnect_phase(&node_id, ReconnectPhase::AwaitTerminal, None);
                         let remounted =
                             self.remount_terminal_panes_for_reconnect(&node_id, window, cx);
-                        let terminal_message =
-                            format!("fixed {remounted} terminal pane(s) through native remount");
+                        let terminal_message = self.i18n_with(
+                            "connections.reconnect.terminal_remount",
+                            &[("count", remounted.to_string())],
+                        );
                         match self
                             .workspace_runtime
                             .read(cx)
                             .complete_reconnect_terminal_remount(&node_id, terminal_message)
                         {
-                            Some(runtime_entity::ReconnectPostTerminalAction::RestoreForwards) => {
-                                self.log_reconnect_phase(
-                                    &node_id,
-                                    ReconnectPhase::RestoreForwards,
-                                    None,
-                                );
-                            }
+                            Some(runtime_entity::ReconnectPostTerminalAction::RestoreForwards) => {}
                             Some(runtime_entity::ReconnectPostTerminalAction::ResumeTransfers) => {
                                 resume_transfers_without_forwards = true;
                             }
@@ -249,17 +225,13 @@ impl WorkspaceApp {
                     }
                     self.restore_forwarding_rules_for_reconnect(&node_id, cx);
                     if resume_transfers_without_forwards {
-                        self.log_reconnect_phase(
-                            &node_id,
-                            ReconnectPhase::ResumeTransfers,
-                            Some("no forward rules in snapshot".to_string()),
-                        );
                         let queued = self.resume_sftp_transfers_for_reconnect(&node_id, cx);
                         if queued == 0 {
                             self.finish_reconnect_after_transfer_resume(
                                 &node_id,
                                 PhaseResult::Skipped,
-                                "no incomplete transfers in snapshot".to_string(),
+                                self.i18n
+                                    .t("connections.reconnect.no_transfers_to_resume"),
                                 0,
                                 cx,
                             );
@@ -314,36 +286,10 @@ impl WorkspaceApp {
                         });
                     }
                     self.fail_active_proxy_connect_for_node(&node_id, error.clone(), cx);
-                    if active_reconnect_job {
-                        self.log_reconnect_phase(
-                            &node_id,
-                            ReconnectPhase::Failed,
-                            Some(error.clone()),
-                        );
-                        self.push_notification_entry(
-                            WorkspaceNotificationKind::Connection,
-                            WorkspaceNotificationSeverity::Error,
-                            "Reconnect failed",
-                            Some(error.clone()),
-                            WorkspaceNotificationScope::Node(node_id.0.clone()),
-                            Some(format!("reconnect-failed:{}", node_id.0)),
-                        );
-                    }
                     match action {
                         runtime_entity::ReconnectFailureAction::Retry {
-                            attempt,
-                            max_attempts,
-                            delay,
-                            job_id,
+                            delay, job_id, ..
                         } => {
-                            self.log_reconnect_phase(
-                                &node_id,
-                                ReconnectPhase::Queued,
-                                Some(format!(
-                                    "retry {}/{} after {:?}",
-                                    attempt, max_attempts, delay
-                                )),
-                            );
                             let retry_node_id = node_id.clone();
                             self.workspace_runtime.update(cx, |runtime, cx| {
                                 runtime.schedule_reconnect_action(
@@ -364,13 +310,11 @@ impl WorkspaceApp {
                         }
                         runtime_entity::ReconnectFailureAction::InitialConnect => {
                             if let Some((title, description)) = connection_failure_notice {
-                                self.push_notification_entry(
-                                    WorkspaceNotificationKind::Connection,
-                                    WorkspaceNotificationSeverity::Error,
+                                self.push_reconnect_notice(
                                     title,
                                     description,
-                                    WorkspaceNotificationScope::Node(node_id.0.clone()),
-                                    Some(format!("connect-failed:{}", node_id.0)),
+                                    TerminalNoticeVariant::Error,
+                                    cx,
                                 );
                             }
                         }
@@ -412,7 +356,6 @@ impl WorkspaceApp {
                         TerminalNoticeVariant::Success,
                         cx,
                     );
-                    self.resolve_connection_notifications_for_node(&node_id);
                     let recovered_node_ids = self.workspace_runtime.update(cx, |runtime, _cx| {
                         runtime.apply_grace_recovery(
                             &node_id,
@@ -433,11 +376,10 @@ impl WorkspaceApp {
                     self.restore_forwarding_session_for_node(&node_id, cx);
                     changed = true;
                 }
-                runtime_entity::ReconnectRuntimeEffect::GraceExpired { node_id, detail } => {
+                runtime_entity::ReconnectRuntimeEffect::GraceExpired { node_id, .. } => {
                     if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
                         node.readiness = NodeReadiness::Connecting;
                     }
-                    self.log_reconnect_phase(&node_id, ReconnectPhase::SshConnect, Some(detail));
                     // Tauri falls back from grace-period probing to a full
                     // reconnectCascade(root): root reconnect first, and
                     // descendants marked link-down reconnect once their parent
@@ -445,27 +387,7 @@ impl WorkspaceApp {
                     self.start_reconnect_cascade_after_grace_expired(&node_id, cx);
                     changed = true;
                 }
-                runtime_entity::ReconnectRuntimeEffect::SftpTransfersSnapshotted {
-                    node_id,
-                    entered_grace_period,
-                } => {
-                    if entered_grace_period {
-                        self.log_reconnect_phase(&node_id, ReconnectPhase::GracePeriod, None);
-                    }
-                    changed = true;
-                }
-                runtime_entity::ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
-                    notice,
-                } => {
-                    if let Some(notice) = notice {
-                        self.push_remote_shell_integration_notice(notice, cx);
-                    }
-                    changed = true;
-                }
-                runtime_entity::ReconnectRuntimeEffect::RemoteShellIntegrationMaintenanceFinished {
-                    notice,
-                } => {
-                    self.push_remote_shell_integration_notice(notice, cx);
+                runtime_entity::ReconnectRuntimeEffect::SftpTransfersSnapshotted { .. } => {
                     changed = true;
                 }
             }
@@ -507,12 +429,12 @@ impl WorkspaceApp {
                     self.workspace_runtime.update(cx, |runtime, cx| {
                         runtime.finish_connection_trace_success(&node_id, cx);
                     });
+                    self.auto_open_sftp_sidebar_for_ready_node(&node_id, cx);
                 } else if node_readiness_became_unavailable(previous.as_ref(), &state) {
                     self.workspace_runtime.update(cx, |runtime, cx| {
                         runtime.finish_connection_trace_failed(&node_id, Some(reason.clone()), cx);
                     });
                 }
-                let event_severity = event_log_severity_for_connection_status(&status);
                 let affected_children_count = affected_children.len();
                 if matches!(state, NodeReadiness::Error | NodeReadiness::Disconnected) {
                     let _ = self.cascade_connection_status_to_runtime_children(
@@ -523,43 +445,21 @@ impl WorkspaceApp {
                         cx,
                     );
                 }
-                self.push_event_log_entry(
-                    event_severity,
-                    WorkspaceEventCategory::Connection,
-                    Some(node_id.clone()),
-                    Some(connection_id),
-                    match status.as_str() {
-                        "link_down" => "event_log.events.link_down",
-                        "disconnected" => "event_log.events.disconnected",
-                        "connected" => "event_log.events.connected",
-                        "reconnecting" => "event_log.events.reconnecting",
-                        _ => "event_log.events.node_state_unknown",
-                    },
-                    (affected_children_count > 0).then_some(format!(
-                        "event_log.events.affected_children:{affected_children_count}"
-                    )),
-                    "connection_status_changed",
-                );
                 if matches!(state, NodeReadiness::Error) {
-                    self.push_notification_entry(
-                        WorkspaceNotificationKind::Connection,
-                        WorkspaceNotificationSeverity::Error,
-                        "Connection lost",
+                    self.push_reconnect_notice(
+                        self.i18n.t("sftp.errors.connection_lost"),
                         Some(if affected_children_count > 0 {
                             format!("{reason}; affected children: {affected_children_count}")
                         } else {
                             reason
                         }),
-                        WorkspaceNotificationScope::Node(node_id.0.clone()),
-                        Some(format!("connection-lost:{}", node_id.0)),
+                        TerminalNoticeVariant::Error,
+                        cx,
                     );
-                } else if matches!(state, NodeReadiness::Ready) {
-                    self.resolve_connection_notifications_for_node(&node_id);
                 }
                 if matches!(state, NodeReadiness::Error | NodeReadiness::Disconnected) {
-                    self.mark_ide_interrupted_for_node(&node_id, cx);
                     let message = if matches!(state, NodeReadiness::Disconnected) {
-                        "Connection closed".to_string()
+                        self.i18n.t("sftp.errors.connection_closed")
                     } else {
                         self.i18n.t("sftp.errors.connection_lost")
                     };
@@ -616,20 +516,6 @@ impl WorkspaceApp {
                     .ssh_nodes
                     .get(&node_id)
                     .map(|node| node.readiness.clone());
-                let event_severity = match state {
-                    NodeReadiness::Error => WorkspaceEventSeverity::Error,
-                    NodeReadiness::Disconnected => WorkspaceEventSeverity::Warn,
-                    _ => WorkspaceEventSeverity::Info,
-                };
-                self.push_event_log_entry(
-                    event_severity,
-                    WorkspaceEventCategory::Node,
-                    Some(node_id.clone()),
-                    self.node_router.connection_id_for_node(&node_id),
-                    event_log_title_for_node_readiness(&state),
-                    (!reason.is_empty()).then_some(reason.clone()),
-                    "node:state",
-                );
                 if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
                     node.readiness = state.clone();
                 }
@@ -638,6 +524,7 @@ impl WorkspaceApp {
                     self.workspace_runtime.update(cx, |runtime, cx| {
                         runtime.finish_connection_trace_success(&node_id, cx);
                     });
+                    self.auto_open_sftp_sidebar_for_ready_node(&node_id, cx);
                 } else if node_readiness_became_unavailable(previous.as_ref(), &state) {
                     self.workspace_runtime.update(cx, |runtime, cx| {
                         runtime.finish_connection_trace_failed(&node_id, Some(reason.clone()), cx);
@@ -646,7 +533,6 @@ impl WorkspaceApp {
                 if matches!(previous, Some(NodeReadiness::Ready))
                     && matches!(state, NodeReadiness::Error | NodeReadiness::Disconnected)
                 {
-                    self.mark_ide_interrupted_for_node(&node_id, cx);
                     let affected_children = self.cascade_connection_status_to_runtime_children(
                         &node_id,
                         None,
@@ -654,37 +540,20 @@ impl WorkspaceApp {
                         reason.clone(),
                         cx,
                     );
-                    self.push_event_log_entry(
-                        event_severity,
-                        WorkspaceEventCategory::Connection,
-                        Some(node_id.clone()),
-                        self.node_router.connection_id_for_node(&node_id),
-                        if matches!(state, NodeReadiness::Error) {
-                            "event_log.events.link_down"
-                        } else {
-                            "event_log.events.disconnected"
-                        },
-                        (affected_children > 0).then_some(format!(
-                            "event_log.events.affected_children:{affected_children}"
-                        )),
-                        "connection_status_changed",
-                    );
                     if matches!(state, NodeReadiness::Error) {
-                        self.push_notification_entry(
-                            WorkspaceNotificationKind::Connection,
-                            WorkspaceNotificationSeverity::Error,
-                            "Connection lost",
+                        self.push_reconnect_notice(
+                            self.i18n.t("sftp.errors.connection_lost"),
                             Some(if affected_children > 0 {
                                 format!("{reason}; affected children: {affected_children}")
                             } else {
                                 reason.clone()
                             }),
-                            WorkspaceNotificationScope::Node(node_id.0.clone()),
-                            Some(format!("connection-lost:{}", node_id.0)),
+                            TerminalNoticeVariant::Error,
+                            cx,
                         );
                     }
                     let message = if matches!(state, NodeReadiness::Disconnected) {
-                        "Connection closed".to_string()
+                        self.i18n.t("sftp.errors.connection_closed")
                     } else {
                         self.i18n.t("sftp.errors.connection_lost")
                     };
@@ -784,12 +653,11 @@ impl WorkspaceApp {
             );
         for affected_node_id in &affected {
             self.ensure_workspace_ssh_node_from_runtime(affected_node_id);
-            self.mark_ide_interrupted_for_node(affected_node_id, cx);
             if let Some(node) = self.ssh_nodes.get_mut(affected_node_id) {
                 node.readiness = state.clone();
             }
             let message = if matches!(state, NodeReadiness::Disconnected) {
-                "Connection closed".to_string()
+                self.i18n.t("sftp.errors.connection_closed")
             } else {
                 self.i18n.t("sftp.errors.connection_lost")
             };
@@ -858,9 +726,6 @@ impl WorkspaceApp {
             }
         }
         if remounted > 0 {
-            // Reconnect creates a new visible Shell lifecycle for the node, so
-            // a previously declined or incomplete integration is checked again.
-            self.start_remote_shell_integration_terminal_gate(node_id.clone(), false, cx);
             self.focus_active_pane(window, cx);
             cx.notify();
         }
@@ -907,7 +772,10 @@ impl WorkspaceApp {
             self.finish_reconnect_after_transfer_resume(
                 &completion.node_id,
                 PhaseResult::Ok,
-                format!("resumed {} transfer(s)", completion.resumed),
+                self.i18n_with(
+                    "connections.reconnect.transfers_resumed",
+                    &[("count", completion.resumed.to_string())],
+                ),
                 completion.resumed,
                 cx,
             );
@@ -929,59 +797,9 @@ impl WorkspaceApp {
         {
             return;
         }
-        self.log_reconnect_phase(node_id, ReconnectPhase::RestoreIde, None);
         self.workspace_runtime.update(cx, |runtime, _cx| {
-            runtime.remember_ide_restore_transfer_count(node_id.clone(), restored_transfers);
+            runtime.remember_reconnect_transfer_count(node_id.clone(), restored_transfers);
         });
-        match self.restore_ide_for_reconnect(node_id, cx) {
-            super::ide::IdeReconnectRestoreStatus::Restored => {
-                self.complete_pending_ide_reconnect_restore(
-                    node_id,
-                    PhaseResult::Ok,
-                    "restored IDE project and open files".to_string(),
-                    cx,
-                );
-            }
-            super::ide::IdeReconnectRestoreStatus::Pending => {}
-            super::ide::IdeReconnectRestoreStatus::Skipped => {
-                self.complete_pending_ide_reconnect_restore(
-                    node_id,
-                    PhaseResult::Skipped,
-                    "no IDE snapshot for node".to_string(),
-                    cx,
-                );
-            }
-        }
-    }
-
-    pub(in crate::workspace) fn complete_pending_ide_reconnect_restore(
-        &mut self,
-        node_id: &NodeId,
-        result: PhaseResult,
-        detail: String,
-        cx: &mut Context<Self>,
-    ) {
-        match self
-            .workspace_runtime
-            .read(cx)
-            .complete_reconnect_ide_restore(node_id, result, detail.clone())
-        {
-            None => {
-                self.workspace_runtime.update(cx, |runtime, _cx| {
-                    runtime.clear_ide_restore_transfer_count(node_id);
-                });
-                return;
-            }
-            Some(runtime_entity::ReconnectPhaseOutcome::Failed) => {
-                self.workspace_runtime.update(cx, |runtime, _cx| {
-                    runtime.clear_ide_restore_transfer_count(node_id);
-                });
-                self.finish_reconnect_job(node_id, Err(detail), cx);
-                return;
-            }
-            Some(runtime_entity::ReconnectPhaseOutcome::Continue) => {}
-        }
-        self.log_reconnect_phase(node_id, ReconnectPhase::Verify, None);
         let verification_detail = self.verify_forward_rules_for_reconnect(node_id, cx);
         let (restored_forwards, restored_transfers) =
             self.workspace_runtime.update(cx, |runtime, _cx| {
@@ -1037,7 +855,11 @@ impl WorkspaceApp {
             runtime_entity::ReconnectPipelineClaim::Acquired => {}
             runtime_entity::ReconnectPipelineClaim::Requeued => return,
             runtime_entity::ReconnectPipelineClaim::Exhausted => {
-                self.finish_reconnect_job(node_id, Err("Pipeline queue exhausted".to_string()), cx);
+                self.finish_reconnect_job(
+                    node_id,
+                    Err(self.i18n.t("connections.reconnect.pipeline_exhausted")),
+                    cx,
+                );
                 return;
             }
         }
@@ -1084,7 +906,6 @@ impl WorkspaceApp {
             .iter()
             .flat_map(|entry| entry.rules.iter().map(|rule| rule.id.clone()))
             .collect::<Vec<_>>();
-        let ide_snapshot = self.ide_snapshot_for_nodes(&affected_nodes, cx);
         let snapshot = ReconnectSnapshot {
             node_id: node_id.0.clone(),
             old_terminal_session_ids,
@@ -1093,7 +914,6 @@ impl WorkspaceApp {
             active_port_forward_ids,
             old_connections_by_node: old_connections_by_node.clone(),
             old_connection_ids: old_connection_ids.clone(),
-            ide_snapshot,
             snapshot_at: Some(SystemTime::now()),
             ..ReconnectSnapshot::default()
         };
@@ -1110,12 +930,6 @@ impl WorkspaceApp {
             TerminalNoticeVariant::Default,
             cx,
         );
-        self.log_reconnect_phase(
-            node_id,
-            ReconnectPhase::Queued,
-            Some("scheduled after link-down debounce".to_string()),
-        );
-        self.log_reconnect_phase(node_id, ReconnectPhase::Snapshot, None);
 
         let node_id = node_id.clone();
         let affected_transfer_nodes = affected_nodes
@@ -1247,20 +1061,7 @@ impl WorkspaceApp {
             result,
             verification_detail,
         ) {
-            if let Some((title, variant, phase, detail)) = notice {
-                self.log_reconnect_phase(node_id, phase, detail.clone());
-                if let Some(error) = detail.clone() {
-                    self.push_notification_entry(
-                        WorkspaceNotificationKind::Connection,
-                        WorkspaceNotificationSeverity::Error,
-                        "Reconnect failed",
-                        Some(error),
-                        WorkspaceNotificationScope::Node(node_id.0.clone()),
-                        Some(format!("reconnect-failed:{}", node_id.0)),
-                    );
-                } else {
-                    self.resolve_connection_notifications_for_node(node_id);
-                }
+            if let Some((title, variant, _phase, detail)) = notice {
                 self.push_reconnect_notice(title, detail, variant, cx);
             }
             self.workspace_runtime.update(cx, |runtime, _cx| {
@@ -1349,13 +1150,13 @@ impl WorkspaceApp {
                 return true;
             }
             Some(runtime_entity::ReconnectPhaseOutcome::Continue) => {
-                self.log_reconnect_phase(&node_id, ReconnectPhase::ResumeTransfers, None);
                 let queued = self.resume_sftp_transfers_for_reconnect(&node_id, cx);
                 if queued == 0 {
                     self.finish_reconnect_after_transfer_resume(
                         &node_id,
                         PhaseResult::Skipped,
-                        "no incomplete transfers in snapshot".to_string(),
+                        self.i18n
+                            .t("connections.reconnect.no_transfers_to_resume"),
                         0,
                         cx,
                     );

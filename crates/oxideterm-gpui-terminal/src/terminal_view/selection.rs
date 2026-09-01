@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use oxideterm_terminal::{TerminalCell, TerminalSnapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +80,91 @@ pub(crate) fn grid_point_for_viewport_point(
 
 fn grid_line_for_viewport_row(row: usize, display_offset: usize) -> i32 {
     row as i32 - display_offset as i32
+}
+
+/// Remaps a viewport-relative selection onto the snapshot that replaced the one
+/// it was created in. Grid lines are stored as `row - display_offset`, so new
+/// output or scrolling would otherwise leave the highlight on different text;
+/// mapping the endpoints through the pane-assigned stable row identity keeps
+/// the selection pinned to the text it covered.
+pub(crate) fn reanchor_selection(
+    previous: &TerminalSnapshot,
+    next: &TerminalSnapshot,
+    selection: Option<TerminalSelection>,
+) -> Option<TerminalSelection> {
+    let Some(selection) = selection else {
+        return None;
+    };
+
+    let previous_lines_by_id = snapshot_grid_lines_by_id(previous);
+    let next_lines_by_id = snapshot_grid_lines_by_id(next);
+    let shared_line_delta = shared_snapshot_line_delta(&previous_lines_by_id, &next_lines_by_id);
+
+    let reanchor_point = |point: TerminalGridPoint| -> Option<TerminalGridPoint> {
+        let exact_line = snapshot_line_id_for_grid_line(previous, point.line)
+            .and_then(|line_id| next_lines_by_id.get(&line_id).copied());
+        let line = exact_line.or_else(|| point.line.checked_add(shared_line_delta?))?;
+        selection_grid_line_is_retained(next, line).then_some(TerminalGridPoint {
+            line,
+            col: point.col.min(next.cols.saturating_sub(1)),
+        })
+    };
+
+    Some(TerminalSelection {
+        anchor: reanchor_point(selection.anchor)?,
+        head: reanchor_point(selection.head)?,
+        mode: selection.mode,
+    })
+}
+
+fn snapshot_grid_lines_by_id(snapshot: &TerminalSnapshot) -> HashMap<u64, i32> {
+    snapshot
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(row, line)| {
+            (line.line_id != 0).then(|| {
+                (
+                    line.line_id,
+                    grid_line_for_viewport_row(row, snapshot.display_offset),
+                )
+            })
+        })
+        .collect()
+}
+
+fn snapshot_line_id_for_grid_line(snapshot: &TerminalSnapshot, line: i32) -> Option<u64> {
+    let row = snapshot_row_for_grid_line(snapshot, line)?;
+    let line_id = snapshot.lines.get(row)?.line_id;
+    (line_id != 0).then_some(line_id)
+}
+
+fn shared_snapshot_line_delta(
+    previous: &HashMap<u64, i32>,
+    next: &HashMap<u64, i32>,
+) -> Option<i32> {
+    let mut shared_delta = None;
+    for (line_id, previous_line) in previous {
+        let Some(next_line) = next.get(line_id) else {
+            continue;
+        };
+        let delta = next_line.checked_sub(*previous_line)?;
+        if shared_delta.is_some_and(|shared| shared != delta) {
+            // Reflow and buffer rewrites can move rows non-uniformly. Without
+            // one translation shared by every retained row, an off-screen
+            // endpoint cannot be reconstructed safely.
+            return None;
+        }
+        shared_delta = Some(delta);
+    }
+    shared_delta
+}
+
+fn selection_grid_line_is_retained(snapshot: &TerminalSnapshot, line: i32) -> bool {
+    let earliest = -i64::try_from(snapshot.scrollback_lines).unwrap_or(i64::MAX);
+    let latest = i64::try_from(snapshot.rows.saturating_sub(1)).unwrap_or(i64::MAX);
+    let line = i64::from(line);
+    line >= earliest && line <= latest
 }
 
 fn snapshot_row_for_grid_line(snapshot: &TerminalSnapshot, line: i32) -> Option<usize> {

@@ -311,6 +311,9 @@ impl WorkspaceApp {
         let confirm_id = forward_id;
         confirm_dialog(
             &self.tokens,
+            // Per-dialog motion id: the pending delete target keeps concurrent
+            // confirm dialogs from sharing one exit/enter animation timeline.
+            gpui::ElementId::Name(format!("forward-delete-confirm-{confirm_id}").into()),
             ConfirmDialogView {
                 variant: ConfirmDialogVariant::Danger,
                 title: self

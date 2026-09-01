@@ -1,0 +1,24 @@
+[package]
+name = "oxideterm-cloud-sync"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+argon2.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chacha20poly1305.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+# WebSocket signaling toward the Cloudflare Worker room endpoint.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Peer-to-peer DataChannel transport negotiated over the signaling room.
+webrtc = "0.13"

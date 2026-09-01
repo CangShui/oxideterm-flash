@@ -457,6 +457,7 @@ pub(crate) struct BrowserOverlayPlacement {
 #[derive(Clone, Copy, Debug, Default)]
 struct BrowserPointerCaptureState {
     sidebar_resizing: bool,
+    context_sidebar_resizing: bool,
     embedded_sftp_sidebar_resizing: bool,
     sftp_pane_resizing: bool,
     sftp_queue_resizing: bool,
@@ -531,6 +532,7 @@ impl WorkspaceApp {
         let sftp = self.sftp_view.read(cx);
         resolve_browser_pointer_capture_owner(BrowserPointerCaptureState {
             sidebar_resizing: self.sidebar_resizing,
+            context_sidebar_resizing: self.context_sidebar_resizing,
             embedded_sftp_sidebar_resizing: self.embedded_sftp_sidebar_resizing,
             sftp_pane_resizing: sftp.pane_resize_active(),
             sftp_queue_resizing: sftp.queue_resize_active(),
@@ -552,7 +554,7 @@ fn resolve_browser_pointer_capture_owner(
     // Browser pointer capture has a single active owner. The order below favors
     // structural resize handles over content drags because resize gestures must
     // keep winning even when the cursor crosses selectable text or list rows.
-    if state.sidebar_resizing {
+    if state.sidebar_resizing || state.context_sidebar_resizing {
         Some(BrowserPointerCaptureOwner::SidebarResize)
     } else if state.embedded_sftp_sidebar_resizing {
         Some(BrowserPointerCaptureOwner::EmbeddedSftpSidebarResize)

@@ -226,7 +226,7 @@ impl WorkspaceApp {
                     .text_size(px(self.tokens.metrics.ui_text_xs))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(forwards_palette_color(TW_RED_400))
-                    .child("⚠ Error"),
+                    .child(self.i18n.t("forwards.status.error_label")),
             )
             .child(
                 div()

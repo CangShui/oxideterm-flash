@@ -701,24 +701,29 @@ impl TerminalElement {
         } else {
             self.highlight_layout_for_logical_lines(&logical_lines)
         };
-        let search_matches = map_rects_to_visual(
-            &self.snapshot,
-            self.bidi_enabled,
-            if !self.search_matches_precomputed && self.search_matches.is_empty() {
-                search_match_rects_for_rows(
-                    &self.snapshot,
-                    self.search_query.as_deref(),
-                    visible_rows.clone(),
-                )
-            } else {
-                visible_search_match_rects(
-                    &self.search_matches,
-                    self.snapshot.display_offset,
-                    visible_rows.clone(),
-                    self.selected_search_match,
-                )
-            },
-        );
+            let search_match_color = search_match_color(&self.theme);
+            let selected_search_color = selected_search_match_color(&self.theme);
+            let search_matches = map_rects_to_visual(
+                &self.snapshot,
+                self.bidi_enabled,
+                if !self.search_matches_precomputed && self.search_matches.is_empty() {
+                    search_match_rects_for_rows(
+                        &self.snapshot,
+                        self.search_query.as_deref(),
+                        visible_rows.clone(),
+                        search_match_color,
+                    )
+                } else {
+                    visible_search_match_rects(
+                        &self.search_matches,
+                        self.snapshot.display_offset,
+                        visible_rows.clone(),
+                        self.selected_search_match,
+                        search_match_color,
+                        selected_search_color,
+                    )
+                },
+            );
         let command_mark_overlays = command_mark_overlays_for_rows(
             &self.snapshot,
             &self.command_marks,
@@ -844,7 +849,7 @@ impl TerminalElement {
                     col: marked_col,
                     text: SharedString::from(text.clone()),
                     cells: text.encode_utf16().count().max(1),
-                    style: marked_text_run(text, &self.metrics),
+                    style: marked_text_run(text, &self.theme, &self.metrics),
                     shaped: None,
                 })
             }),
@@ -2087,7 +2092,7 @@ impl Element for TerminalElement {
                     .iter()
                     .filter(|image| image.image.snapshot.z_index < 0)
                 {
-                    paint_terminal_image(image, origin, &self.metrics, window);
+                    paint_terminal_image(image, origin, &self.metrics, viewport_mask_bounds, window);
                 }
                 for rect in &layout.search_matches {
                     paint_terminal_rect(rect, origin, &self.metrics, window);
@@ -2119,7 +2124,7 @@ impl Element for TerminalElement {
                     .iter()
                     .filter(|image| image.image.snapshot.z_index >= 0)
                 {
-                    paint_terminal_image(image, origin, &self.metrics, window);
+                    paint_terminal_image(image, origin, &self.metrics, viewport_mask_bounds, window);
                 }
                 for rect in &layout.highlight_underlines {
                     paint_terminal_underline(rect, origin, &self.metrics, window);

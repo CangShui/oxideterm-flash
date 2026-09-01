@@ -81,9 +81,7 @@
       "test_running": "Testing SSH connection...",
       "test_success": "SSH connection test succeeded.",
       "test_not_supported_kbi": "Test connection is not supported for 2FA authentication",
-      "key_path_not_ready": "SSH key authentication needs the key path picker before it can connect.",
       "certificate_not_ready": "Certificate authentication needs key and certificate path pickers before it can connect.",
-      "keyboard_interactive_not_ready": "Keyboard-interactive authentication needs the native prompt flow before it can connect.",
       "default_key_desc": "Use the default SSH key (e.g. ~/.ssh/id_rsa, ~/.ssh/id_ed25519)",
       "passphrase": "Passphrase (optional)",
       "passphrase_placeholder": "Key passphrase if encrypted",
@@ -129,7 +127,6 @@
       "proxy_chain_port": "Port",
       "proxy_chain_username": "Username",
       "proxy_chain_auth": "Auth",
-      "proxy_chain_kbi_unsupported": "Proxy chain connections do not support 2FA / keyboard-interactive authentication.",
       "managed_key": "Managed SSH key",
       "managed_key_placeholder": "Select a managed key",
       "managed_key_hint": "Managed keys stay in the local keychain. This connection stores only the key reference and optional passphrase.",
@@ -186,7 +183,6 @@
       "fingerprint_label": "Fingerprint",
       "expected_fingerprint": "Expected fingerprint",
       "actual_fingerprint": "Actual fingerprint",
-      "cancelled": "SSH host key confirmation was cancelled.",
       "changed_requires_remove": "Changed host keys are blocked until the saved key is removed.",
       "actions": {
         "cancel": "Cancel",
@@ -200,30 +196,6 @@
       "continue": "Continue",
       "cancelled": "Keyboard-interactive authentication was cancelled."
     },
-    "drill_down": {
-      "title": "Drill Down into New Server",
-      "description": "Establish a tunneled connection from <host>{{host}}</host>",
-      "target_host": "Target Host",
-      "target_host_placeholder": "192.168.1.100 or internal-server",
-      "port": "Port",
-      "username": "Username",
-      "username_placeholder": "root",
-      "auth_method": "Authentication Method",
-      "auth_agent": "SSH Agent",
-      "auth_key": "SSH Key",
-      "auth_password": "Password",
-      "agent_desc": "Authenticate using the system SSH agent.",
-      "agent_hint": "Ensure your SSH agent is running and has the required key(s) loaded.",
-      "key_path": "Key Path",
-      "key_path_placeholder": "~/.ssh/id_rsa",
-      "browse": "Browse",
-      "passphrase": "Key Passphrase (optional)",
-      "password": "Password",
-      "cancel": "Cancel",
-      "connect": "Connect",
-      "connecting": "Connecting...",
-      "parent_not_ready": "Parent node is not connected"
-    },
     "errors": {
       "chain_failed_title": "Connection chain failed",
       "chain_failed_desc": "Hop {{position}} of {{total}} failed: {{error}}",
@@ -232,28 +204,19 @@
   },
   "connections": {
     "toast": {
-      "proxy_chain_established": "Proxy chain connection established",
       "proxy_chain_invalid": "Proxy chain is invalid",
-      "proxy_hop_kbi_unsupported": "Jump host does not support keyboard-interactive/2FA",
-      "proxy_hop_auth_unsupported": "Jump host uses an unsupported auth type",
-      "proxy_chain_desc": "Chain depth {{depth}}. Topology synchronized."
-    },
-    "errors": {
-      "chain_busy_title": "Operation in Progress",
-      "chain_busy_desc": "Another connection chain is in progress. Please wait.",
-      "node_connecting_title": "Already Connecting",
-      "node_connecting_desc": "This node is already being connected.",
-      "chain_failed_title": "Connection Failed",
-      "chain_failed_desc": "Failed at node {{position}}/{{total}}: {{error}}",
-      "generic_title": "Connection Error"
+      "proxy_hop_kbi_unsupported": "Jump host does not support keyboard-interactive/2FA"
     },
     "reconnect": {
       "starting": "{{name}} is reconnecting...",
-      "ssh_restored": "SSH connection restored",
       "completed": "Connection restored, {{count}} service(s) recovered",
       "failed": "Reconnection failed: {{error}}",
       "cancelled": "Reconnection cancelled",
-      "recovered": "Connection recovered - session preserved"
+      "recovered": "Connection recovered - session preserved",
+      "terminal_remount": "Remounted {{count}} terminal pane(s)",
+      "no_transfers_to_resume": "No incomplete transfers in snapshot",
+      "transfers_resumed": "Resumed {{count}} transfer(s)",
+      "pipeline_exhausted": "Reconnect pipeline queue exhausted"
     },
     "trace": {
       "connecting": "Connecting {{label}}",

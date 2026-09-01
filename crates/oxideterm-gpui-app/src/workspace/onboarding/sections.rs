@@ -47,10 +47,30 @@ impl WorkspaceApp {
             )
             .child(self.onboarding_info_card(None, "onboarding.project_intro", None, false, cx))
             .child(div().grid().grid_cols(2).gap(px(8.0)).children([
-                self.onboarding_feature_tile(LucideIcon::Zap, "highlight_performance", cx),
-                self.onboarding_feature_tile(LucideIcon::Lock, "highlight_security_arch", cx),
-                self.onboarding_feature_tile(LucideIcon::Cpu, "highlight_crossplatform", cx),
-                self.onboarding_feature_tile(LucideIcon::Puzzle, "highlight_extensible", cx),
+                self.onboarding_feature_tile(
+                    LucideIcon::Zap,
+                    "onboarding.highlight_performance",
+                    "onboarding.highlight_performance_desc",
+                    cx,
+                ),
+                self.onboarding_feature_tile(
+                    LucideIcon::Lock,
+                    "onboarding.highlight_security_arch",
+                    "onboarding.highlight_security_arch_desc",
+                    cx,
+                ),
+                self.onboarding_feature_tile(
+                    LucideIcon::Cpu,
+                    "onboarding.highlight_crossplatform",
+                    "onboarding.highlight_crossplatform_desc",
+                    cx,
+                ),
+                self.onboarding_feature_tile(
+                    LucideIcon::Puzzle,
+                    "onboarding.highlight_extensible",
+                    "onboarding.highlight_extensible_desc",
+                    cx,
+                ),
             ]))
             .child(self.onboarding_language_picker(cx))
             .into_any_element()

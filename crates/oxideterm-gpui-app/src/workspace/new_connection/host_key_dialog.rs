@@ -2,6 +2,7 @@ use gpui::{
     AnyElement, Context, MouseButton, ParentElement, SharedString, Styled, Window, div, prelude::*,
     px, rgb, rgba,
 };
+use oxideterm_gpui_terminal::TerminalNoticeVariant;
 use oxideterm_gpui_ui::{
     button::{ButtonOptions, ButtonRadius, ButtonSize, ButtonVariant, ToolbarButtonOptions},
     modal::dismissible_dialog_backdrop,
@@ -67,9 +68,12 @@ impl WorkspaceApp {
                     }
                 });
             } else {
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(Some(message), cx);
-                });
+                self.push_command_palette_toast(
+                    message,
+                    None,
+                    TerminalNoticeVariant::Default,
+                    cx,
+                );
             }
             self.accept_active_proxy_connect_host_key(persist, fingerprint, window, cx);
             cx.notify();
@@ -106,9 +110,12 @@ impl WorkspaceApp {
                     connection_flow.set_form_feedback(None, Some(message.clone()), cx)
                 });
                 if !reported_to_form {
-                    self.session_manager.update(cx, |session_manager, cx| {
-                        session_manager.set_status(Some(message), cx);
-                    });
+                    self.push_command_palette_toast(
+                        message,
+                        None,
+                        TerminalNoticeVariant::Default,
+                        cx,
+                    );
                 }
                 cx.notify();
                 return;
@@ -165,9 +172,8 @@ impl WorkspaceApp {
                 }
             });
         } else {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(None, cx);
-            });
+            // The session-manager status bar no longer exists; there is no
+            // transient state to clear for a user-initiated cancellation.
         }
         cx.notify();
     }
@@ -206,9 +212,12 @@ impl WorkspaceApp {
                         }
                     });
                 } else {
-                    self.session_manager.update(cx, |session_manager, cx| {
-                        session_manager.set_status(Some(message), cx);
-                    });
+                    self.push_command_palette_toast(
+                        message,
+                        None,
+                        TerminalNoticeVariant::Default,
+                        cx,
+                    );
                 }
                 if challenge.session_tree_challenge {
                     self.continue_active_proxy_session_tree_preflight_only(cx);
@@ -230,9 +239,12 @@ impl WorkspaceApp {
                         }
                     });
                 } else {
-                    self.session_manager.update(cx, |session_manager, cx| {
-                        session_manager.set_status(Some(message), cx);
-                    });
+                    self.push_command_palette_toast(
+                        message,
+                        None,
+                        TerminalNoticeVariant::Error,
+                        cx,
+                    );
                 }
                 self.connection_flow.update(cx, |connection_flow, cx| {
                     connection_flow.restore_host_key_challenge(challenge, cx);

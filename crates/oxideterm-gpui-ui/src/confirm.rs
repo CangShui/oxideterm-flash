@@ -46,15 +46,17 @@ pub struct ConfirmDialogView {
 
 pub fn confirm_dialog(
     tokens: &ThemeTokens,
+    id: impl Into<gpui::ElementId>,
     view: ConfirmDialogView,
     on_cancel: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     on_confirm: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    confirm_dialog_with_focus(tokens, view, None, on_cancel, on_confirm)
+    confirm_dialog_with_focus(tokens, id, view, None, on_cancel, on_confirm)
 }
 
 pub fn confirm_dialog_with_focus(
     tokens: &ThemeTokens,
+    id: impl Into<gpui::ElementId>,
     view: ConfirmDialogView,
     focused_action: Option<ConfirmDialogAction>,
     on_cancel: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -62,7 +64,7 @@ pub fn confirm_dialog_with_focus(
 ) -> AnyElement {
     confirm_dialog_with_focus_motion(
         tokens,
-        "confirm-dialog",
+        id,
         crate::motion::ExitPhase::Visible,
         view,
         focused_action,
@@ -97,9 +99,16 @@ pub fn confirm_dialog_with_focus_motion(
     };
     let on_cancel = Rc::new(on_cancel);
     let on_backdrop_cancel = on_cancel.clone();
+    // The element stays mounted for the whole exit fade. The owner has already
+    // accepted or cancelled at that point, so every dismissal path must stay
+    // inert or a click during the fade would fire the action a second time.
+    let exiting = phase == crate::motion::ExitPhase::Exiting;
 
     let dialog = dismissible_dialog_backdrop()
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            if exiting {
+                return;
+            }
             // Tauri useConfirm wraps Radix Dialog and maps onOpenChange(false)
             // to cancel, so an outside pointer-down must follow the same path.
             on_backdrop_cancel(event, window, cx);
@@ -195,7 +204,7 @@ pub fn confirm_dialog_with_focus_motion(
                                     separator_color: Some(rgba(
                                         (theme.border << 8) | CONFIRM_DIVIDER_ALPHA,
                                     )),
-                                    disabled: false,
+                                    disabled: exiting,
                                     loading: false,
                                     height: Some(CONFIRM_ACTION_HEIGHT),
                                     padding_y: None,
@@ -206,6 +215,9 @@ pub fn confirm_dialog_with_focus_motion(
                             .on_mouse_down(
                                 MouseButton::Left,
                                 move |event, window, cx| {
+                                    if exiting {
+                                        return;
+                                    }
                                     on_cancel(event, window, cx);
                                 },
                             ),
@@ -225,7 +237,7 @@ pub fn confirm_dialog_with_focus_motion(
                                         == Some(ConfirmDialogAction::Confirm),
                                     right_separator: false,
                                     separator_color: None,
-                                    disabled: false,
+                                    disabled: exiting,
                                     loading: false,
                                     height: Some(CONFIRM_ACTION_HEIGHT),
                                     padding_y: None,
@@ -233,7 +245,12 @@ pub fn confirm_dialog_with_focus_motion(
                                     edge: SplitFooterButtonEdge::Right,
                                 },
                             )
-                            .on_mouse_down(MouseButton::Left, on_confirm),
+                            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                                if exiting {
+                                    return;
+                                }
+                                on_confirm(event, window, cx);
+                            }),
                         ),
                 ),
         );

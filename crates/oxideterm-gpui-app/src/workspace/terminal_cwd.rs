@@ -886,16 +886,6 @@ impl WorkspaceApp {
         cx.write_to_clipboard(ClipboardItem::new_string(path));
     }
 
-    pub(in crate::workspace) fn open_terminal_cwd_path_in_file_manager(
-        &mut self,
-        path: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_terminal_cwd_picker(cx);
-        self.open_file_manager_tab_at_path(path, window, cx);
-    }
-
     pub(in crate::workspace) fn open_terminal_cwd_path_in_sftp(
         &mut self,
         node_id: NodeId,
@@ -905,16 +895,6 @@ impl WorkspaceApp {
     ) {
         self.close_terminal_cwd_picker(cx);
         self.open_sftp_tab_at_remote_path(node_id, path, window, cx);
-    }
-
-    pub(in crate::workspace) fn open_terminal_cwd_path_in_ide(
-        &mut self,
-        node_id: NodeId,
-        path: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_terminal_cwd_picker(cx);
-        self.open_ide_folder_picker_tab_at_path(node_id, path, cx);
     }
 
     pub(in crate::workspace) fn select_terminal_cwd_path(

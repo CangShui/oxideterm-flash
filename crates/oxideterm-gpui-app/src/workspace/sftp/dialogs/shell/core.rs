@@ -12,17 +12,6 @@ impl WorkspaceApp {
         if let SftpDialog::EditorCloseConfirm { name } = dialog.clone() {
             return self.render_sftp_editor_close_confirm_dialog(name, cx);
         }
-        if let SftpDialog::ExternalEditUploadConfirm {
-            name,
-            remote_path,
-            temp_path,
-        } = dialog.clone()
-        {
-            return self.render_sftp_external_edit_confirm_dialog(
-                name, remote_path, temp_path, cx,
-            );
-        }
-
         let theme = self.tokens.ui;
         let (title, description, body, primary) = match dialog.clone() {
             SftpDialog::Drives => (
@@ -41,6 +30,12 @@ impl WorkspaceApp {
                 self.i18n.t("sftp.dialogs.new_folder"),
                 self.i18n.t("sftp.dialogs.new_folder_desc"),
                 self.render_sftp_dialog_input("sftp.dialogs.new_folder_placeholder", cx),
+                Some(self.i18n.t("sftp.dialogs.create")),
+            ),
+            SftpDialog::NewFile { .. } => (
+                self.i18n.t("sftp.dialogs.new_file"),
+                self.i18n.t("sftp.dialogs.new_file_desc"),
+                self.render_sftp_dialog_input("sftp.dialogs.new_file_placeholder", cx),
                 Some(self.i18n.t("sftp.dialogs.create")),
             ),
             SftpDialog::Delete { files, .. } => (
@@ -87,21 +82,19 @@ impl WorkspaceApp {
                 self.render_sftp_editor_body(has_background, cx),
                 None,
             ),
-            SftpDialog::EditorCloseConfirm { .. }
-            | SftpDialog::ExternalEditUploadConfirm { .. } => unreachable!(),
+            SftpDialog::EditorCloseConfirm { .. } => unreachable!(),
         };
         let width = match &dialog {
             SftpDialog::Drives => SFTP_DIALOG_WIDTH_XS,
             SftpDialog::Rename { .. }
             | SftpDialog::NewFolder { .. }
+            | SftpDialog::NewFile { .. }
             | SftpDialog::Delete { .. } => SFTP_DIALOG_WIDTH_SM,
             SftpDialog::Conflict => SFTP_DIALOG_WIDTH_LG,
             SftpDialog::Diff { .. } => SFTP_DIALOG_WIDTH_5XL,
             SftpDialog::Preview { .. } => SFTP_DIALOG_WIDTH_4XL,
             SftpDialog::Editor { .. } => SFTP_EDITOR_DIALOG_WIDTH_6XL,
-            SftpDialog::EditorCloseConfirm { .. } | SftpDialog::ExternalEditUploadConfirm { .. } => {
-                unreachable!()
-            }
+            SftpDialog::EditorCloseConfirm { .. } => unreachable!(),
         };
         let height_ratio = match &dialog {
             SftpDialog::Diff { .. } => Some(SFTP_DIFF_DIALOG_HEIGHT_RATIO),

@@ -10,7 +10,7 @@ use gpui::{
     AnyElement, Bounds, Corners, CursorStyle, DevicePixels, Div, ObjectFit, ParentElement, Pixels,
     RenderImage, Styled, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
-use oxideterm_gpui_ui::{empty_state, error_state};
+use oxideterm_gpui_ui::{empty_state, error_state, progress::progress};
 use oxideterm_remote_desktop::{
     RemoteDesktopCursorShape, RemoteDesktopFrameFormat, RemoteDesktopSessionStatus,
 };
@@ -24,6 +24,9 @@ use crate::{
 const VIEW_PADDING: f32 = 14.0;
 const FRAME_BORDER_ALPHA: u32 = 0x80;
 const FRAME_BG_ALPHA: u32 = 0x66;
+// Veil opacity over the stale framebuffer during a reconnect.
+const RECONNECT_VEIL_ALPHA: u32 = 0x99;
+const RECONNECT_INDICATOR_WIDTH: f32 = 160.0;
 const REMOTE_DESKTOP_DIAGNOSTICS_ENV: &str = "OXIDETERM_REMOTE_DESKTOP_DIAGNOSTICS";
 
 pub fn remote_desktop_surface(tokens: &ThemeTokens, state: &RemoteDesktopViewState) -> AnyElement {
@@ -45,10 +48,15 @@ pub fn remote_desktop_surface_with_geometry(
         .child(div().min_h(px(0.0)).flex_1().child(match snapshot.status {
             RemoteDesktopSessionStatus::Failed => error_body(tokens, snapshot.message),
             status if should_render_remote_frame(status, snapshot.has_frame) => {
-                // Keep the last framebuffer visible while an engine performs an
-                // internal resize reconnect. The footer already exposes the
-                // transient status without blanking the desktop surface.
-                frame_body(tokens, state, geometry)
+                if status == RemoteDesktopSessionStatus::Reconnecting {
+                    // Keep the last framebuffer visible while an engine
+                    // performs an internal resize reconnect, but veil it so
+                    // the pointer cannot act on stale pixels. The footer
+                    // already exposes the transient status text.
+                    reconnecting_frame_overlay(tokens, frame_body(tokens, state, geometry))
+                } else {
+                    frame_body(tokens, state, geometry)
+                }
             }
             RemoteDesktopSessionStatus::Idle
             | RemoteDesktopSessionStatus::Connecting
@@ -64,6 +72,33 @@ pub fn remote_desktop_surface_with_geometry(
 fn should_render_remote_frame(status: RemoteDesktopSessionStatus, has_frame: bool) -> bool {
     matches!(status, RemoteDesktopSessionStatus::Connected)
         || (status == RemoteDesktopSessionStatus::Reconnecting && has_frame)
+}
+
+/// Veils the stale framebuffer during a reconnect. The occluding layer also
+/// blocks pointer dispatch to the frame underneath, so users cannot click
+/// into a screen that no longer reflects the remote state.
+fn reconnecting_frame_overlay(tokens: &ThemeTokens, frame: AnyElement) -> AnyElement {
+    div()
+        .size_full()
+        .relative()
+        .child(frame)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(rgba((tokens.ui.bg << 8) | RECONNECT_VEIL_ALPHA))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(RECONNECT_INDICATOR_WIDTH))
+                        .child(progress(tokens, None, true)),
+                ),
+        )
+        .into_any_element()
 }
 
 fn frame_body(

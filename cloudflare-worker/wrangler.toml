@@ -1,0 +1,13 @@
+name = "ditto-cloud-sync"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# 这个 Worker 只做 WebRTC 信令转发，不写任何持久化存储。
+# 不需要 KV / R2 / D1。Durable Object 只保存在内存中的连接集合。
+
+[durable_objects]
+bindings = [{ name = "DITTO_SIGNALING", class_name = "DittoSignaling" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DittoSignaling"]

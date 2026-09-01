@@ -489,6 +489,10 @@ pub struct UiMotion {
     pub short_duration_ms: u64,
     pub normal_duration_ms: u64,
     pub long_duration_ms: u64,
+    /// Continuous rotation cadence for loading spinners. Kept independent of
+    /// the transition tiers so looping indicators stay calm regardless of how
+    /// snappy transitions are.
+    pub spinner_period_ms: u64,
 }
 
 impl UiMotion {
@@ -499,6 +503,7 @@ impl UiMotion {
             short_duration_ms: 120,
             normal_duration_ms: 200,
             long_duration_ms: 300,
+            spinner_period_ms: 900,
         }
     }
 
@@ -510,6 +515,7 @@ impl UiMotion {
                 short_duration_ms: 0,
                 normal_duration_ms: 0,
                 long_duration_ms: 0,
+                spinner_period_ms: 0,
             },
             UiMotionProfile::Reduced => Self {
                 enabled: true,
@@ -517,6 +523,7 @@ impl UiMotion {
                 short_duration_ms: 80,
                 normal_duration_ms: 120,
                 long_duration_ms: 150,
+                spinner_period_ms: 900,
             },
             UiMotionProfile::Normal => Self::normal(),
             UiMotionProfile::Fast => Self {
@@ -525,6 +532,7 @@ impl UiMotion {
                 short_duration_ms: 70,
                 normal_duration_ms: 110,
                 long_duration_ms: 160,
+                spinner_period_ms: 900,
             },
         }
     }
@@ -760,22 +768,29 @@ pub fn default_tokens() -> ThemeTokens {
 }
 
 pub fn derive_ui_colors_from_terminal(theme: TerminalTheme) -> AppUiColors {
+    // Surface offsets were tuned on dark canvases. On a light canvas the same
+    // positive offsets clamp every layered surface to pure white and erase the
+    // entire elevation hierarchy, so the ladder direction follows the canvas
+    // luminance instead.
+    let surface_step = if relative_luminance(theme.background) > 0.5 { -1 } else { 1 };
     AppUiColors {
         bg: theme.background,
-        bg_panel: shift(theme.background, 15),
-        bg_card: shift(theme.background, 20),
-        bg_hover: shift(theme.background, 30),
-        bg_active: shift(theme.background, 40),
-        bg_secondary: shift(theme.background, 10),
-        bg_elevated: shift(theme.background, 22),
+        bg_panel: shift(theme.background, 15 * surface_step),
+        bg_card: shift(theme.background, 20 * surface_step),
+        bg_hover: shift(theme.background, 30 * surface_step),
+        bg_active: shift(theme.background, 40 * surface_step),
+        bg_secondary: shift(theme.background, 10 * surface_step),
+        bg_elevated: shift(theme.background, 22 * surface_step),
+        // Sunken wells are darker than the canvas on both light and dark
+        // themes; only the elevation ladder inverts.
         bg_sunken: shift(theme.background, -10),
         text: theme.foreground,
         text_muted: theme.bright_black,
         text_secondary: mix(theme.foreground, theme.bright_black, 0.5),
-        text_heading: shift(theme.foreground, 8),
-        border: shift(theme.background, 30),
+        text_heading: shift(theme.foreground, 8 * surface_step),
+        border: shift(theme.background, 30 * surface_step),
         border_strong: mix(theme.cursor, theme.foreground, 0.6),
-        divider: shift(theme.background, 20),
+        divider: shift(theme.background, 20 * surface_step),
         accent: theme.cursor,
         accent_hover: shift(theme.cursor, -20),
         accent_text: mix(theme.cursor, theme.background, 0.7),
@@ -785,6 +800,22 @@ pub fn derive_ui_colors_from_terminal(theme: TerminalTheme) -> AppUiColors {
         error: theme.red,
         info: theme.blue,
     }
+}
+
+/// Relative luminance per WCAG 2.x, used to classify a canvas as light or dark.
+fn relative_luminance(hex: u32) -> f32 {
+    fn channel(value: u32) -> f32 {
+        let c = value as f32 / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    let r = channel((hex >> 16) & 0xff);
+    let g = channel((hex >> 8) & 0xff);
+    let b = channel(hex & 0xff);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
 fn shift(hex: u32, amount: i32) -> u32 {
@@ -871,6 +902,26 @@ include!("generated_ui.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_terminal_canvases_invert_the_surface_ladder() {
+        let theme = TerminalTheme {
+            background: 0xffffff,
+            foreground: 0x18181b,
+            cursor: 0x2563eb,
+            ..theme_by_id("default").terminal
+        };
+        let ui = derive_ui_colors_from_terminal(theme);
+
+        // Layered surfaces must move away from a light canvas instead of
+        // clamping onto it; sunken wells stay darker than the canvas.
+        assert!(ui.bg_panel < ui.bg);
+        assert!(ui.bg_card < ui.bg_panel);
+        assert!(ui.bg_hover < ui.bg_card);
+        assert!(ui.bg_active < ui.bg_hover);
+        assert!(ui.bg_sunken < ui.bg);
+        assert!(ui.border < ui.bg);
+    }
 
     #[test]
     fn derives_ui_colors_like_tauri() {
@@ -979,10 +1030,15 @@ mod tests {
         assert!(!tokens.motion.enabled);
         assert!(!tokens.motion.spatial_enabled);
         assert_eq!(tokens.motion.long_duration_ms, 0);
+        assert_eq!(tokens.motion.spinner_period_ms, 0);
         assert_eq!(tokens.motion.scaled_duration_ms(840), 0);
 
         tokens.apply_motion(UiMotionProfile::Fast);
         assert!(tokens.motion.spatial_enabled);
         assert!(tokens.motion.scaled_duration_ms(840) < 840);
+        // Spinner rotation must stay calmer than the transition tiers it used
+        // to share, and must not accelerate on the Fast profile.
+        assert_eq!(tokens.motion.spinner_period_ms, 900);
+        assert!(tokens.motion.spinner_period_ms > UiMotion::normal().long_duration_ms);
     }
 }

@@ -4,16 +4,9 @@ use oxideterm_atomic_file::durable_write_with_before_replace;
 pub(in crate::workspace) fn tab_background_key(kind: &TabKind) -> &'static str {
     match kind {
         TabKind::SshTerminal | TabKind::Telnet | TabKind::Serial => "terminal",
-        TabKind::FileManager => "file_manager",
         TabKind::Launcher => "launcher",
-        TabKind::Runtime => "runtime",
-        TabKind::ConnectionPool => "runtime",
-        TabKind::Topology => "topology",
-        TabKind::NotificationCenter => "notification_center",
         TabKind::Sftp => "sftp",
-        TabKind::Ide => "ide",
         TabKind::Forwards => "forwards",
-        TabKind::SessionManager => "session_manager",
         TabKind::RemoteDesktop => "remote_desktop",
         TabKind::Settings => "settings",
     }
@@ -58,7 +51,6 @@ pub(in crate::workspace) fn root_locale_from_settings(language: Language) -> Loc
     match language {
         Language::ZhCn => Locale::ZhCn,
         Language::En => Locale::En,
-        Language::ZhTw => Locale::ZhTw,
     }
 }
 
@@ -66,11 +58,13 @@ pub(in crate::workspace) fn settings_language_from_locale(locale: Locale) -> Lan
     match locale {
         Locale::ZhCn => Language::ZhCn,
         Locale::En => Language::En,
-        Locale::ZhTw => Language::ZhTw,
     }
 }
 
-pub(crate) fn tokens_from_settings(settings: &PersistedSettings) -> ThemeTokens {
+pub(crate) fn tokens_from_settings(
+    settings: &PersistedSettings,
+    render_policy: &EffectiveRenderPolicy,
+) -> ThemeTokens {
     let mut tokens = oxideterm_settings_model::custom_theme_tokens_from_settings(settings)
         .unwrap_or_else(|| ThemeTokens::from_builtin(theme_by_id(&settings.terminal.theme)));
     let radius = settings.appearance.border_radius as f32;
@@ -95,6 +89,13 @@ pub(crate) fn tokens_from_settings(settings: &PersistedSettings) -> ThemeTokens 
         oxideterm_settings::AnimationSpeed::Normal => UiMotionProfile::Normal,
         oxideterm_settings::AnimationSpeed::Fast => UiMotionProfile::Fast,
     });
+    // LowPower and Compatibility profiles forbid animation work at the render
+    // policy level, so they override the user's motion preference the same way
+    // the policy gates vibrancy: every motion duration resolves to zero and
+    // animated helpers fall back to their instant final state.
+    if !render_policy.allow_animations {
+        tokens.apply_motion(UiMotionProfile::Off);
+    }
     tokens
 }
 
@@ -206,7 +207,6 @@ pub(in crate::workspace) fn reconnect_phase_label(phase: &ReconnectPhase) -> &'s
         ReconnectPhase::AwaitTerminal => "await-terminal",
         ReconnectPhase::RestoreForwards => "restore-forwards",
         ReconnectPhase::ResumeTransfers => "resume-transfers",
-        ReconnectPhase::RestoreIde => "restore-ide",
         ReconnectPhase::Verify => "verify",
         ReconnectPhase::Done => "done",
         ReconnectPhase::Failed => "failed",
@@ -240,7 +240,7 @@ impl WorkspaceApp {
         let tooltip_workspace = workspace.clone();
         let clear_workspace = workspace;
 
-        // FileManager, SFTP, and launcher toolbar buttons all map to Tauri
+        // SFTP and launcher toolbar buttons all map to Tauri
         // icon buttons with hover tooltips. Keep tooltip ownership and the
         // disabled/loading click guard in one helper so feature surfaces only
         // supply button metrics and the action body.
@@ -373,7 +373,7 @@ impl WorkspaceApp {
     where
         T: std::marker::Copy + Eq,
     {
-        // DialogFooter buttons across settings, AI, FileManager, and import/export
+        // DialogFooter buttons across settings, AI, and import/export
         // use the same shadcn Button contract: disabled buttons are inert, and the
         // focus ring only follows explicit keyboard-owned footer focus.
         self.workspace_toolbar_action_button(
@@ -542,106 +542,6 @@ impl WorkspaceApp {
         )
     }
 
-    pub(in crate::workspace) fn push_event_log_entry(
-        &mut self,
-        severity: WorkspaceEventSeverity,
-        category: WorkspaceEventCategory,
-        node_id: Option<NodeId>,
-        connection_id: Option<String>,
-        title: impl Into<String>,
-        detail: Option<String>,
-        source: &'static str,
-    ) {
-        self.notification_center.event_log.push(
-            severity,
-            category,
-            node_id.map(|node_id| node_id.0),
-            connection_id,
-            title,
-            detail,
-            source,
-        );
-    }
-
-    pub(in crate::workspace) fn clear_event_log(&mut self) {
-        self.notification_center.event_log.clear();
-    }
-
-    pub(in crate::workspace) fn cycle_event_log_severity_filter(&mut self) {
-        self.notification_center.event_log.cycle_severity_filter();
-    }
-
-    pub(in crate::workspace) fn cycle_event_log_category_filter(&mut self) {
-        self.notification_center.event_log.cycle_category_filter();
-    }
-
-    pub(in crate::workspace) fn event_log_entry_matches_filter(
-        &self,
-        entry: &WorkspaceEventLogEntry,
-    ) -> bool {
-        self.notification_center.event_log.matches_filter(entry)
-    }
-
-    pub(in crate::workspace) fn push_notification_entry(
-        &mut self,
-        kind: WorkspaceNotificationKind,
-        severity: WorkspaceNotificationSeverity,
-        title: impl Into<String>,
-        body: Option<String>,
-        scope: WorkspaceNotificationScope,
-        dedupe_key: Option<String>,
-    ) {
-        self.notification_center
-            .notifications
-            .push(kind, severity, title, body, scope, dedupe_key);
-    }
-
-    pub(in crate::workspace) fn resolve_connection_notifications_for_node(
-        &mut self,
-        node_id: &NodeId,
-    ) {
-        self.notification_center
-            .notifications
-            .resolve_connection_for_node(&node_id.0);
-    }
-
-    pub(in crate::workspace) fn recount_notifications(&mut self) {
-        self.notification_center.notifications.recount();
-    }
-
-    pub(in crate::workspace) fn clear_notifications(&mut self) {
-        self.notification_center.notifications.clear();
-    }
-
-    pub(in crate::workspace) fn mark_all_notifications_read(&mut self) {
-        self.notification_center.notifications.mark_all_read();
-    }
-
-    pub(in crate::workspace) fn dismiss_notification(&mut self, id: u64) {
-        self.notification_center.notifications.remove(id);
-    }
-
-    pub(in crate::workspace) fn cycle_notification_status_filter(&mut self) {
-        self.notification_center.notifications.cycle_status_filter();
-    }
-
-    pub(in crate::workspace) fn cycle_notification_severity_filter(&mut self) {
-        self.notification_center
-            .notifications
-            .cycle_severity_filter();
-    }
-
-    pub(in crate::workspace) fn cycle_notification_kind_filter(&mut self) {
-        self.notification_center.notifications.cycle_kind_filter();
-    }
-
-    pub(in crate::workspace) fn notification_matches_filter(
-        &self,
-        entry: &WorkspaceNotificationEntry,
-    ) -> bool {
-        self.notification_center.notifications.matches_filter(entry)
-    }
-
     pub(in crate::workspace) fn push_reconnect_notice(
         &self,
         title: impl Into<String>,
@@ -794,48 +694,6 @@ impl WorkspaceApp {
         });
     }
 
-    pub(in crate::workspace) fn log_reconnect_phase(
-        &mut self,
-        node_id: &NodeId,
-        phase: ReconnectPhase,
-        _detail: Option<String>,
-    ) {
-        let severity = match phase {
-            ReconnectPhase::Failed => WorkspaceEventSeverity::Error,
-            ReconnectPhase::Cancelled => WorkspaceEventSeverity::Warn,
-            _ => WorkspaceEventSeverity::Info,
-        };
-        self.push_event_log_entry(
-            severity,
-            WorkspaceEventCategory::Reconnect,
-            Some(node_id.clone()),
-            self.node_router.connection_id_for_node(node_id),
-            "event_log.events.reconnect_phase",
-            Some(reconnect_phase_label(&phase).to_string()),
-            "reconnect_orchestrator",
-        );
-    }
-
-    pub(in crate::workspace) fn log_connection_event(
-        &mut self,
-        node_id: &NodeId,
-        connection_id: Option<String>,
-        title: impl Into<String>,
-        severity: WorkspaceEventSeverity,
-        detail: Option<String>,
-        source: &'static str,
-    ) {
-        self.push_event_log_entry(
-            severity,
-            WorkspaceEventCategory::Connection,
-            Some(node_id.clone()),
-            connection_id,
-            title,
-            detail,
-            source,
-        );
-    }
-
     pub(in crate::workspace) fn has_active_reconnect_job(
         &self,
         node_id: &NodeId,
@@ -866,15 +724,6 @@ impl WorkspaceApp {
             cancelled
         });
         if cancelled > 0 {
-            self.push_event_log_entry(
-                WorkspaceEventSeverity::Warn,
-                WorkspaceEventCategory::Reconnect,
-                Some(node_id.clone()),
-                self.node_router.connection_id_for_node(node_id),
-                "event_log.events.reconnect_phase",
-                Some(reconnect_phase_label(&ReconnectPhase::Cancelled).to_string()),
-                "reconnect_orchestrator",
-            );
             self.push_reconnect_notice(
                 self.i18n.t("connections.reconnect.cancelled"),
                 None,
@@ -924,16 +773,6 @@ impl WorkspaceApp {
         {
             changed = true;
         }
-        if self.session_manager.update(cx, |session_manager, cx| {
-            if !session_manager.show_batch_move {
-                return false;
-            }
-            session_manager.show_batch_move = false;
-            cx.notify();
-            true
-        }) {
-            changed = true;
-        }
         if self.dismiss_workspace_context_menus(cx) {
             changed = true;
         }
@@ -961,18 +800,6 @@ impl WorkspaceApp {
         // Keep all native context-menu owners here so feature handlers do not
         // each mutate their own menu state differently.
         if self
-            .host_tools
-            .update(cx, |host_tools, cx| host_tools.dismiss_topology_menu(cx))
-        {
-            changed = true;
-        }
-        if self.close_session_row_menus(cx) {
-            changed = true;
-        }
-        if self.dismiss_file_manager_context_menu(cx) {
-            changed = true;
-        }
-        if self
             .sftp_view
             .update(cx, |sftp, cx| sftp.dismiss_context_menu(cx))
         {
@@ -994,6 +821,12 @@ impl WorkspaceApp {
             changed = true;
         }
         if self.close_tab_context_menu() {
+            changed = true;
+        }
+        if self.active_session_context_menu.take().is_some() {
+            changed = true;
+        }
+        if self.active_session_folder_context_menu.take().is_some() {
             changed = true;
         }
 

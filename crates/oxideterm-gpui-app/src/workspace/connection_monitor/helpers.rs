@@ -143,23 +143,8 @@ pub(super) fn monitor_connection_selected_index(
         .unwrap_or(0)
 }
 
-pub(super) fn topology_transform_x(x: f32, transform: TopologyTransform) -> f32 {
-    transform.x + x * transform.k
-}
 
-pub(super) fn topology_transform_y(y: f32, transform: TopologyTransform) -> f32 {
-    transform.y + y * transform.k
-}
 
-pub(super) fn topology_view_status_color(status: TopologyViewStatus) -> u32 {
-    match status {
-        TopologyViewStatus::Connected => TOPOLOGY_CONNECTED,
-        TopologyViewStatus::Connecting => TOPOLOGY_CONNECTING,
-        TopologyViewStatus::Failed => TOPOLOGY_FAILED,
-        TopologyViewStatus::Disconnected => TOPOLOGY_DISCONNECTED,
-        TopologyViewStatus::Pending => TOPOLOGY_PENDING,
-    }
-}
 
 pub(super) fn threshold_color(value: Option<f64>) -> u32 {
     monitor_value_level_color(percent_level(value), 0x94a3b8)

@@ -45,7 +45,6 @@ use crate::{
         TerminalMagicKind, Utf8ResidualGuard,
     },
     graphics_cursor_from_term,
-    privilege_prompt::TerminalPrivilegePromptStream,
     shell_integration::TerminalShellIntegration,
 };
 #[cfg(windows)]
@@ -157,7 +156,6 @@ where
             let output_decoder = &mut state.output_decoder;
             let output_events_enabled = state.output_events_enabled;
             let trigger_stream = &mut state.trigger_stream;
-            let privilege_prompt = &mut state.privilege_prompt;
             let shell_integration = &mut state.shell_integration;
             let alt_screen_active = &mut state.alt_screen_active;
             graphics.advance_ordered(
@@ -173,9 +171,6 @@ where
                             stream.observe_bytes(decoded.as_ref(), |matched| {
                                 let _ = event_tx.send(TerminalEvent::TriggerMatched(matched));
                             });
-                        }
-                        for event in privilege_prompt.observe(decoded.as_ref()) {
-                            let _ = event_tx.send(TerminalEvent::PrivilegePrompt(event));
                         }
                         if output_events_enabled {
                             // Persist only bytes released by the shell-integration
@@ -354,7 +349,6 @@ where
                 LocalGraphicsMsg::SetOutputProcessor(processor) => {
                     state.output_processor = processor;
                     state.utf8_guard = Utf8ResidualGuard::default();
-                    state.privilege_prompt = TerminalPrivilegePromptStream::default();
                 }
                 LocalGraphicsMsg::SetOutputEventsEnabled(enabled) => {
                     state.output_events_enabled = enabled;
@@ -805,7 +799,6 @@ struct LocalGraphicsState {
     output_events_enabled: bool,
     trigger_stream: Option<oxideterm_terminal_triggers::TerminalTriggerStream>,
     output_decoder: TerminalOutputDecoder,
-    privilege_prompt: TerminalPrivilegePromptStream,
     encoding_detector: EncodingMismatchDetector,
     shell_integration: TerminalShellIntegration,
     modem_consumer: ModemConsumer,
@@ -829,7 +822,6 @@ impl LocalGraphicsState {
             output_events_enabled: false,
             trigger_stream: None,
             output_decoder: TerminalOutputDecoder::new(encoding),
-            privilege_prompt: TerminalPrivilegePromptStream::default(),
             encoding_detector: EncodingMismatchDetector::new(encoding),
             shell_integration: TerminalShellIntegration::default(),
             modem_consumer: ModemConsumer::with_wake(modem_wake),
@@ -840,7 +832,6 @@ impl LocalGraphicsState {
     fn set_encoding(&mut self, encoding: TerminalEncoding) {
         self.output_decoder.set_encoding(encoding);
         self.output_decoder.reset();
-        self.privilege_prompt = TerminalPrivilegePromptStream::default();
         self.encoding_detector.set_encoding(encoding);
     }
 

@@ -394,7 +394,7 @@ class MacosDmgDetachTests(unittest.TestCase):
 
 
 class ReleaseDocumentTests(unittest.TestCase):
-    def test_release_documents_include_native_and_agent_notices(self) -> None:
+    def test_release_documents_include_native_notices(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory)
             package_native.copy_release_documents(destination)
@@ -409,8 +409,7 @@ class ReleaseDocumentTests(unittest.TestCase):
                     "NOTICE",
                     "README.md",
                     "THIRD_PARTY_NOTICES.md",
-                    "AGENT_THIRD_PARTY_NOTICES.md",
-                },
+                    },
             )
             self.assertGreater((destination / "THIRD_PARTY_NOTICES.md").stat().st_size, 0)
             background_license = (
@@ -419,10 +418,6 @@ class ReleaseDocumentTests(unittest.TestCase):
             self.assertIn("oxide-nocturne-v1.webp", background_license)
             self.assertIn("CC-BY-4.0", background_license)
             self.assertIn("does not grant rights", background_license)
-            self.assertGreater(
-                (destination / "AGENT_THIRD_PARTY_NOTICES.md").stat().st_size,
-                0,
-            )
 
     def test_portable_update_manifest_owns_only_release_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -657,21 +652,6 @@ class LinuxPackagingTests(unittest.TestCase):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2("/bin/true", destination)
 
-            for agent_target in (
-                "x86_64-unknown-linux-musl",
-                "aarch64-unknown-linux-musl",
-            ):
-                # Follow the production resource contract so a directory rename
-                # cannot leave the RPM fixture silently testing a stale layout.
-                agent_path = (
-                    resource_dir
-                    / package_native.AGENT_RESOURCE_DIR
-                    / agent_target
-                    / "oxideterm-agent"
-                )
-                agent_path.parent.mkdir(parents=True, exist_ok=True)
-                agent_path.write_bytes(b"synthetic agent")
-
             release_documents = []
             for name in (
                 "GPUI-CE-LICENSE-APACHE",
@@ -680,7 +660,6 @@ class LinuxPackagingTests(unittest.TestCase):
                 "NOTICE",
                 "README.md",
                 "THIRD_PARTY_NOTICES.md",
-                "AGENT_THIRD_PARTY_NOTICES.md",
             ):
                 document = root / name
                 document.write_text(f"{name}\n", encoding="utf-8")
@@ -712,14 +691,6 @@ class LinuxPackagingTests(unittest.TestCase):
             )
             self.assertIn("/opt/oxideterm/PACKAGE_KIND", package_listing)
             self.assertIn("/opt/oxideterm/oxideterm-native", package_listing)
-            self.assertIn(
-                "/opt/oxideterm/resources/agents/x86_64-unknown-linux-musl/oxideterm-agent",
-                package_listing,
-            )
-            self.assertIn(
-                "/opt/oxideterm/resources/agents/aarch64-unknown-linux-musl/oxideterm-agent",
-                package_listing,
-            )
             recommendations = subprocess.check_output(
                 ["rpm", "-qp", "--recommends", str(artifact)],
                 text=True,

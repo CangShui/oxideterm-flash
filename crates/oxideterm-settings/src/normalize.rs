@@ -376,7 +376,7 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
     sanitize_enum(
         &mut settings,
         &["general", "language"],
-        &["zh-CN", "en", "zh-TW"],
+        &["zh-CN", "en"],
         "zh-CN",
         &mut validation_warnings,
     );

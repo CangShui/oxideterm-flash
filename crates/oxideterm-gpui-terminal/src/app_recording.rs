@@ -69,6 +69,7 @@ impl TerminalPane {
         self.snapshot = self.stamp_snapshot(snapshot);
         self.mark_terminal_content_changed(cx);
         self.selection = None;
+        self.selection_trace_id = None;
         self.search_query = None;
         self.search_cache = None;
         self.selected_search_match = None;

@@ -208,7 +208,6 @@ pub fn saved_connection_from_ssh_host(host: SshConfigHost) -> Result<SavedConnec
         icon: None,
         tags,
         post_connect_command: None,
-        privilege_credentials: Vec::new(),
     })
 }
 
@@ -368,10 +367,19 @@ fn saved_auth_from_draft_for_update(
         let kerberos_enabled = draft.gssapi_authentication;
         let kerberos_server_identity = (!draft.gssapi_server_identity.trim().is_empty())
             .then(|| draft.gssapi_server_identity.trim().to_string());
-        let fallback = if draft.password_loaded {
+        let fallback = if draft.password_loaded && !draft.password.expose_secret().is_empty() {
             SavedAuth::Password {
                 keychain_id: draft.password_keychain_id,
                 plaintext_password: Some(draft.password),
+            }
+        } else if draft.password_loaded && draft.password_keychain_id.is_some() {
+            // An empty replacement paired with a live keychain reference means
+            // the editor opened the locked secret and nothing was typed: keep
+            // the stored credential instead of overwriting it with an empty
+            // secret (which silently breaks the next password login).
+            SavedAuth::Password {
+                keychain_id: draft.password_keychain_id,
+                plaintext_password: None,
             }
         } else {
             existing_auth
@@ -501,7 +509,7 @@ mod tests {
     use rand10::{rand_core::UnwrapErr, rngs::SysRng};
     use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 
-    fn password_draft() -> ConnectionAuthDraft {
+    pub(super) fn password_draft() -> ConnectionAuthDraft {
         ConnectionAuthDraft {
             kind: ConnectionAuthDraftKind::Password,
             password: SecretString::from("secret"),
@@ -801,5 +809,142 @@ mod tests {
 
         assert_eq!(path, encrypted.to_string_lossy());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod edit_password_e2e_tests {
+    use super::*;
+    use super::tests::password_draft;
+
+    /// End-to-end: the exact form state the UI produces when a user edits a
+    /// saved password-auth connection and types a NEW password. The draft must
+    /// carry the new secret so materialize_auth writes it to the keychain.
+    #[test]
+    fn editing_password_with_loaded_draft_updates_the_keychain_value() {
+        // Step 1: the user saves a connection with password "old-pass".
+        let mut first_draft = password_draft();
+        first_draft.password = SecretString::from("old-pass");
+        first_draft.save_password = true;
+        let first_auth = saved_auth_from_draft_for_save(first_draft).unwrap();
+        assert!(matches!(
+            &first_auth,
+            SavedAuth::Password { plaintext_password: Some(p), .. } if p.expose_secret() == "old-pass"
+        ));
+
+        // Step 2: the store materializes that into a keychain-backed auth.
+        // (Simulated here; ConnectionStore tests cover the real keychain path.)
+        let existing = SavedAuth::Password {
+            keychain_id: Some("key-1".to_string()),
+            plaintext_password: None,
+        };
+
+        // Step 3: the user opens the editor and types "new-pass". The form
+        // sets password_loaded = true (typing marks the draft UI-owned) and
+        // carries the existing keychain id.
+        let mut edit_draft = password_draft();
+        edit_draft.password = SecretString::from("new-pass");
+        edit_draft.password_loaded = true;
+        edit_draft.password_keychain_id = Some("key-1".to_string());
+        edit_draft.save_password = true;
+
+        let updated = saved_auth_from_draft_for_update(edit_draft, Some(&existing)).unwrap();
+        assert!(
+            matches!(
+                &updated,
+                SavedAuth::Password {
+                    keychain_id: Some(id),
+                    plaintext_password: Some(p),
+                } if id == "key-1" && p.expose_secret() == "new-pass"
+            ),
+            "an edited password must reach the store as the new plaintext value"
+        );
+    }
+
+    /// End-to-end: user opens the editor but leaves the password untouched.
+    /// password_loaded stays false and the keychain reference must survive.
+    #[test]
+    fn editing_without_touching_password_preserves_the_keychain_reference() {
+        let existing = SavedAuth::Password {
+            keychain_id: Some("key-keep".to_string()),
+            plaintext_password: None,
+        };
+        let mut draft = password_draft();
+        draft.password = SecretString::default();
+        draft.password_loaded = false;
+        draft.save_password = true;
+
+        let updated = saved_auth_from_draft_for_update(draft, Some(&existing)).unwrap();
+        assert!(matches!(
+            &updated,
+            SavedAuth::Password {
+                keychain_id: Some(id),
+                plaintext_password: None,
+            } if id == "key-keep"
+        ));
+    }
+
+    /// The failure mode the user reported: form carries password_loaded = true
+    /// but save_password = false (checkbox semantics disagreeing with SSH's
+    /// always-save-on-edit contract). The edit must still persist the secret,
+    /// because password_loaded marks an explicit user-entered replacement.
+    #[test]
+    fn edited_password_persists_even_when_save_password_flag_is_false() {
+        let existing = SavedAuth::Password {
+            keychain_id: Some("key-2".to_string()),
+            plaintext_password: None,
+        };
+        let mut draft = password_draft();
+        draft.password = SecretString::from("replaced");
+        draft.password_loaded = true;
+        draft.password_keychain_id = Some("key-2".to_string());
+        draft.save_password = false;
+
+        let updated = saved_auth_from_draft_for_update(draft, Some(&existing)).unwrap();
+        assert!(
+            matches!(
+                &updated,
+                SavedAuth::Password { plaintext_password: Some(p), .. } if p.expose_secret() == "replaced"
+            ),
+            "an explicitly typed replacement password must not be dropped by the save flag"
+        );
+    }
+}
+
+#[cfg(test)]
+mod edit_password_regression_tests {
+    use super::*;
+    use super::tests::password_draft;
+
+    /// The regression the user hit: opening the SSH editor of a keychain-backed
+    /// password connection starts with password_loaded = true and an EMPTY
+    /// password draft (the secret is never loaded into the UI). Saving without
+    /// typing anything must NOT overwrite the keychain value with an empty
+    /// secret. The UI layer resets password_loaded when the field stays empty,
+    /// but the store contract itself must be defensive: an empty replacement
+    /// is a no-op, not a credential wipe.
+    #[test]
+    fn empty_loaded_password_draft_does_not_wipe_the_stored_credential() {
+        let existing = SavedAuth::Password {
+            keychain_id: Some("key-live".to_string()),
+            plaintext_password: None,
+        };
+        let mut draft = password_draft();
+        draft.password = SecretString::default();
+        draft.password_loaded = true;
+        draft.password_keychain_id = Some("key-live".to_string());
+        draft.save_password = true;
+
+        let updated = saved_auth_from_draft_for_update(draft, Some(&existing)).unwrap();
+        assert!(
+            matches!(
+                &updated,
+                SavedAuth::Password {
+                    keychain_id: Some(id),
+                    plaintext_password: None,
+                } if id == "key-live"
+            ),
+            "an empty draft with a live keychain reference must preserve the stored secret"
+        );
     }
 }

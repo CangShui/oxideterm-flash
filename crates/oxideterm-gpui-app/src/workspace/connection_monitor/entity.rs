@@ -3,7 +3,6 @@ use super::*;
 use gpui::Task;
 use oxideterm_connection_monitor::ResourceSampler;
 use oxideterm_editor_core::utf16::replace_utf16;
-use oxideterm_topology::ConnectionTopologySnapshot;
 
 /// Owns Host Tools sampling state independently from WorkspaceApp and SSH nodes.
 pub(in crate::workspace) struct HostToolsEntity {
@@ -36,8 +35,6 @@ pub(in crate::workspace) struct HostToolsEntity {
     pub(super) host_filesystems: HostFilesystemsState,
     pub(super) host_packages: HostPackagesState,
     pub(super) host_schedules: HostSchedulesState,
-    pub(in crate::workspace) active_runtime_section: ConnectionRuntimeSection,
-    pub(in crate::workspace) previous_runtime_section: ConnectionRuntimeSection,
     selected_connection_id: Option<String>,
     selector_open: bool,
     selector_highlighted_index: Option<usize>,
@@ -64,15 +61,8 @@ pub(in crate::workspace) struct HostToolsEntity {
     test_resource_sampler: Option<Arc<dyn ResourceSampler>>,
     #[cfg(test)]
     test_snapshot_dispatches: Option<Vec<ContextSidebarTool>>,
-    pool_stats: Option<ConnectionPoolMonitorStats>,
-    pool_summaries: Vec<ConnectionPoolEntrySummary>,
-    topology_snapshot: Option<ConnectionTopologySnapshot>,
-    last_pool_refresh: Option<Instant>,
     // Topology interactions belong to the shared Host Tools surface, not to
     // the workspace window that happens to render the graph.
-    pub(super) topology_transform: TopologyTransform,
-    pub(super) topology_drag: Option<TopologyDragState>,
-    pub(super) topology_menu: Option<TopologyNodeMenuState>,
     compact_monitor_list_state: ListState,
     compact_monitor_list_cache: RefCell<VirtualListSignatureCache>,
 }
@@ -333,15 +323,13 @@ impl HostToolsEntity {
             host_filesystems: HostFilesystemsState::new(),
             host_packages: HostPackagesState::new(),
             host_schedules: HostSchedulesState::new(),
-            active_runtime_section: ConnectionRuntimeSection::Overview,
-            previous_runtime_section: ConnectionRuntimeSection::Overview,
             selected_connection_id: None,
             selector_open: false,
             selector_highlighted_index: None,
             selector_focus_origin: None,
             tab_scroll_handle: ScrollHandle::new(),
-            active_tool: ContextSidebarTool::Monitor,
-            previous_tool: ContextSidebarTool::Monitor,
+            active_tool: ContextSidebarTool::Files,
+            previous_tool: ContextSidebarTool::Files,
             tab_scrollbar_drag: None,
             visibility: HostToolsVisibility::Hidden,
             lifecycle_runtime: None,
@@ -353,13 +341,6 @@ impl HostToolsEntity {
             test_resource_sampler: None,
             #[cfg(test)]
             test_snapshot_dispatches: None,
-            pool_stats: None,
-            pool_summaries: Vec::new(),
-            topology_snapshot: None,
-            last_pool_refresh: None,
-            topology_transform: TopologyTransform::default(),
-            topology_drag: None,
-            topology_menu: None,
             compact_monitor_list_state: tauri_virtual_list_state(
                 0,
                 ListAlignment::Top,
@@ -417,43 +398,7 @@ impl HostToolsEntity {
         &self.profiler_registry
     }
 
-    pub(in crate::workspace) fn refresh_pool_snapshot(&mut self, cx: &mut Context<Self>) {
-        self.pool_stats = Some(self.ssh_registry.monitor_stats());
-        self.pool_summaries = self.ssh_registry.list_connection_summaries();
-        self.topology_snapshot = Some(self.ssh_registry.connection_topology_snapshot());
-        self.last_pool_refresh = Some(Instant::now());
-        cx.notify();
-    }
-
-    pub(super) fn pool_refresh_is_stale(&self, interval: Duration) -> bool {
-        self.last_pool_refresh
-            .is_none_or(|last_refresh| last_refresh.elapsed() >= interval)
-    }
-
-    pub(super) fn pool_stats_snapshot(&self) -> Option<ConnectionPoolMonitorStats> {
-        self.pool_stats.clone()
-    }
-
-    pub(super) fn pool_summaries_snapshot(&self) -> Vec<ConnectionPoolEntrySummary> {
-        // Runtime views receive an immutable projection instead of borrowing
-        // the registry-owned cache across GPUI rendering callbacks.
-        self.pool_summaries.clone()
-    }
-
-    pub(super) fn topology_snapshot(&self) -> Option<ConnectionTopologySnapshot> {
-        self.topology_snapshot.clone()
-    }
-
     pub(super) fn monitor_connections(&self) -> Vec<MonitorConnectionOption> {
-        if !self.pool_summaries.is_empty() {
-            return self
-                .pool_summaries
-                .iter()
-                .filter(|summary| summary.is_displayed_in_pool())
-                .map(MonitorConnectionOption::from_pool_summary)
-                .collect();
-        }
-
         let mut connections = self
             .ssh_registry
             .list()
@@ -493,7 +438,12 @@ impl HostToolsEntity {
             let result = handle
                 .run_command_capture(&command, timeout, max_output_size)
                 .await
-                .map_err(|_| ());
+                .map_err(|error| match error {
+                    // Only the failure class crosses the boundary; transport
+                    // error text can embed connection details.
+                    SshTransportError::Timeout => HostCaptureFailure::Timeout,
+                    _ => HostCaptureFailure::Connection,
+                });
             let _ = delivery_tx.send(super::delivery::HostToolsReliableDelivery::LogSnapshot(
                 HostLogSnapshotDelivery { request, result },
             ));
@@ -923,20 +873,6 @@ impl HostToolsEntity {
         self.start_profiler(connection_id, self.sampling_config, runtime, cx);
     }
 
-    pub(super) fn set_runtime_section(&mut self, section: ConnectionRuntimeSection) -> bool {
-        if self.active_runtime_section == section {
-            return false;
-        }
-        self.previous_runtime_section = self.active_runtime_section;
-        self.active_runtime_section = section;
-        true
-    }
-
-    pub(in crate::workspace) fn reset_runtime_section(&mut self) {
-        self.active_runtime_section = ConnectionRuntimeSection::Overview;
-        self.previous_runtime_section = ConnectionRuntimeSection::Overview;
-    }
-
     pub(in crate::workspace) fn selected_connection_id(&self) -> Option<&str> {
         self.selected_connection_id.as_deref()
     }
@@ -1002,7 +938,6 @@ impl HostToolsEntity {
                 self.monitoring.clone(),
                 self.sampling_config,
                 runtime,
-                true,
                 cx,
             );
             self.request_active_tool_snapshot(HostSnapshotFeedback::Silent, cx);
@@ -1012,7 +947,9 @@ impl HostToolsEntity {
     }
 
     pub(in crate::workspace) fn reset_active_tool(&mut self, cx: &mut Context<Self>) -> bool {
-        self.select_tool(ContextSidebarTool::Monitor, cx)
+        // Opening Host Tools lands on the remote file browser by default so
+        // operators see the connected host's files instead of monitoring.
+        self.select_tool(ContextSidebarTool::Files, cx)
     }
 
     pub(super) fn tab_scrollbar_drag_active(&self) -> bool {
@@ -1043,7 +980,7 @@ impl HostToolsEntity {
         self.selected_connection_id.clone()
     }
 
-    pub(super) fn selector_open(&self) -> bool {
+    pub(in crate::workspace) fn selector_open(&self) -> bool {
         self.selector_open
     }
 
@@ -1051,7 +988,7 @@ impl HostToolsEntity {
         self.selector_highlighted_index
     }
 
-    pub(super) fn selector_focus_origin(&self) -> Option<browser_behavior::BrowserFocusOrigin> {
+    pub(in crate::workspace) fn selector_focus_origin(&self) -> Option<browser_behavior::BrowserFocusOrigin> {
         self.selector_focus_origin
     }
 
@@ -1130,20 +1067,27 @@ impl HostToolsEntity {
         cx.notify();
     }
 
-    pub(super) fn select_connection(
+    pub(in crate::workspace) fn select_connection(
         &mut self,
         connection_id: String,
         focus_origin: Option<browser_behavior::BrowserFocusOrigin>,
         cx: &mut Context<Self>,
     ) {
+        let changed = self.selected_connection_id.as_deref() != Some(connection_id.as_str());
         self.selected_connection_id = Some(connection_id);
         self.selector_open = false;
         self.selector_highlighted_index = None;
         self.selector_focus_origin = focus_origin;
+        if changed && self.visibility.sidebar_is_visible() {
+            // Tab switches retarget Host Tools through this path only; the
+            // displayed one-shot tool must resume fetching for the new host
+            // instead of waiting for a manual refresh.
+            self.request_active_tool_snapshot(HostSnapshotFeedback::Silent, cx);
+        }
         cx.notify();
     }
 
-    pub(super) fn select_connection_for_active_tool(
+    pub(in crate::workspace) fn select_connection_for_active_tool(
         &mut self,
         connection_id: String,
         focus_origin: Option<browser_behavior::BrowserFocusOrigin>,
@@ -1167,7 +1111,6 @@ impl HostToolsEntity {
             self.monitoring.clone(),
             self.sampling_config,
             runtime,
-            true,
             cx,
         );
         self.request_active_tool_snapshot(HostSnapshotFeedback::Silent, cx);
@@ -1181,6 +1124,11 @@ impl HostToolsEntity {
         if !self.visibility.sidebar_is_visible()
             || !self.active_tool.monitoring_enabled(&self.monitoring)
         {
+            return;
+        }
+        // The remote file browser is driven by SFTP state, not by host-tool
+        // sampling; selecting it must not launch a monitor command channel.
+        if self.active_tool == ContextSidebarTool::Files {
             return;
         }
         let Some(connection_id) = self.selected_connection_id_owned() else {
@@ -1217,14 +1165,17 @@ impl HostToolsEntity {
                 );
                 Vec::new()
             }
-            ContextSidebarTool::Logs => self.request_log_snapshot(
-                connection_id,
-                feedback,
-                self.monitoring.logs_enabled,
-                runtime,
-                messages.log_unknown_error,
-                cx,
-            ),
+            ContextSidebarTool::Logs => {
+                // Localized failure details live on the entity messages; the
+                // request no longer carries a single opaque fallback.
+                self.request_log_snapshot(
+                    connection_id,
+                    feedback,
+                    self.monitoring.logs_enabled,
+                    runtime,
+                    cx,
+                )
+            }
             ContextSidebarTool::Tmux => self.request_tmux_snapshot(
                 connection_id,
                 feedback,
@@ -1266,7 +1217,8 @@ impl HostToolsEntity {
                 messages.package_unknown_error,
                 cx,
             ),
-            ContextSidebarTool::Monitor
+            ContextSidebarTool::Files
+            | ContextSidebarTool::Monitor
             | ContextSidebarTool::Gpu
             | ContextSidebarTool::Processes
             | ContextSidebarTool::Docker => Vec::new(),
@@ -1310,6 +1262,8 @@ impl HostToolsEntity {
     }
 
     pub(super) fn stop_profiler_sampling(&self) {
+        // Freezes every entry (Stops it) instead of dropping it: hidden pages
+        // keep their last snapshot so reopening restores content instantly.
         self.profiler_registry.stop_all();
     }
 
@@ -1322,7 +1276,15 @@ impl HostToolsEntity {
     }
 
     pub(super) fn profiler_connection_missing(&self, connection_id: &str) -> bool {
-        self.profiler_registry.state(connection_id).is_none()
+        // Frozen entries count as missing so their tool reactivates sampling;
+        // degraded entries keep their existing no-auto-restart behavior.
+        !matches!(
+            self.profiler_registry.state(connection_id),
+            Some(
+                oxideterm_connection_monitor::ProfilerState::Running
+                    | oxideterm_connection_monitor::ProfilerState::Degraded
+            )
+        )
     }
 
     pub(super) fn start_profiler(
@@ -1386,9 +1348,8 @@ impl HostToolsEntity {
             return;
         };
         let sampler = self.resource_sampler(handle);
-        self.host_gpu.snapshot_connection_id = Some(connection_id.clone());
-        self.host_gpu.snapshot = None;
-        self.host_gpu.expanded_uuid = None;
+        // The frozen snapshot for this host stays visible until the next sample
+        // replaces it; starting sampling must not blank the page.
         // The Entity owns only the page sampler shell; the registry retains the shared node.
         self.host_gpu.sampling_task = Some(start_gpu_sampling_on(
             connection_id,
@@ -1413,11 +1374,7 @@ impl HostToolsEntity {
     }
 
     pub(super) fn gpu_snapshot_for(&self, connection_id: &str) -> Option<GpuSnapshot> {
-        self.host_gpu
-            .snapshot
-            .as_ref()
-            .filter(|_| self.host_gpu.snapshot_connection_id.as_deref() == Some(connection_id))
-            .cloned()
+        self.host_gpu.snapshots.get(connection_id).cloned()
     }
 
     pub(super) fn gpu_sampling_is_running(&self, connection_id: &str) -> bool {
@@ -1506,7 +1463,8 @@ impl HostToolsEntity {
         {
             task.stop();
         }
-        self.host_gpu.snapshot = None;
+        // Keep the frozen snapshot visible until the restarted sampler delivers
+        // a fresh one; a manual refresh must not blank the current page.
         self.sync_gpu_sampling(enabled_and_visible, selected_connection_id, runtime, cx);
     }
 }
@@ -1580,6 +1538,7 @@ mod tests {
     use gpui::TestAppContext;
     use oxideterm_connection_monitor::{
         GPU_END_MARKER, ProfilerState, ResourceSampleShell, ResourceSamplerFuture,
+        ResourceTmuxStatus,
     };
     use oxideterm_ssh::{RemoteEnvInfo, SshCommandOutput};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1653,7 +1612,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn lifecycle_tick_samples_only_visible_host_tools(cx: &mut TestAppContext) {
+    fn lifecycle_tick_does_not_sample_when_hidden(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().expect("create test runtime");
         let registry = SshConnectionRegistry::default();
         let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1663,14 +1622,115 @@ mod tests {
         entity.update(cx, |entity, cx| {
             assert!(entity.lifecycle_refresh_task.is_some());
             entity.lifecycle_runtime = Some(runtime.handle().clone());
-            entity.last_pool_refresh = None;
+            entity.sampling_config = oxideterm_connection_monitor::ResourceSamplingConfig {
+                system: true,
+                gpu: true,
+                processes: true,
+                docker: true,
+            };
             entity.visibility = HostToolsVisibility::Hidden;
             entity.refresh_lifecycle_tick(cx);
-            assert!(entity.last_pool_refresh.is_none());
+            assert!(entity.profiler_connection_ids().is_empty());
+        });
+    }
 
-            entity.visibility = HostToolsVisibility::VisibleMainTab;
-            entity.refresh_lifecycle_tick(cx);
-            assert!(entity.last_pool_refresh.is_some());
+    #[gpui::test]
+    fn profiler_freezes_for_inactive_tools_and_keeps_history(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().expect("create test runtime");
+        let registry = SshConnectionRegistry::default();
+        let handle = registry.acquire(
+            SshConfig {
+                host: "host.example".to_string(),
+                username: "alice".to_string(),
+                auth: AuthMethod::Agent,
+                ..SshConfig::default()
+            },
+            ConnectionConsumer::NodeRouter("node-freeze".to_string()),
+        );
+        assert!(handle.set_remote_env(RemoteEnvInfo {
+            os_type: "Linux".to_string(),
+            os_version: None,
+            kernel: None,
+            arch: None,
+            shell: Some("/bin/sh".to_string()),
+            home: None,
+            zdotdir: None,
+            xdg_config_home: None,
+            detected_at: 1,
+        }));
+        let connection_id = handle.connection_id().to_string();
+        let shell_open_count = Arc::new(AtomicUsize::new(0));
+        let shell_close_count = Arc::new(AtomicUsize::new(0));
+        let test_sampler: Arc<dyn ResourceSampler> = Arc::new(VisibilityCountingSampler {
+            shell_open_count: shell_open_count.clone(),
+            shell_close_count: shell_close_count.clone(),
+        });
+        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::unbounded_channel();
+        let entity =
+            cx.new(|cx| HostToolsEntity::new(profiler_update_tx, profiler_update_rx, registry, cx));
+        let monitoring = oxideterm_settings::HostToolsSettings::default();
+        let sampling_config = oxideterm_connection_monitor::ResourceSamplingConfig::default();
+        let runtime_handle = runtime.handle().clone();
+
+        entity.update(cx, |entity, cx| {
+            entity.test_resource_sampler = Some(test_sampler);
+            entity.select_connection(connection_id.clone(), None, cx);
+            entity.active_tool = ContextSidebarTool::Processes;
+            entity.update_lifecycle(
+                HostToolsVisibility::VisibleSidebar,
+                monitoring.clone(),
+                sampling_config,
+                runtime_handle.clone(),
+                cx,
+            );
+        });
+
+        // The Processes page owns the shared profiler shell.
+        wait_for_counter(&shell_open_count, 1);
+        entity.update(cx, |entity, cx| {
+            entity.profiler_registry.record_metrics(ProfilerUpdate {
+                connection_id: connection_id.clone(),
+                metrics: ResourceMetrics::empty(1, MetricsSource::Full),
+            });
+            // Switching to a non-profiler tool must freeze the sampler instead
+            // of letting it keep polling the host in the background.
+            entity.active_tool = ContextSidebarTool::Logs;
+            entity.update_lifecycle(
+                HostToolsVisibility::VisibleSidebar,
+                monitoring.clone(),
+                sampling_config,
+                runtime_handle.clone(),
+                cx,
+            );
+        });
+        wait_for_counter(&shell_close_count, 1);
+        entity.read_with(cx, |entity, _cx| {
+            assert_eq!(
+                entity.profiler_registry.state(&connection_id),
+                Some(ProfilerState::Stopped)
+            );
+            assert_eq!(entity.profiler_registry.history(&connection_id).len(), 1);
+        });
+
+        // Returning to a profiler tool resumes sampling with the frozen
+        // history intact instead of flashing an empty page.
+        entity.update(cx, |entity, cx| {
+            entity.active_tool = ContextSidebarTool::Processes;
+            entity.update_lifecycle(
+                HostToolsVisibility::VisibleSidebar,
+                monitoring,
+                sampling_config,
+                runtime_handle,
+                cx,
+            );
+        });
+        wait_for_counter(&shell_open_count, 2);
+        entity.read_with(cx, |entity, _cx| {
+            assert_eq!(
+                entity.profiler_registry.state(&connection_id),
+                Some(ProfilerState::Running)
+            );
+            assert_eq!(entity.profiler_registry.history(&connection_id).len(), 1);
         });
     }
 
@@ -1721,7 +1781,13 @@ mod tests {
             entity.messages = Some(HostToolsMessages {
                 service_connection_missing: "Service connection missing".to_string(),
                 service_action_failed: "Service action failed".to_string(),
-                log_unknown_error: "Log capture failed".to_string(),
+                log_failure_permission_denied: "Permission denied".to_string(),
+                log_failure_journal_unavailable: "No journal files".to_string(),
+                log_failure_tool_missing: "Log tool missing".to_string(),
+                log_failure_tool_error: "Log tool failed".to_string(),
+                log_failure_exit_code: "exit {{code}}".to_string(),
+                log_failure_timeout: "Log timeout".to_string(),
+                log_failure_connection: "Log connection lost".to_string(),
                 port_unknown_error: "Port capture failed".to_string(),
                 filesystem_unknown_error: "Filesystem capture failed".to_string(),
                 package_unknown_error: "Package capture failed".to_string(),
@@ -1736,18 +1802,15 @@ mod tests {
                 monitoring.clone(),
                 sampling_config,
                 runtime.handle().clone(),
-                true,
                 cx,
             );
         });
 
-        // Visible GPU owns one profiler shell and one page-scoped GPU shell.
-        wait_for_counter(&shell_open_count, 2);
+        // The GPU page owns only its page-scoped GPU shell; the shared
+        // profiler stays frozen because GPU is not a profiler tool.
+        wait_for_counter(&shell_open_count, 1);
         entity.read_with(cx, |entity, _cx| {
-            assert_eq!(
-                entity.profiler_registry.state(&connection_id),
-                Some(ProfilerState::Running)
-            );
+            assert_eq!(entity.profiler_registry.state(&connection_id), None);
             assert!(entity.gpu_sampling_is_running(&connection_id));
         });
 
@@ -1764,7 +1827,6 @@ mod tests {
                 monitoring.clone(),
                 sampling_config,
                 runtime.handle().clone(),
-                false,
                 cx,
             );
             entity.active_tool = ContextSidebarTool::Services;
@@ -1772,7 +1834,7 @@ mod tests {
             entity.reliable_delivery_tx.clone()
         });
 
-        wait_for_counter(&shell_close_count, 2);
+        wait_for_counter(&shell_close_count, 1);
         let hidden_shell_open_count = shell_open_count.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(25));
         assert_eq!(
@@ -1821,24 +1883,20 @@ mod tests {
                 monitoring,
                 sampling_config,
                 runtime.handle().clone(),
-                false,
                 cx,
             );
             entity.request_active_tool_snapshot(HostSnapshotFeedback::Silent, cx);
         });
 
-        // Re-showing Services restarts only the shared profiler plus Services.
-        wait_for_counter(&shell_open_count, hidden_shell_open_count + 1);
+        // Re-showing Services dispatches only its one-shot snapshot; the
+        // profiler stays frozen because Services is not a profiler tool.
         std::thread::sleep(Duration::from_millis(25));
         assert_eq!(
             shell_open_count.load(Ordering::SeqCst),
-            hidden_shell_open_count + 1
+            hidden_shell_open_count
         );
         entity.read_with(cx, |entity, _cx| {
-            assert_eq!(
-                entity.profiler_registry.state(&connection_id),
-                Some(ProfilerState::Running)
-            );
+            assert_eq!(entity.profiler_registry.state(&connection_id), None);
             assert!(!entity.gpu_sampling_is_running(&connection_id));
             assert_eq!(
                 entity
@@ -2132,7 +2190,13 @@ mod tests {
             entity.messages = Some(HostToolsMessages {
                 service_connection_missing: "Service connection missing".to_string(),
                 service_action_failed: "Service capture failed".to_string(),
-                log_unknown_error: "Log capture failed".to_string(),
+                log_failure_permission_denied: "Permission denied".to_string(),
+                log_failure_journal_unavailable: "No journal files".to_string(),
+                log_failure_tool_missing: "Log tool missing".to_string(),
+                log_failure_tool_error: "Log tool failed".to_string(),
+                log_failure_exit_code: "exit {{code}}".to_string(),
+                log_failure_timeout: "Log timeout".to_string(),
+                log_failure_connection: "Log connection lost".to_string(),
                 port_unknown_error: "Port capture failed".to_string(),
                 filesystem_unknown_error: "Filesystem capture failed".to_string(),
                 package_unknown_error: "Package capture failed".to_string(),
@@ -2228,16 +2292,18 @@ mod tests {
 
         entity.read_with(cx, |entity, _cx| {
             assert!(!entity.host_tmux.snapshot_in_flight);
+            let snapshot = entity
+                .host_tmux
+                .snapshots
+                .get("connection-1")
+                .expect("frozen tmux snapshot is retained per host");
             assert_eq!(
-                entity.host_tmux.snapshot.as_ref().unwrap().status,
+                snapshot.status,
                 ResourceTmuxStatus::Error {
                     message: "tmux capture failed".to_string(),
                 }
             );
-            assert!(
-                !format!("{:?}", entity.host_tmux.snapshot.as_ref().unwrap().status)
-                    .contains(secret_marker)
-            );
+            assert!(!format!("{:?}", snapshot.status).contains(secret_marker));
         });
         assert!(events.try_recv().is_err());
 
@@ -2325,11 +2391,31 @@ mod tests {
             preset: LogPreset::All,
             limit: HOST_LOG_SNAPSHOT_LIMIT,
             feedback: HostSnapshotFeedback::Toast,
-            failure_fallback: "Log capture failed".to_string(),
         };
         let sender = entity.update(cx, |entity, _cx| {
-            entity.host_logs.running = Some(request.clone());
-            entity.host_logs.snapshot_in_flight = true;
+            // Localized failure categories must be installed for the delivery
+            // to be processed, exactly like the running workspace does.
+            entity.messages = Some(HostToolsMessages {
+                service_connection_missing: "Service connection missing".to_string(),
+                service_action_failed: "Service action failed".to_string(),
+                log_failure_permission_denied: "Permission denied".to_string(),
+                log_failure_journal_unavailable: "No journal files".to_string(),
+                log_failure_tool_missing: "Log tool missing".to_string(),
+                log_failure_tool_error: "Log tool failed".to_string(),
+                log_failure_exit_code: "exit {{code}}".to_string(),
+                log_failure_timeout: "Log timeout".to_string(),
+                log_failure_connection: "Log connection lost".to_string(),
+                port_unknown_error: "Port capture failed".to_string(),
+                filesystem_unknown_error: "Filesystem capture failed".to_string(),
+                package_unknown_error: "Package capture failed".to_string(),
+                schedule_unknown_error: "Schedule capture failed".to_string(),
+                tmux_unknown_error: "tmux capture failed".to_string(),
+                tmux_unavailable: "tmux unavailable".to_string(),
+            });
+            entity
+                .host_logs
+                .running
+                .insert("connection-1".to_string(), request.clone());
             entity.reliable_delivery_tx.clone()
         });
         let secret_marker = "Bearer should-not-reach-ui";
@@ -2352,12 +2438,17 @@ mod tests {
         cx.run_until_parked();
 
         entity.read_with(cx, |entity, _cx| {
-            assert!(!entity.host_logs.snapshot_in_flight);
-            let snapshot = entity.host_logs.snapshot.as_ref().unwrap();
+            assert!(entity.host_logs.running.is_empty());
+            let snapshot = entity
+                .host_logs
+                .snapshots
+                .get("connection-1")
+                .expect("frozen log snapshot is retained per host");
+            // The remote marker text is classified, never surfaced raw.
             assert_eq!(
                 snapshot.status,
                 ResourceLogStatus::Error {
-                    message: "Log capture failed".to_string(),
+                    message: "Log tool failed".to_string(),
                 }
             );
             assert!(!format!("{:?}", snapshot.status).contains(secret_marker));
@@ -2365,7 +2456,9 @@ mod tests {
         let notice = events.try_recv().unwrap();
         assert_eq!(
             notice,
-            HostToolsEvent::ShowNotice(HostToolsNotice::LogSnapshotFailed)
+            HostToolsEvent::ShowNotice(HostToolsNotice::LogSnapshotFailed {
+                reason: "Log tool failed".to_string(),
+            })
         );
         assert!(!format!("{notice:?}").contains(secret_marker));
     }

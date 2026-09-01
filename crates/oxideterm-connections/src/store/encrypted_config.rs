@@ -388,8 +388,6 @@ fn load_config_encryption_key() -> Result<Option<ConfigEncryptionKey>> {
     };
     let key = decode_config_encryption_key(secret.as_str())?;
     #[cfg(target_os = "macos")]
-    if !oxideterm_portable_runtime::is_portable_mode()
-        .context("failed to determine portable mode")?
     {
         // Validate the key shape before replacing Preview 16 ACLs. This keeps a
         // malformed keychain value from becoming the durable migrated value.
@@ -464,38 +462,10 @@ fn encode_config_encryption_key(
 }
 
 fn load_config_key_secret() -> Result<Option<zeroize::Zeroizing<String>>> {
-    if oxideterm_portable_runtime::is_portable_mode()
-        .context("failed to determine portable mode")?
-    {
-        return match oxideterm_portable_runtime::keystore::get_secret(
-            CONFIG_KEYCHAIN_SERVICE,
-            CONFIG_KEYCHAIN_ID,
-        ) {
-            Ok(secret) => Ok(Some(secret)),
-            Err(oxideterm_portable_runtime::keystore::PortableKeystoreError::NotFound(_)) => {
-                Ok(None)
-            }
-            Err(error) => Err(error).context("failed to load local config key"),
-        };
-    }
-
     load_system_config_key_secret()
 }
 
 fn store_config_key_secret(secret: &str) -> Result<()> {
-    // The local config key is the compatibility boundary with Tauri: OS stores
-    // use username@id accounts, while portable mode stores the raw key id.
-    if oxideterm_portable_runtime::is_portable_mode()
-        .context("failed to determine portable mode")?
-    {
-        return oxideterm_portable_runtime::keystore::store_secret(
-            CONFIG_KEYCHAIN_SERVICE,
-            CONFIG_KEYCHAIN_ID,
-            secret,
-        )
-        .context("failed to store local config key");
-    }
-
     store_system_config_key_secret(secret)
 }
 
@@ -504,17 +474,7 @@ fn rollback_created_config_key() {
 }
 
 fn delete_config_key_secret() -> Result<()> {
-    let result = if oxideterm_portable_runtime::is_portable_mode()
-        .context("failed to determine portable mode")?
-    {
-        oxideterm_portable_runtime::keystore::delete_secret(
-            CONFIG_KEYCHAIN_SERVICE,
-            CONFIG_KEYCHAIN_ID,
-        )
-        .context("failed to delete local config key")
-    } else {
-        delete_system_config_key_secret()
-    };
+    let result = delete_system_config_key_secret();
 
     if result.is_ok() {
         clear_cached_config_encryption_key();

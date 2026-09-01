@@ -57,16 +57,20 @@ pub fn read_local_preview(path: &str) -> LocalPreview {
         };
     }
     if ext == "pdf" {
-        return LocalPreview::Unsupported("fileManager.openExternal".to_string());
+        return LocalPreview::Unsupported(
+            "This file type cannot be previewed".to_string(),
+        );
     }
     if archive_extensions().contains(&ext.as_str()) {
         return match list_local_archive_contents(path) {
             Ok(info) => LocalPreview::Archive { info },
-            Err(_) => LocalPreview::Unsupported("fileManager.binaryFile".to_string()),
+            Err(_) => LocalPreview::Unsupported("Binary files cannot be previewed".to_string()),
         };
     }
     if office_extensions().contains(&ext.as_str()) {
-        return LocalPreview::Unsupported("fileManager.openExternal".to_string());
+        return LocalPreview::Unsupported(
+            "This file type cannot be previewed".to_string(),
+        );
     }
     let language = language_for_extension(&ext, &file_name);
     if file_size >= STREAM_PREVIEW_THRESHOLD
@@ -80,7 +84,7 @@ pub fn read_local_preview(path: &str) -> LocalPreview {
                     Ok(bytes_read) => {
                         sample.truncate(bytes_read);
                         if looks_binary(&sample) {
-                            LocalPreview::Unsupported("fileManager.binaryFile".to_string())
+                            LocalPreview::Unsupported("Binary files cannot be previewed".to_string())
                         } else {
                             LocalPreview::TextStream {
                                 path: path.to_string(),
@@ -104,7 +108,7 @@ pub fn read_local_preview(path: &str) -> LocalPreview {
             language: language_for_extension(&ext, &file_name),
         },
         Ok(bytes) if looks_binary(&bytes) => {
-            LocalPreview::Unsupported("fileManager.binaryFile".to_string())
+            LocalPreview::Unsupported("Binary files cannot be previewed".to_string())
         }
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(text) => {
@@ -121,7 +125,7 @@ pub fn read_local_preview(path: &str) -> LocalPreview {
                 let bytes = error.into_bytes();
                 let text = String::from_utf8_lossy(&bytes).to_string();
                 if looks_binary(text.as_bytes()) {
-                    LocalPreview::Unsupported("fileManager.binaryFile".to_string())
+                    LocalPreview::Unsupported("Binary files cannot be previewed".to_string())
                 } else {
                     LocalPreview::Text {
                         content: text,

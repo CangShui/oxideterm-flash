@@ -3868,6 +3868,58 @@ mod tests {
     }
 
     #[gpui_macros::test]
+    fn ided_hover_rows_repaint_on_hover_transitions(cx: &mut TestAppContext) {
+        use crate::{Modifiers, Size, VisualTestContext, point, px, rgb};
+        use std::cell::Cell;
+
+        struct HoverProbeView {
+            render_count: Rc<Cell<usize>>,
+        }
+
+        impl Render for HoverProbeView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.render_count.set(self.render_count.get() + 1);
+                // Hover state requires a stable element id; virtualized rows
+                // that skip the id never repaint their highlight transitions.
+                div()
+                    .id("hover-probe-row")
+                    .w(px(100.))
+                    .h(px(100.))
+                    .hover(|style| style.bg(rgb(0xffffff)))
+            }
+        }
+
+        let render_count = Rc::new(Cell::new(0));
+        let probe = render_count.clone();
+        let window = cx.open_window(Size { width: px(200.), height: px(200.) }, move |_, _| {
+            HoverProbeView {
+                render_count: probe,
+            }
+        });
+        cx.run_until_parked();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let draws_before_enter = render_count.get();
+
+        // Entering the row must notify the owning view even without element
+        // state, so the hover highlight repaints immediately.
+        cx.simulate_mouse_move(point(px(50.), px(50.)), None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            render_count.get() > draws_before_enter,
+            "hover enter must repaint ided rows"
+        );
+        let draws_after_enter = render_count.get();
+
+        // Leaving the row must repaint as well so the highlight clears.
+        cx.simulate_mouse_move(point(px(180.), px(180.)), None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            render_count.get() > draws_after_enter,
+            "hover leave must repaint ided rows"
+        );
+    }
+
+    #[gpui_macros::test]
     fn nested_overflow_consumes_wheel_when_it_scrolls(cx: &mut TestAppContext) {
         use crate::{ScrollDelta, point, size};
 

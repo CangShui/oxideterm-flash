@@ -1,8 +1,19 @@
-//! Owns the tmux Host Tool UI and request lifecycle.
+//! Owns the virtual terminal (Screen / tmux) Host Tool UI and request lifecycle.
 
 use super::*;
 
-use oxideterm_connection_monitor::tmux_capture_snapshot;
+use oxideterm_connection_monitor::{
+    ResourceScreenSession, ResourceScreenSnapshot, ResourceScreenStatus, ResourceTmuxPane,
+    ResourceTmuxSession, ResourceTmuxSnapshot, ResourceTmuxStatus, ResourceTmuxWindow,
+    ScreenActionKind, ScreenCommandCapability, TmuxActionKind, TmuxCommandCapability,
+    VirtualTerminalEngine, build_screen_action_command, build_screen_attach_command,
+    build_screen_new_session_command, build_screen_rename_session_command,
+    build_screen_send_command, build_tmux_action_command, build_tmux_attach_command,
+    build_tmux_new_session_command, build_tmux_rename_session_command,
+    build_tmux_rename_window_command, build_tmux_send_pane_command, build_tmux_snapshot_command,
+    screen_capture_snapshot, screen_session_row_signature, tmux_capture_snapshot,
+    tmux_session_row_signature, visible_screen_session_rows, visible_tmux_session_rows,
+};
 
 use oxideterm_gpui_ui::button::ButtonVariant;
 
@@ -286,6 +297,98 @@ impl WorkspaceApp {
 }
 
 impl HostToolsEntity {
+    fn effective_virtual_terminal_engine(&self, connection_id: &str) -> VirtualTerminalEngine {
+        if let Some(&engine) = self.ui.host_virtual_terminal_engine.get(connection_id) {
+            return engine;
+        }
+        let tmux_snap = self.tmux_snapshot_for(connection_id);
+        let screen_snap = self.screen_snapshot_for(connection_id);
+        let screen_avail = screen_snap
+            .as_ref()
+            .map(|s| matches!(s.status, ResourceScreenStatus::Available { .. }))
+            .unwrap_or(false);
+        let tmux_avail = tmux_snap
+            .as_ref()
+            .map(|s| matches!(s.status, ResourceTmuxStatus::Available { .. }))
+            .unwrap_or(false);
+
+        if screen_avail && tmux_avail {
+            VirtualTerminalEngine::Screen
+        } else if screen_avail {
+            VirtualTerminalEngine::Screen
+        } else if tmux_avail {
+            VirtualTerminalEngine::Tmux
+        } else {
+            VirtualTerminalEngine::Screen
+        }
+    }
+
+    fn render_host_vt_engine_switcher(
+        &self,
+        connection_id: &str,
+        active_engine: VirtualTerminalEngine,
+        tokens: &ThemeTokens,
+        i18n: &I18n,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cid = connection_id.to_string();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(self.render_host_vt_engine_chip(
+                VirtualTerminalEngine::Screen,
+                active_engine == VirtualTerminalEngine::Screen,
+                cid.clone(),
+                tokens,
+                i18n,
+                cx,
+            ))
+            .child(self.render_host_vt_engine_chip(
+                VirtualTerminalEngine::Tmux,
+                active_engine == VirtualTerminalEngine::Tmux,
+                cid,
+                tokens,
+                i18n,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_host_vt_engine_chip(
+        &self,
+        engine: VirtualTerminalEngine,
+        active: bool,
+        connection_id: String,
+        tokens: &ThemeTokens,
+        i18n: &I18n,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = match engine {
+            VirtualTerminalEngine::Screen => {
+                i18n.t("sidebar.host_virtual_terminal.engines.screen")
+            }
+            VirtualTerminalEngine::Tmux => i18n.t("sidebar.host_virtual_terminal.engines.tmux"),
+        };
+        host_vt_engine_chip(active, tokens)
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.ui
+                        .host_virtual_terminal_engine
+                        .insert(connection_id.clone(), engine);
+                    this.ui
+                        .host_virtual_terminal_user_selected
+                        .insert(connection_id.clone(), true);
+                    this.ui.host_tmux_search_query.clear();
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_host_tmux_panel(
         &self,
@@ -312,16 +415,37 @@ impl HostToolsEntity {
         let selected_id = selected_connection_id
             .as_deref()
             .unwrap_or(connections[0].connection_id.as_str());
-        let snapshot = self.tmux_snapshot_for(selected_id);
-        let rows = snapshot
+        let tmux_snapshot = self.tmux_snapshot_for(selected_id);
+        let screen_snapshot = self.screen_snapshot_for(selected_id);
+        let tmux_rows = tmux_snapshot
             .as_ref()
             .map(|snapshot| visible_tmux_session_rows(snapshot, &self.ui.host_tmux_search_query))
             .unwrap_or_default();
-        let status = snapshot
+        let tmux_status = tmux_snapshot
             .as_ref()
             .map(|snapshot| snapshot.status.clone())
             .unwrap_or_default();
-        self.sync_host_tmux_list_state(&rows, snapshot.as_ref(), selected_id);
+        let screen_rows = screen_snapshot
+            .as_ref()
+            .map(|snapshot| visible_screen_session_rows(snapshot, &self.ui.host_tmux_search_query))
+            .unwrap_or_default();
+        let screen_status = screen_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.status.clone())
+            .unwrap_or_default();
+
+        self.sync_host_tmux_list_state(&tmux_rows, tmux_snapshot.as_ref(), selected_id);
+        self.sync_host_screen_list_state(&screen_rows, screen_snapshot.as_ref(), selected_id);
+
+        let engine = self.effective_virtual_terminal_engine(selected_id);
+        let both_unavailable = matches!(tmux_status, ResourceTmuxStatus::Unavailable)
+            && matches!(screen_status, ResourceScreenStatus::Unavailable);
+
+        let visible_count = if engine == VirtualTerminalEngine::Screen {
+            screen_rows.len()
+        } else {
+            tmux_rows.len()
+        };
 
         div()
             .id("host-tmux-panel")
@@ -354,48 +478,87 @@ impl HostToolsEntity {
                         selectable_text,
                         cx,
                     ))
-                    .child(self.render_host_tmux_search(&search_ime, tokens, i18n, cx))
-                    .child(self.render_host_tmux_status_row(
-                        rows.len(),
+                    .child(self.render_host_vt_engine_switcher(
                         selected_id,
-                        &status,
+                        engine,
+                        tokens,
+                        i18n,
+                        cx,
+                    ))
+                    .child(self.render_host_tmux_search(&search_ime, engine, tokens, i18n, cx))
+                    .child(self.render_host_tmux_status_row(
+                        visible_count,
+                        selected_id,
+                        engine,
+                        &tmux_status,
+                        &screen_status,
                         tokens,
                         i18n,
                         cx,
                     )),
             )
-            .child(self.render_host_tmux_list(
-                rows,
-                snapshot,
-                self.tmux_snapshot_in_flight(),
-                status,
-                selected_id,
-                sidebar_width,
-                tokens,
-                i18n,
-                mono_font_family,
-                selectable_text,
-                cx,
-            ))
+            .child(if both_unavailable {
+                host_tools_center_state(
+                    LucideIcon::Terminal,
+                    tokens.ui.text_muted,
+                    i18n.t("sidebar.host_virtual_terminal.both_unavailable"),
+                    selectable_text,
+                    cx,
+                )
+            } else if engine == VirtualTerminalEngine::Screen {
+                self.render_host_screen_list(
+                    screen_rows,
+                    screen_snapshot,
+                    self.tmux_snapshot_in_flight(),
+                    screen_status,
+                    selected_id,
+                    tokens,
+                    i18n,
+                    mono_font_family,
+                    selectable_text,
+                    cx,
+                )
+            } else {
+                self.render_host_tmux_list(
+                    tmux_rows,
+                    tmux_snapshot,
+                    self.tmux_snapshot_in_flight(),
+                    tmux_status,
+                    selected_id,
+                    sidebar_width,
+                    tokens,
+                    i18n,
+                    mono_font_family,
+                    selectable_text,
+                    cx,
+                )
+            })
             .into_any_element()
     }
 
     fn render_host_tmux_search(
         &self,
         ime: &HostToolsPlainTextImeFrame,
+        engine: VirtualTerminalEngine,
         tokens: &ThemeTokens,
         i18n: &I18n,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let input = ime.input();
         let anchor_frame = ime.clone();
+        let placeholder = match engine {
+            VirtualTerminalEngine::Screen => {
+                i18n.t("sidebar.host_virtual_terminal.search_screen_placeholder")
+            }
+            VirtualTerminalEngine::Tmux => i18n.t("sidebar.host_tmux.search_placeholder"),
+        };
         text_input_anchor_probe(
             ime.anchor_id(),
             text_input(
                 tokens,
                 TextInputView {
                     value: &self.ui.host_tmux_search_query,
-                    placeholder: i18n.t("sidebar.host_tmux.search_placeholder"),
+                    placeholder,
                     focused: self.ui.input_is_focused(input),
                     caret_visible: ime.caret_visible(),
                     secret: false,
@@ -430,32 +593,67 @@ impl HostToolsEntity {
         .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_host_tmux_status_row(
         &self,
         visible_count: usize,
         connection_id: &str,
-        status: &ResourceTmuxStatus,
+        engine: VirtualTerminalEngine,
+        tmux_status: &ResourceTmuxStatus,
+        screen_status: &ResourceScreenStatus,
         tokens: &ThemeTokens,
         i18n: &I18n,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = tokens.ui;
-        let capability_label = match status {
-            ResourceTmuxStatus::Available {
-                capability: TmuxCommandCapability::Full,
-                ..
-            } => i18n.t("sidebar.host_tmux.capability.full"),
-            ResourceTmuxStatus::Available {
-                capability: TmuxCommandCapability::Partial,
-                ..
-            } => i18n.t("sidebar.host_tmux.capability.partial"),
-            _ => i18n.t("sidebar.host_tmux.capability.unknown"),
+        let capability_label = match engine {
+            VirtualTerminalEngine::Screen => match screen_status {
+                ResourceScreenStatus::Available {
+                    capability: ScreenCommandCapability::Full,
+                    ..
+                } => i18n.t("sidebar.host_tmux.capability.full"),
+                ResourceScreenStatus::Available {
+                    capability: ScreenCommandCapability::Partial,
+                    ..
+                } => i18n.t("sidebar.host_tmux.capability.partial"),
+                _ => i18n.t("sidebar.host_tmux.capability.unknown"),
+            },
+            VirtualTerminalEngine::Tmux => match tmux_status {
+                ResourceTmuxStatus::Available {
+                    capability: TmuxCommandCapability::Full,
+                    ..
+                } => i18n.t("sidebar.host_tmux.capability.full"),
+                ResourceTmuxStatus::Available {
+                    capability: TmuxCommandCapability::Partial,
+                    ..
+                } => i18n.t("sidebar.host_tmux.capability.partial"),
+                _ => i18n.t("sidebar.host_tmux.capability.unknown"),
+            },
         };
-        let new_session_title = i18n.t("sidebar.host_tmux.new_session_title");
-        let new_session_name = i18n.t("sidebar.host_tmux.new_session_name");
-        let opened_notice = i18n
-            .t("sidebar.host_tmux.toast.new_session_opened")
-            .replace("{{name}}", &new_session_name);
+        let (new_session_title, opened_notice) = match engine {
+            VirtualTerminalEngine::Screen => {
+                let title = i18n.t("sidebar.host_virtual_terminal.new_screen_session_title");
+                let name = i18n.t("sidebar.host_virtual_terminal.new_screen_session_name");
+                let notice = i18n
+                    .t("sidebar.host_virtual_terminal.toast.new_screen_session_opened")
+                    .replace("{{name}}", &name);
+                (title, notice)
+            }
+            VirtualTerminalEngine::Tmux => {
+                let title = i18n.t("sidebar.host_tmux.new_session_title");
+                let name = i18n.t("sidebar.host_tmux.new_session_name");
+                let notice = i18n
+                    .t("sidebar.host_tmux.toast.new_session_opened")
+                    .replace("{{name}}", &name);
+                (title, notice)
+            }
+        };
+        let refresh_label = match engine {
+            VirtualTerminalEngine::Screen => {
+                i18n.t("sidebar.host_virtual_terminal.actions.refresh_screen")
+            }
+            VirtualTerminalEngine::Tmux => i18n.t("sidebar.host_tmux.actions.refresh"),
+        };
         let missing_notice = i18n.t("sidebar.host_tmux.toast.exec_terminal_missing");
         let connection_id_for_terminal = connection_id.to_string();
         div()
@@ -495,14 +693,25 @@ impl HostToolsEntity {
                         "host-tmux-new-session",
                         true,
                         cx.listener(move |host_tools, _event, window, cx| {
-                            host_tools.dispatch_tmux_new_session_terminal(
-                                connection_id_for_terminal.clone(),
-                                new_session_title.clone(),
-                                opened_notice.clone(),
-                                missing_notice.clone(),
-                                window,
-                                cx,
-                            );
+                            if engine == VirtualTerminalEngine::Screen {
+                                host_tools.dispatch_screen_new_session_terminal(
+                                    connection_id_for_terminal.clone(),
+                                    new_session_title.clone(),
+                                    opened_notice.clone(),
+                                    missing_notice.clone(),
+                                    window,
+                                    cx,
+                                );
+                            } else {
+                                host_tools.dispatch_tmux_new_session_terminal(
+                                    connection_id_for_terminal.clone(),
+                                    new_session_title.clone(),
+                                    opened_notice.clone(),
+                                    missing_notice.clone(),
+                                    window,
+                                    cx,
+                                );
+                            }
                             cx.stop_propagation();
                         }),
                     ))
@@ -520,7 +729,7 @@ impl HostToolsEntity {
                             idle_opacity: 1.0,
                             ..oxideterm_gpui_ui::button::IconButtonOptions::compact(24.0)
                         },
-                        i18n.t("sidebar.host_tmux.actions.refresh"),
+                        refresh_label,
                         "host-tmux-refresh",
                         true,
                         cx.listener(move |host_tools, _event, _window, cx| {
@@ -637,11 +846,439 @@ impl HostToolsEntity {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_host_screen_list(
+        &self,
+        rows: Vec<ResourceScreenSession>,
+        snapshot: Option<ResourceScreenSnapshot>,
+        loading: bool,
+        status: ResourceScreenStatus,
+        connection_id: &str,
+        tokens: &ThemeTokens,
+        i18n: &I18n,
+        mono_font_family: SharedString,
+        selectable_text: &SelectableTextRenderState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if loading && rows.is_empty() {
+            return host_tools_center_state(
+                LucideIcon::Terminal,
+                tokens.ui.text_muted,
+                i18n.t("sidebar.host_virtual_terminal.loading_screen"),
+                selectable_text,
+                cx,
+            );
+        }
+        match status {
+            ResourceScreenStatus::Unavailable => {
+                return host_tools_center_state(
+                    LucideIcon::Terminal,
+                    tokens.ui.text_muted,
+                    i18n.t("sidebar.host_virtual_terminal.screen_unavailable"),
+                    selectable_text,
+                    cx,
+                );
+            }
+            ResourceScreenStatus::Error { message } => {
+                return host_tools_center_state(
+                    LucideIcon::AlertTriangle,
+                    MONITOR_RED,
+                    i18n
+                        .t("sidebar.host_virtual_terminal.error_screen")
+                        .replace("{{error}}", &message),
+                    selectable_text,
+                    cx,
+                );
+            }
+            ResourceScreenStatus::Unknown | ResourceScreenStatus::Available { .. } => {}
+        }
+        if rows.is_empty() {
+            return host_tools_center_state(
+                LucideIcon::Terminal,
+                tokens.ui.text_muted,
+                i18n.t("sidebar.host_virtual_terminal.screen_empty"),
+                selectable_text,
+                cx,
+            );
+        }
+
+        let snapshot = Arc::new(snapshot.unwrap_or_default());
+        let rows = Arc::new(rows);
+        let connection_id = Arc::new(connection_id.to_string());
+        let state = self.ui.host_screen_list_state.clone();
+        let spec = TauriVirtualListSpec::new(px(HOST_TMUX_LIST_ESTIMATED_ROW_HEIGHT), 8);
+        let host_tools = cx.entity();
+        let tokens = *tokens;
+        let i18n = i18n.clone();
+        div()
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(self.render_host_screen_table_header(&tokens, &i18n))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(tauri_virtual_list(
+                        state,
+                        spec,
+                        move |index, _window, cx| {
+                            let rows = Arc::clone(&rows);
+                            let snapshot = Arc::clone(&snapshot);
+                            let connection_id = Arc::clone(&connection_id);
+                            host_tools.update(cx, |host_tools, cx| {
+                                host_tools.render_host_screen_row(
+                                    connection_id.as_str(),
+                                    snapshot.as_ref(),
+                                    rows.get(index).cloned(),
+                                    &tokens,
+                                    &i18n,
+                                    mono_font_family.clone(),
+                                    cx,
+                                )
+                            })
+                        },
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_host_screen_table_header(
+        &self,
+        tokens: &ThemeTokens,
+        i18n: &I18n,
+    ) -> AnyElement {
+        let theme = tokens.ui;
+        div()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .h(px(HOST_TMUX_TABLE_HEADER_HEIGHT))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(rgba((theme.border << 8) | MONITOR_BORDER_ALPHA))
+            .bg(rgb(theme.bg))
+            .text_size(px(HOST_PROCESS_TABLE_HEADER_TEXT_SIZE))
+            .text_color(rgb(theme.text_muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .child(i18n.t("sidebar.host_tmux.columns.session")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(HOST_TMUX_ATTACHED_COLUMN_WIDTH))
+                    .child(i18n.t("sidebar.host_tmux.columns.attached")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(120.0))
+                    .flex()
+                    .justify_end()
+                    .child(i18n.t("sidebar.host_tmux.columns.created")),
+            )
+            .into_any_element()
+    }
+
+    fn render_host_screen_row(
+        &self,
+        connection_id: &str,
+        _snapshot: &ResourceScreenSnapshot,
+        session: Option<ResourceScreenSession>,
+        tokens: &ThemeTokens,
+        i18n: &I18n,
+        mono_font: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(session) = session else {
+            return div().into_any_element();
+        };
+        let theme = tokens.ui;
+        let attached_label = if session.attached {
+            i18n.t("sidebar.host_tmux.attached.yes")
+        } else {
+            i18n.t("sidebar.host_tmux.attached.no")
+        };
+        let screen_row_id = session.id.clone();
+
+        div()
+            .id(format!("host-screen-row-{screen_row_id}"))
+            .w_full()
+            .min_w_0()
+            .border_b_1()
+            .border_color(rgba((theme.border << 8) | MONITOR_BORDER_ALPHA))
+            .hover(|row| row.bg(rgb(theme.bg_hover)))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .h(px(HOST_TMUX_TABLE_MAIN_ROW_HEIGHT))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .truncate()
+                            .text_size(px(HOST_PROCESS_TABLE_COMMAND_TEXT_SIZE))
+                            .text_color(rgb(theme.text))
+                            .font_family(mono_font.clone())
+                            .child(session.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(HOST_TMUX_ATTACHED_COLUMN_WIDTH))
+                            .truncate()
+                            .text_size(px(HOST_PROCESS_TABLE_VALUE_TEXT_SIZE))
+                            .text_color(rgb(tmux_attached_color(
+                                session.attached,
+                                theme.text_muted,
+                            )))
+                            .font_family(mono_font.clone())
+                            .child(attached_label),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(120.0))
+                            .flex()
+                            .justify_end()
+                            .truncate()
+                            .text_size(px(HOST_PROCESS_TABLE_VALUE_TEXT_SIZE))
+                            .text_color(rgb(theme.text_muted))
+                            .font_family(mono_font.clone())
+                            .child(tmux_time_label(&session.created)),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px_3()
+                    .pb_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(HOST_PROCESS_TABLE_META_TEXT_SIZE))
+                            .text_color(rgb(theme.text_muted))
+                            .font_family(mono_font)
+                            .child(session.id.clone()),
+                    )
+                    .child(self.render_host_screen_inline_actions(
+                        connection_id,
+                        &session,
+                        tokens,
+                        i18n,
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_host_screen_inline_actions(
+        &self,
+        connection_id: &str,
+        session: &ResourceScreenSession,
+        tokens: &ThemeTokens,
+        i18n: &I18n,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = tokens.ui;
+        let is_running = self.tmux_action_running_for(&session.id);
+        let connection_id_for_attach = connection_id.to_string();
+        let session_id_for_attach = session.id.clone();
+        let connection_id_for_rename = connection_id.to_string();
+        let session_id_for_rename = session.id.clone();
+        let session_name_for_rename = session.name.clone();
+        let connection_id_for_send = connection_id.to_string();
+        let session_id_for_send = session.id.clone();
+        let session_name_for_send = session.name.clone();
+        let connection_id_for_kill = connection_id.to_string();
+        let session_id_for_kill = session.id.clone();
+        let session_name_for_kill = session.name.clone();
+        let missing_notice = i18n.t("sidebar.host_tmux.toast.exec_terminal_missing");
+        let attach_title = i18n
+            .t("sidebar.host_virtual_terminal.screen_attach_title")
+            .replace("{{name}}", &session.name);
+        let opened_notice = i18n
+            .t("sidebar.host_virtual_terminal.toast.screen_attach_opened")
+            .replace("{{name}}", &session.name);
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(4.0))
+            .child(host_tools_tooltip_icon_button(
+                tokens,
+                LucideIcon::Terminal,
+                13.0,
+                rgb(theme.text),
+                oxideterm_gpui_ui::button::IconButtonOptions {
+                    size: 22.0,
+                    disabled: is_running,
+                    has_background: true,
+                    background: Some(rgb(theme.bg_hover)),
+                    hover_background: Some(rgb(theme.bg_panel)),
+                    idle_opacity: 1.0,
+                    ..oxideterm_gpui_ui::button::IconButtonOptions::compact(22.0)
+                },
+                i18n.t("sidebar.host_tmux.actions.attach"),
+                "host-screen-attach",
+                true,
+                cx.listener(move |host_tools, _event, window, cx| {
+                    host_tools.dispatch_screen_attach_terminal(
+                        connection_id_for_attach.clone(),
+                        session_id_for_attach.clone(),
+                        attach_title.clone(),
+                        opened_notice.clone(),
+                        missing_notice.clone(),
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            ))
+            .child(host_tools_tooltip_icon_button(
+                tokens,
+                LucideIcon::Keyboard,
+                12.0,
+                rgb(theme.text),
+                oxideterm_gpui_ui::button::IconButtonOptions {
+                    size: 22.0,
+                    disabled: is_running,
+                    has_background: true,
+                    background: Some(rgb(theme.bg_hover)),
+                    hover_background: Some(rgb(theme.bg_panel)),
+                    idle_opacity: 1.0,
+                    ..oxideterm_gpui_ui::button::IconButtonOptions::compact(22.0)
+                },
+                i18n.t("sidebar.host_tmux.actions.send_command"),
+                "host-screen-send",
+                true,
+                cx.listener(move |host_tools, _event, window, cx| {
+                    host_tools.open_tmux_input_from_view(
+                        HostTmuxInputDialog {
+                            connection_id: connection_id_for_send.clone(),
+                            session_id: session_id_for_send.clone(),
+                            session_name: session_name_for_send.clone(),
+                            target_label: session_name_for_send.clone(),
+                            value: zeroize::Zeroizing::new(String::new()),
+                            kind: HostTmuxInputDialogKind::SendScreenCommand {
+                                target: session_id_for_send.clone(),
+                            },
+                        },
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            ))
+            .child(host_tools_tooltip_icon_button(
+                tokens,
+                LucideIcon::Pencil,
+                12.0,
+                rgb(theme.text),
+                oxideterm_gpui_ui::button::IconButtonOptions {
+                    size: 22.0,
+                    disabled: is_running,
+                    has_background: true,
+                    background: Some(rgb(theme.bg_hover)),
+                    hover_background: Some(rgb(theme.bg_panel)),
+                    idle_opacity: 1.0,
+                    ..oxideterm_gpui_ui::button::IconButtonOptions::compact(22.0)
+                },
+                i18n.t("sidebar.host_tmux.actions.rename_session"),
+                "host-screen-rename",
+                true,
+                cx.listener(move |host_tools, _event, window, cx| {
+                    host_tools.open_tmux_input_from_view(
+                        HostTmuxInputDialog {
+                            connection_id: connection_id_for_rename.clone(),
+                            session_id: session_id_for_rename.clone(),
+                            session_name: session_name_for_rename.clone(),
+                            target_label: session_name_for_rename.clone(),
+                            value: zeroize::Zeroizing::new(session_name_for_rename.clone()),
+                            kind: HostTmuxInputDialogKind::RenameScreenSession {
+                                target: session_id_for_rename.clone(),
+                            },
+                        },
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            ))
+            .child(host_tools_tooltip_icon_button(
+                tokens,
+                LucideIcon::Trash2,
+                12.0,
+                rgb(MONITOR_RED),
+                oxideterm_gpui_ui::button::IconButtonOptions {
+                    size: 22.0,
+                    disabled: is_running,
+                    has_background: true,
+                    background: Some(rgba((MONITOR_RED << 8) | MONITOR_TINT_ALPHA)),
+                    hover_background: Some(rgba((MONITOR_RED << 8) | 0x30)),
+                    idle_opacity: 1.0,
+                    ..oxideterm_gpui_ui::button::IconButtonOptions::compact(22.0)
+                },
+                i18n.t("sidebar.host_tmux.actions.kill_session"),
+                "host-screen-kill",
+                true,
+                cx.listener(move |host_tools, _event, window, cx| {
+                    host_tools.open_tmux_confirm_from_view(
+                        HostTmuxActionRequest {
+                            connection_id: connection_id_for_kill.clone(),
+                            session_id: session_id_for_kill.clone(),
+                            session_name: session_name_for_kill.clone(),
+                            target_label: session_name_for_kill.clone(),
+                            action: HostTmuxDestructiveAction::KillScreenSession {
+                                target: session_id_for_kill.clone(),
+                            },
+                        },
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            ))
+            .into_any_element()
+    }
+
     fn render_host_tmux_confirm_view(
         &self,
         i18n: &I18n,
     ) -> Option<(oxideterm_gpui_ui::motion::ExitPhase, ConfirmDialogView)> {
         let (request, phase) = self.tmux_confirm_view()?;
+        let title_key = match request.action {
+            HostTmuxDestructiveAction::KillScreenSession { .. } => {
+                "sidebar.host_virtual_terminal.confirm_screen_action_title"
+            }
+            _ => "sidebar.host_tmux.confirm.title",
+        };
         let description = i18n
             .t(host_tmux_confirm_description_key(&request.action))
             .replace("{{name}}", &request.session_name)
@@ -651,9 +1288,7 @@ impl HostToolsEntity {
             phase,
             ConfirmDialogView {
                 variant: ConfirmDialogVariant::Danger,
-                title: div()
-                    .child(i18n.t("sidebar.host_tmux.confirm.title"))
-                    .into_any_element(),
+                title: div().child(i18n.t(title_key)).into_any_element(),
                 description: Some(div().child(description).into_any_element()),
                 cancel_label: div()
                     .child(i18n.t("sidebar.host_tmux.confirm.cancel"))
@@ -815,6 +1450,7 @@ impl HostToolsEntity {
         let session_id = session.id.clone();
 
         div()
+            .id(format!("host-tmux-row-{session_id}"))
             .w_full()
             .min_w_0()
             .border_b_1()
@@ -1353,6 +1989,7 @@ impl HostToolsEntity {
             .overflow_hidden()
             .child(
                 div()
+                    .id(format!("host-tmux-window-row-{}", window.id))
                     .px_2()
                     .py_1()
                     .flex()
@@ -1562,6 +2199,120 @@ impl HostToolsEntity {
         );
     }
 
+    fn sync_host_screen_list_state(
+        &self,
+        rows: &[ResourceScreenSession],
+        _snapshot: Option<&ResourceScreenSnapshot>,
+        selected_id: &str,
+    ) {
+        let ui = &self.ui;
+        let signatures = rows
+            .iter()
+            .map(screen_session_row_signature)
+            .collect::<Vec<_>>();
+        let identity = format!("host-screen:{selected_id}:{}", ui.host_tmux_search_query);
+        sync_tauri_variable_list_state_by_signatures(
+            &ui.host_screen_list_state,
+            &mut ui.host_screen_list_cache.borrow_mut(),
+            &identity,
+            &signatures,
+            TauriVirtualListSpec::new(px(HOST_TMUX_LIST_ESTIMATED_ROW_HEIGHT), 8),
+        );
+    }
+
+    fn dispatch_screen_attach_terminal(
+        &self,
+        connection_id: String,
+        session_id: String,
+        title: String,
+        opened_notice: String,
+        missing_notice: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = match self.screen_attach_command(&connection_id, &session_id) {
+            Ok(command) => command,
+            Err(_) => {
+                cx.emit(HostToolsEvent::ShowNotice(
+                    HostToolsNotice::TmuxActionFailed,
+                ));
+                return;
+            }
+        };
+        window.dispatch_action(
+            Box::new(HostToolsWindowRequest::new(
+                HostToolsWindowIntent::OpenExistingNodeTerminal {
+                    connection_id,
+                    command,
+                    title,
+                    opened_notice,
+                    missing_notice,
+                },
+            )),
+            cx,
+        );
+    }
+
+    fn dispatch_screen_new_session_terminal(
+        &self,
+        connection_id: String,
+        title: String,
+        opened_notice: String,
+        missing_notice: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = match self.screen_new_session_command(&connection_id) {
+            Ok(command) => command,
+            Err(_) => {
+                cx.emit(HostToolsEvent::ShowNotice(
+                    HostToolsNotice::TmuxActionFailed,
+                ));
+                return;
+            }
+        };
+        window.dispatch_action(
+            Box::new(HostToolsWindowRequest::new(
+                HostToolsWindowIntent::OpenExistingNodeTerminal {
+                    connection_id,
+                    command,
+                    title,
+                    opened_notice,
+                    missing_notice,
+                },
+            )),
+            cx,
+        );
+    }
+
+    pub(super) fn screen_snapshot_for(
+        &self,
+        connection_id: &str,
+    ) -> Option<ResourceScreenSnapshot> {
+        self.host_tmux.screen_snapshots.get(connection_id).cloned()
+    }
+
+    pub(super) fn screen_attach_command(
+        &self,
+        connection_id: &str,
+        target: &str,
+    ) -> Result<String, String> {
+        let os_type = self
+            .connection_os_type(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
+        build_screen_attach_command(&os_type, target)
+    }
+
+    pub(super) fn screen_new_session_command(
+        &self,
+        connection_id: &str,
+    ) -> Result<String, String> {
+        let os_type = self
+            .connection_os_type(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
+        build_screen_new_session_command(&os_type, None)
+    }
+
     fn dispatch_tmux_attach_terminal(
         &self,
         connection_id: String,
@@ -1665,9 +2416,7 @@ impl HostToolsEntity {
     }
 
     pub(super) fn tmux_snapshot_for(&self, connection_id: &str) -> Option<ResourceTmuxSnapshot> {
-        (self.host_tmux.snapshot_connection_id.as_deref() == Some(connection_id))
-            .then(|| self.host_tmux.snapshot.clone())
-            .flatten()
+        self.host_tmux.snapshots.get(connection_id).cloned()
     }
 
     pub(super) fn tmux_snapshot_in_flight(&self) -> bool {
@@ -1735,7 +2484,6 @@ impl HostToolsEntity {
             failure_fallback,
             unavailable_fallback,
         };
-        self.host_tmux.snapshot_connection_id = Some(connection_id);
         self.host_tmux.snapshot_running = Some(request.clone());
         self.host_tmux.snapshot_in_flight = true;
         self.host_tmux.last_error = None;
@@ -1770,56 +2518,148 @@ impl HostToolsEntity {
         let feedback = delivery.request.feedback;
         self.host_tmux.snapshot_in_flight = false;
         self.host_tmux.snapshot_running = None;
-        let (snapshot, notice) = match delivery.result {
+        let ((tmux_snapshot, screen_snapshot), notice) = match delivery.result {
             Ok(mut output) => {
-                let mut snapshot =
+                let mut tmux_snap =
                     tmux_capture_snapshot(&output.stdout, &output.stderr, output.exit_code);
+                let mut screen_snap =
+                    screen_capture_snapshot(&output.stdout, &output.stderr, output.exit_code);
                 zeroize::Zeroize::zeroize(&mut output.stdout);
                 zeroize::Zeroize::zeroize(&mut output.stderr);
-                let notice = match snapshot.status.clone() {
-                    ResourceTmuxStatus::Available { .. } => {
-                        self.host_tmux.last_error = None;
-                        Some(HostToolsNotice::TmuxSnapshotLoaded {
-                            count: visible_tmux_session_rows(
-                                &snapshot,
-                                &delivery.request.search_query,
-                            )
-                            .len(),
-                        })
+
+                // Both capture parsers embed remote stdout/stderr into Error
+                // messages. Replace every raw message with the localized
+                // fallback regardless of which engine is displayed, so the
+                // frozen snapshot for the inactive engine stays redacted too.
+                if matches!(tmux_snap.status, ResourceTmuxStatus::Error { .. }) {
+                    tmux_snap.status = ResourceTmuxStatus::Error {
+                        message: delivery.request.failure_fallback.clone(),
+                    };
+                }
+                if matches!(screen_snap.status, ResourceScreenStatus::Error { .. }) {
+                    screen_snap.status = ResourceScreenStatus::Error {
+                        message: delivery.request.failure_fallback.clone(),
+                    };
+                }
+
+                let connection_id = delivery.request.connection_id.as_str();
+                let user_selected = self
+                    .ui
+                    .host_virtual_terminal_user_selected
+                    .get(connection_id)
+                    .copied()
+                    .unwrap_or(false);
+                if !user_selected {
+                    let screen_avail = matches!(screen_snap.status, ResourceScreenStatus::Available { .. });
+                    let tmux_avail = matches!(tmux_snap.status, ResourceTmuxStatus::Available { .. });
+                    if screen_avail && tmux_avail {
+                        self.ui.host_virtual_terminal_engine.insert(
+                            connection_id.to_string(),
+                            VirtualTerminalEngine::Screen,
+                        );
+                    } else if screen_avail {
+                        self.ui.host_virtual_terminal_engine.insert(
+                            connection_id.to_string(),
+                            VirtualTerminalEngine::Screen,
+                        );
+                    } else if tmux_avail {
+                        self.ui.host_virtual_terminal_engine.insert(
+                            connection_id.to_string(),
+                            VirtualTerminalEngine::Tmux,
+                        );
                     }
-                    ResourceTmuxStatus::Unavailable => {
-                        self.host_tmux.last_error =
-                            Some(delivery.request.unavailable_fallback.clone());
-                        Some(HostToolsNotice::TmuxUnavailable)
-                    }
-                    ResourceTmuxStatus::Error { .. } => {
-                        snapshot.status = ResourceTmuxStatus::Error {
-                            message: delivery.request.failure_fallback.clone(),
-                        };
-                        self.host_tmux.last_error = Some(delivery.request.failure_fallback.clone());
-                        Some(HostToolsNotice::TmuxSnapshotFailed)
-                    }
-                    ResourceTmuxStatus::Unknown => None,
+                }
+
+                let engine = self.effective_virtual_terminal_engine(connection_id);
+                let notice = match engine {
+                    VirtualTerminalEngine::Screen => match screen_snap.status.clone() {
+                        ResourceScreenStatus::Available { .. } => {
+                            self.host_tmux.last_error = None;
+                            Some(HostToolsNotice::TmuxSnapshotLoaded {
+                                count: visible_screen_session_rows(
+                                    &screen_snap,
+                                    &delivery.request.search_query,
+                                )
+                                .len(),
+                            })
+                        }
+                        ResourceScreenStatus::Unavailable => {
+                            if matches!(tmux_snap.status, ResourceTmuxStatus::Unavailable) {
+                                self.host_tmux.last_error =
+                                    Some(delivery.request.unavailable_fallback.clone());
+                                Some(HostToolsNotice::TmuxUnavailable)
+                            } else {
+                                None
+                            }
+                        }
+                        ResourceScreenStatus::Error { .. } => {
+                            self.host_tmux.last_error =
+                                Some(delivery.request.failure_fallback.clone());
+                            Some(HostToolsNotice::TmuxSnapshotFailed)
+                        }
+                        ResourceScreenStatus::Unknown => None,
+                    },
+                    VirtualTerminalEngine::Tmux => match tmux_snap.status.clone() {
+                        ResourceTmuxStatus::Available { .. } => {
+                            self.host_tmux.last_error = None;
+                            Some(HostToolsNotice::TmuxSnapshotLoaded {
+                                count: visible_tmux_session_rows(
+                                    &tmux_snap,
+                                    &delivery.request.search_query,
+                                )
+                                .len(),
+                            })
+                        }
+                        ResourceTmuxStatus::Unavailable => {
+                            if matches!(screen_snap.status, ResourceScreenStatus::Unavailable) {
+                                self.host_tmux.last_error =
+                                    Some(delivery.request.unavailable_fallback.clone());
+                                Some(HostToolsNotice::TmuxUnavailable)
+                            } else {
+                                None
+                            }
+                        }
+                        ResourceTmuxStatus::Error { .. } => {
+                            self.host_tmux.last_error =
+                                Some(delivery.request.failure_fallback.clone());
+                            Some(HostToolsNotice::TmuxSnapshotFailed)
+                        }
+                        ResourceTmuxStatus::Unknown => None,
+                    },
                 };
-                (snapshot, notice)
+                ((tmux_snap, screen_snap), notice)
             }
             Err(()) => {
                 self.host_tmux.last_error = Some(delivery.request.failure_fallback.clone());
                 (
-                    ResourceTmuxSnapshot {
-                        status: ResourceTmuxStatus::Error {
-                            message: delivery.request.failure_fallback.clone(),
+                    (
+                        ResourceTmuxSnapshot {
+                            status: ResourceTmuxStatus::Error {
+                                message: delivery.request.failure_fallback.clone(),
+                            },
+                            sessions: Vec::new(),
+                            windows: Vec::new(),
+                            panes: Vec::new(),
                         },
-                        sessions: Vec::new(),
-                        windows: Vec::new(),
-                        panes: Vec::new(),
-                    },
+                        ResourceScreenSnapshot {
+                            status: ResourceScreenStatus::Error {
+                                message: delivery.request.failure_fallback.clone(),
+                            },
+                            sessions: Vec::new(),
+                        },
+                    ),
                     Some(HostToolsNotice::TmuxSnapshotFailed),
                 )
             }
         };
-        self.host_tmux.snapshot_connection_id = Some(delivery.request.connection_id);
-        self.host_tmux.snapshot = Some(snapshot);
+        // Store per host: a capture finishing for an inactive host refreshes
+        // only that host's frozen slot and never disturbs the visible one.
+        self.host_tmux
+            .snapshots
+            .insert(delivery.request.connection_id.clone(), tmux_snapshot);
+        self.host_tmux
+            .screen_snapshots
+            .insert(delivery.request.connection_id, screen_snapshot);
         if feedback.should_toast()
             && let Some(notice) = notice
         {
@@ -1944,17 +2784,30 @@ impl HostToolsEntity {
         let Some(os_type) = self.connection_os_type(&connection_id) else {
             return vec![HostToolsNotice::TmuxConnectionMissing];
         };
-        let action = match action {
+        let action_command = match action {
             HostTmuxDestructiveAction::KillSession { target } => {
-                TmuxActionKind::KillSession { target }
+                let action = TmuxActionKind::KillSession { target };
+                build_tmux_action_command(&os_type, action)
+                    .map(|c| zeroize::Zeroizing::new(c.command))
             }
             HostTmuxDestructiveAction::KillWindow { target } => {
-                TmuxActionKind::KillWindow { target }
+                let action = TmuxActionKind::KillWindow { target };
+                build_tmux_action_command(&os_type, action)
+                    .map(|c| zeroize::Zeroizing::new(c.command))
             }
-            HostTmuxDestructiveAction::KillPane { target } => TmuxActionKind::KillPane { target },
+            HostTmuxDestructiveAction::KillPane { target } => {
+                let action = TmuxActionKind::KillPane { target };
+                build_tmux_action_command(&os_type, action)
+                    .map(|c| zeroize::Zeroizing::new(c.command))
+            }
+            HostTmuxDestructiveAction::KillScreenSession { target } => {
+                let action = ScreenActionKind::KillSession { target };
+                build_screen_action_command(&os_type, action)
+                    .map(|c| zeroize::Zeroizing::new(c.command))
+            }
         };
-        let command = match build_tmux_action_command(&os_type, action) {
-            Ok(command) => zeroize::Zeroizing::new(command.command),
+        let command = match action_command {
+            Ok(command) => command,
             Err(_) => return vec![HostToolsNotice::TmuxActionFailed],
         };
         let request = HostTmuxActionRun {
@@ -2105,6 +2958,12 @@ impl HostToolsEntity {
             HostTmuxInputDialogKind::SendPaneCommand { target } => {
                 build_tmux_send_pane_command(&os_type, target, dialog.value.as_str())
             }
+            HostTmuxInputDialogKind::RenameScreenSession { target } => {
+                build_screen_rename_session_command(&os_type, target, dialog.value.as_str())
+            }
+            HostTmuxInputDialogKind::SendScreenCommand { target } => {
+                build_screen_send_command(&os_type, target, dialog.value.as_str())
+            }
         };
         // The original input clears here; the generated shell command has its
         // own zeroizing buffer until the SSH worker finishes.
@@ -2150,6 +3009,9 @@ fn host_tmux_confirm_description_key(action: &HostTmuxDestructiveAction) -> &'st
             "sidebar.host_tmux.confirm.kill_window_desc"
         }
         HostTmuxDestructiveAction::KillPane { .. } => "sidebar.host_tmux.confirm.kill_pane_desc",
+        HostTmuxDestructiveAction::KillScreenSession { .. } => {
+            "sidebar.host_virtual_terminal.confirm.kill_screen_session_desc"
+        }
     }
 }
 
@@ -2158,6 +3020,9 @@ fn host_tmux_confirm_label_key(action: &HostTmuxDestructiveAction) -> &'static s
         HostTmuxDestructiveAction::KillSession { .. } => "sidebar.host_tmux.actions.kill_session",
         HostTmuxDestructiveAction::KillWindow { .. } => "sidebar.host_tmux.actions.kill_window",
         HostTmuxDestructiveAction::KillPane { .. } => "sidebar.host_tmux.actions.kill_pane",
+        HostTmuxDestructiveAction::KillScreenSession { .. } => {
+            "sidebar.host_tmux.actions.kill_session"
+        }
     }
 }
 
@@ -2171,6 +3036,12 @@ fn host_tmux_input_title_key(kind: &HostTmuxInputDialogKind) -> &'static str {
         }
         HostTmuxInputDialogKind::SendPaneCommand { .. } => {
             "sidebar.host_tmux.input.send_command_title"
+        }
+        HostTmuxInputDialogKind::RenameScreenSession { .. } => {
+            "sidebar.host_virtual_terminal.input.rename_screen_session_title"
+        }
+        HostTmuxInputDialogKind::SendScreenCommand { .. } => {
+            "sidebar.host_virtual_terminal.input.send_screen_command_title"
         }
     }
 }
@@ -2186,6 +3057,12 @@ fn host_tmux_input_description_key(kind: &HostTmuxInputDialogKind) -> &'static s
         HostTmuxInputDialogKind::SendPaneCommand { .. } => {
             "sidebar.host_tmux.input.send_command_desc"
         }
+        HostTmuxInputDialogKind::RenameScreenSession { .. } => {
+            "sidebar.host_virtual_terminal.input.rename_screen_session_desc"
+        }
+        HostTmuxInputDialogKind::SendScreenCommand { .. } => {
+            "sidebar.host_virtual_terminal.input.send_screen_command_desc"
+        }
     }
 }
 
@@ -2200,6 +3077,12 @@ fn host_tmux_input_placeholder_key(kind: &HostTmuxInputDialogKind) -> &'static s
         HostTmuxInputDialogKind::SendPaneCommand { .. } => {
             "sidebar.host_tmux.input.send_command_placeholder"
         }
+        HostTmuxInputDialogKind::RenameScreenSession { .. } => {
+            "sidebar.host_virtual_terminal.input.rename_screen_session_placeholder"
+        }
+        HostTmuxInputDialogKind::SendScreenCommand { .. } => {
+            "sidebar.host_virtual_terminal.input.send_screen_command_placeholder"
+        }
     }
 }
 
@@ -2208,7 +3091,37 @@ fn host_tmux_input_submit_key(kind: &HostTmuxInputDialogKind) -> &'static str {
         HostTmuxInputDialogKind::RenameSession { .. } => "sidebar.host_tmux.actions.rename_session",
         HostTmuxInputDialogKind::RenameWindow { .. } => "sidebar.host_tmux.actions.rename_window",
         HostTmuxInputDialogKind::SendPaneCommand { .. } => "sidebar.host_tmux.actions.send_command",
+        HostTmuxInputDialogKind::RenameScreenSession { .. } => {
+            "sidebar.host_tmux.actions.rename_session"
+        }
+        HostTmuxInputDialogKind::SendScreenCommand { .. } => {
+            "sidebar.host_tmux.actions.send_command"
+        }
     }
+}
+
+fn host_vt_engine_chip(active: bool, tokens: &ThemeTokens) -> Div {
+    let theme = tokens.ui;
+    div()
+        .flex_none()
+        .h(px(tokens.metrics.ui_button_sm_height * 0.75))
+        .px(px(tokens.spacing.two))
+        .flex()
+        .items_center()
+        .rounded(px(tokens.radii.md))
+        .cursor_pointer()
+        .bg(if active {
+            rgb(theme.bg_hover)
+        } else {
+            rgba(0x00000000)
+        })
+        .text_size(px(tokens.metrics.ui_text_xs))
+        .text_color(if active {
+            rgb(theme.text)
+        } else {
+            rgb(theme.text_muted)
+        })
+        .hover(move |chip| chip.bg(rgb(theme.bg_hover)))
 }
 
 fn tmux_attached_color(attached: bool, muted_color: u32) -> u32 {

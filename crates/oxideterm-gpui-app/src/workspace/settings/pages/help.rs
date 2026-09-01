@@ -29,8 +29,6 @@ pub(in crate::workspace) const HELP_TECH_BADGES: [(&str, u32); 9] = [
 
 pub(in crate::workspace) const HELP_UPDATE_CHANNEL_SELECT_WIDTH: f32 = 140.0;
 pub(in crate::workspace) const HELP_UPDATE_FOOTER_BORDER_ALPHA: f32 = 0.50;
-pub(in crate::workspace) const HELP_PORTABLE_NOTICE_BG_ALPHA: f32 = 0.70;
-pub(in crate::workspace) const HELP_PORTABLE_NOTICE_BORDER_ALPHA: f32 = 0.60;
 pub(in crate::workspace) const HELP_LEGAL_NOTICE_WIDTH: f32 = 760.0;
 pub(in crate::workspace) const HELP_LEGAL_NOTICE_HEIGHT: f32 = 720.0;
 
@@ -52,7 +50,6 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn help_version_card(&self, cx: &mut Context<Self>) -> AnyElement {
-        let is_portable = self.resolved_help_portable_mode(cx);
         let channel_label = update_channel_label(
             self.settings_store.settings().general.update_channel,
             &self.i18n,
@@ -73,7 +70,7 @@ impl WorkspaceApp {
                 true,
                 cx,
             ))
-            .child(self.help_portable_or_channel_row(is_portable, channel_label, cx));
+            .child(self.help_channel_row(channel_label, cx));
 
         // Tauri HelpAboutSection keeps the version rows and update controls inside one
         // card, with only the update block separated by `border-t pt-4`.
@@ -99,7 +96,7 @@ impl WorkspaceApp {
                     ),
             )
             .child(version_rows)
-            .child(self.help_update_footer(is_portable, cx));
+            .child(self.help_update_footer(cx));
 
         self.settings_card_surface(card, self.tokens.ui.bg_card)
             .into_any_element()
@@ -265,24 +262,11 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
-    pub(in crate::workspace) fn help_portable_or_channel_row(
+    pub(in crate::workspace) fn help_channel_row(
         &self,
-        is_portable: bool,
         channel_label: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if is_portable {
-            return self.setting_row(
-                "settings_view.help.portable_mode",
-                "settings_view.help.portable_mode_hint",
-                self.help_pill_badge(
-                    self.i18n.t("settings_view.help.portable_updates"),
-                    self.tokens.ui.text,
-                ),
-                cx,
-            );
-        }
-
         self.setting_row(
             "settings_view.help.update_channel",
             "settings_view.help.update_channel_hint",
@@ -297,11 +281,7 @@ impl WorkspaceApp {
         )
     }
 
-    pub(in crate::workspace) fn help_update_footer(
-        &self,
-        is_portable: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(in crate::workspace) fn help_update_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .mt(px(16.0))
             .pt(px(16.0))
@@ -312,53 +292,7 @@ impl WorkspaceApp {
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .child(if is_portable {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.0))
-                    .child(self.help_portable_update_notice())
-                    .child(self.help_update_status_area(cx))
-                    .into_any_element()
-            } else {
-                self.help_update_status_area(cx)
-            })
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn help_portable_update_notice(&self) -> AnyElement {
-        div()
-            .rounded(px(self.tokens.radii.md))
-            .border_1()
-            .border_color(rgba(
-                (self.tokens.ui.border << 8) | alpha_byte(HELP_PORTABLE_NOTICE_BORDER_ALPHA),
-            ))
-            .bg(rgba(
-                (self.tokens.ui.bg_elevated << 8) | alpha_byte(HELP_PORTABLE_NOTICE_BG_ALPHA),
-            ))
-            .p(px(16.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(self.tokens.metrics.ui_text_sm))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(rgb(self.tokens.ui.text))
-                    .child(Self::render_lucide_icon(
-                        LucideIcon::Shield,
-                        16.0,
-                        rgb(self.tokens.ui.warning),
-                    ))
-                    .child(self.i18n.t("settings_view.help.portable_updates")),
-            )
-            .child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(self.tokens.metrics.ui_text_sm))
-                    .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(self.i18n.t("settings_view.help.portable_updates_hint")),
-            )
+            .child(self.help_update_status_area(cx))
             .into_any_element()
     }
 
@@ -563,13 +497,6 @@ impl WorkspaceApp {
             ),
             _ => None,
         }
-    }
-
-    pub(in crate::workspace) fn resolved_help_portable_mode(&self, cx: &App) -> bool {
-        self.settings_workspace
-            .read(cx)
-            .portable_mode()
-            .unwrap_or_else(|| oxideterm_portable_runtime::is_portable_mode().unwrap_or(false))
     }
 
     pub(in crate::workspace) fn help_key_value_row(
@@ -990,7 +917,6 @@ impl WorkspaceApp {
         match language {
             Language::En => "English",
             Language::ZhCn => "简体中文",
-            Language::ZhTw => "繁體中文",
         }
         .to_string()
     }

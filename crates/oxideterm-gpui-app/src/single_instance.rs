@@ -185,6 +185,24 @@ pub(crate) fn acquire_or_forward(
     )
 }
 
+/// Windows reports a held lock as raw ERROR_LOCK_VIOLATION (33), which does
+/// not reliably decode to `WouldBlock` across toolchains. Recognize the raw
+/// code as the same "already locked" condition so second launches forward to
+/// the primary instead of failing startup.
+#[cfg(windows)]
+const ERROR_LOCK_VIOLATION: i32 = 33;
+
+fn is_lock_held_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
+        return true;
+    }
+    false
+}
+
 fn acquire_or_forward_with_paths(
     paths: InstancePaths,
     connection_launch_path: Option<PathBuf>,
@@ -215,7 +233,7 @@ fn acquire_or_forward_with_paths(
 
     match lock_file.try_lock_exclusive() {
         Ok(()) => start_primary(lock_file, paths, connection_launch),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(error) if is_lock_held_error(&error) => {
             forward_to_primary(&paths.state_path, connection_launch_path, connection_launch)
                 .with_context(|| {
                     format!(

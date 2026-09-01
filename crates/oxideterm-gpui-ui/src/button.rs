@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, BoxShadow, CursorStyle, Div, Hsla, ParentElement, Rgba, Styled, div, point,
-    prelude::*, px, rgb, rgba,
+    prelude::*, px, rgb, rgba, svg,
 };
 use oxideterm_theme::ThemeTokens;
 
@@ -11,6 +11,8 @@ const BUTTON_FOCUS_RING_WIDTH: f32 = 2.0; // Tauri focus-visible:ring-2
 const BUTTON_ACTIVE_BACKGROUND_ALPHA: u32 = 0x66; // Tauri [data-bg-active] color-mix(... 40%, transparent)
 const BUTTON_ACTIVE_HOVER_ALPHA: u32 = 0x80; // Tauri [data-bg-active] hover color-mix(... 50%, transparent)
 const BUTTON_ACTIVE_BORDER_ALPHA: u32 = 0xbf; // Tauri [data-bg-active] border color-mix(... 75%, transparent)
+const BUTTON_SOLID_HOVER_ALPHA: u32 = 0xe6; // shadcn hover:bg-primary/90 on solid button fills
+const BUTTON_LOADER_ICON_PATH: &str = "lucide/loader-circle.svg";
 const TOOLBAR_BUTTON_ICON_GAP: f32 = 6.0; // Tauri toolbar gap-1.5
 const ICON_BUTTON_DISABLED_OPACITY: f32 = 0.35; // Tauri disabled icon button opacity
 const ICON_BUTTON_IDLE_OPACITY: f32 = 0.5; // Tauri muted toolbar icon opacity
@@ -362,7 +364,7 @@ impl ToolbarButtonOptions {
     ) -> Self {
         // Tauri preview toolbars use small text buttons with explicit h/px/text-xs
         // classes. Keep that browser button shape in the shared primitive so
-        // FileManager/SFTP previews do not reimplement local div-style buttons.
+        // SFTP previews do not reimplement local div-style buttons.
         Self {
             button: ButtonOptions {
                 variant,
@@ -465,7 +467,31 @@ impl IconButtonOptions {
 }
 
 pub fn button_with(tokens: &ThemeTokens, label: String, options: ButtonOptions) -> Div {
-    button_base(tokens, options, false).child(label)
+    let theme = tokens.ui;
+    // Surface variants reuse the toolbar/icon-button hover token; solid fills
+    // keep their own color at reduced alpha because switching to the hover
+    // surface would break the inverted text color. GPUI allows exactly one
+    // hover refinement per element, so `toolbar_button` still attaches its own
+    // and this one must stay on the standard button path only.
+    let hover_background = match options.variant {
+        ButtonVariant::Default => rgba((theme.text << 8) | BUTTON_SOLID_HOVER_ALPHA),
+        ButtonVariant::Destructive => rgba((theme.error << 8) | BUTTON_SOLID_HOVER_ALPHA),
+        ButtonVariant::Secondary | ButtonVariant::Outline | ButtonVariant::Ghost => {
+            rgb(theme.bg_hover)
+        }
+        // Tauri link buttons only recolor the label, which the browser already
+        // owns through the caller's text styling.
+        ButtonVariant::Link => return button_base(tokens, options, false).child(label),
+    };
+    button_base(tokens, options, false)
+        .hover(move |button| {
+            if options.disabled {
+                button
+            } else {
+                button.bg(hover_background)
+            }
+        })
+        .child(label)
 }
 
 pub fn action_chip(
@@ -672,6 +698,15 @@ pub fn toolbar_button(
                 }
             }
         });
+    // The spinner takes over the icon slot while loading, in the same color as
+    // the button label, so the busy state survives icon-less buttons too.
+    let (_, _, variant_text) = button_variant_colors(tokens, button_options, options.has_background);
+    let spinner_color = options.text_color.unwrap_or(variant_text);
+    let icon = if options.loading {
+        Some(button_loading_spinner(tokens, spinner_color))
+    } else {
+        icon
+    };
     let button = match (icon, options.icon_position) {
         (Some(icon), ToolbarButtonIconPosition::Leading) => button
             .child(icon)
@@ -709,6 +744,13 @@ pub fn icon_button(tokens: &ThemeTokens, icon: AnyElement, options: IconButtonOp
             BUTTON_ACTIVE_HOVER_ALPHA,
         )
     });
+    // The spinner replaces the icon while loading and inherits the same
+    // dimming the icon slot had, so the busy state stays visually consistent.
+    let icon = if options.loading {
+        button_loading_spinner(tokens, rgb(tokens.ui.text))
+    } else {
+        icon
+    };
     let button = div()
         .size(px(options.size))
         .flex()
@@ -806,7 +848,6 @@ pub fn split_footer_button(
 }
 
 fn button_base(tokens: &ThemeTokens, options: ButtonOptions, has_background: bool) -> Div {
-    let theme = tokens.ui;
     let metrics = tokens.metrics;
     let (height, padding_x, width) = match options.size {
         ButtonSize::Default => (
@@ -831,31 +872,7 @@ fn button_base(tokens: &ThemeTokens, options: ButtonOptions, has_background: boo
         ),
     };
     let radius = button_radius_px(tokens, options.radius);
-    let (bg, border, text) = match options.variant {
-        ButtonVariant::Default => (rgb(theme.text), rgba(0x00000000), rgb(theme.bg)),
-        ButtonVariant::Secondary => (
-            color_for_background(
-                theme.bg_panel,
-                has_background,
-                BUTTON_ACTIVE_BACKGROUND_ALPHA,
-            ),
-            color_for_background(theme.border, has_background, BUTTON_ACTIVE_BORDER_ALPHA),
-            rgb(theme.text),
-        ),
-        ButtonVariant::Outline => (
-            rgba(0x00000000),
-            color_for_background(theme.border, has_background, BUTTON_ACTIVE_BORDER_ALPHA),
-            rgb(theme.text),
-        ),
-        ButtonVariant::Ghost | ButtonVariant::Link => {
-            (rgba(0x00000000), rgba(0x00000000), rgb(theme.text))
-        }
-        ButtonVariant::Destructive => (
-            rgba((theme.error << 8) | 0xe6),
-            rgba((theme.error << 8) | 0xcc),
-            rgb(0xffffff),
-        ),
-    };
+    let (bg, border, text) = button_variant_colors(tokens, options, has_background);
     let font_size = if options.size == ButtonSize::Sm {
         metrics.ui_text_xs
     } else {
@@ -884,6 +901,54 @@ fn button_base(tokens: &ThemeTokens, options: ButtonOptions, has_background: boo
         } else {
             CursorStyle::PointingHand
         })
+}
+
+fn button_variant_colors(
+    tokens: &ThemeTokens,
+    options: ButtonOptions,
+    has_background: bool,
+) -> (Rgba, Rgba, Rgba) {
+    // Shared between the button shell and the loading spinner so busy buttons
+    // keep their glyph in the same color as the label they replace.
+    let theme = tokens.ui;
+    match options.variant {
+        ButtonVariant::Default => (rgb(theme.text), rgba(0x00000000), rgb(theme.bg)),
+        ButtonVariant::Secondary => (
+            color_for_background(
+                theme.bg_panel,
+                has_background,
+                BUTTON_ACTIVE_BACKGROUND_ALPHA,
+            ),
+            color_for_background(theme.border, has_background, BUTTON_ACTIVE_BORDER_ALPHA),
+            rgb(theme.text),
+        ),
+        ButtonVariant::Outline => (
+            rgba(0x00000000),
+            color_for_background(theme.border, has_background, BUTTON_ACTIVE_BORDER_ALPHA),
+            rgb(theme.text),
+        ),
+        ButtonVariant::Ghost | ButtonVariant::Link => {
+            (rgba(0x00000000), rgba(0x00000000), rgb(theme.text))
+        }
+        ButtonVariant::Destructive => (
+            rgba((theme.error << 8) | 0xe6),
+            rgba((theme.error << 8) | 0xcc),
+            rgb(0xffffff),
+        ),
+    }
+}
+
+fn button_loading_spinner(tokens: &ThemeTokens, color: Rgba) -> AnyElement {
+    // Loading buttons previously only dimmed; the shared spinner replaces the
+    // glyph slot so the busy state is visible while the action runs.
+    crate::motion::animated_spinner(
+        tokens,
+        "button-loading-spinner",
+        svg()
+            .path(BUTTON_LOADER_ICON_PATH)
+            .size(px(tokens.metrics.ui_menu_icon_size))
+            .text_color(color),
+    )
 }
 
 fn button_radius_px(tokens: &ThemeTokens, radius: ButtonRadius) -> f32 {

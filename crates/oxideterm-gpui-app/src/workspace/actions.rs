@@ -1,5 +1,5 @@
 use super::ime::WorkspaceImeTarget;
-use super::tabs::TabCloseConfirmKeyAction;
+use super::tabs::{TabCloseConfirmKeyAction, is_terminal_tab_kind};
 use super::*;
 use oxideterm_gpui_ui::text_input::{
     text_caret, text_input_anchor_probe, text_input_value_segments_with_color,
@@ -12,6 +12,8 @@ const TERMINAL_FONT_SIZE_MIN: i64 = 8;
 const TERMINAL_FONT_SIZE_MAX: i64 = 32;
 const TERMINAL_FONT_SIZE_DEFAULT: i64 = 14;
 const TERMINAL_FONT_SIZE_HUD_DURATION: Duration = Duration::from_millis(1200);
+// Matches the window-state save delay so bursty input never multiplies disk writes.
+const TERMINAL_FONT_SIZE_SAVE_DELAY: Duration = Duration::from_millis(300);
 
 fn adjusted_terminal_font_size(current: i64, delta: i64) -> Option<i64> {
     let next = (current + delta).clamp(TERMINAL_FONT_SIZE_MIN, TERMINAL_FONT_SIZE_MAX);
@@ -48,7 +50,8 @@ fn terminal_tab_capture_keystroke(keystroke: &gpui::Keystroke) -> bool {
     let modifiers = keystroke.modifiers;
     // Plain Tab and Shift+Tab are terminal protocol keys, but some platforms
     // also treat them as focus traversal keys. Capture only that collision;
-    // Ctrl+Tab and other chords stay owned by the normal keybinding registry.
+    // the app registers no local keybindings, so every other chord reaches the
+    // terminal and is forwarded to the remote shell.
     keystroke.key.as_str() == "tab" && !modifiers.platform && !modifiers.control && !modifiers.alt
 }
 
@@ -91,18 +94,6 @@ impl WorkspaceApp {
         })
     }
 
-    pub(in crate::workspace) fn begin_keybinding_reset_all_confirm_exit(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let delay = oxideterm_gpui_ui::motion::duration(
-            &self.tokens,
-            oxideterm_gpui_ui::motion::MotionDuration::Control,
-        );
-        self.settings_workspace.update(cx, |settings, cx| {
-            settings.begin_keybinding_reset_confirm_exit(delay, cx)
-        })
-    }
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.visible = true;
         self.close_terminal_quick_commands_popover(cx);
@@ -174,12 +165,9 @@ impl WorkspaceApp {
     }
 
     pub(super) fn clear_active_terminal_screen(&mut self, cx: &mut Context<Self>) -> bool {
-        let terminal_active = self.active_tab(cx).is_some_and(|tab| {
-            matches!(
-                tab.kind,
-                TabKind::SshTerminal
-            )
-        });
+        let terminal_active = self
+            .active_tab(cx)
+            .is_some_and(|tab| is_terminal_tab_kind(&tab.kind));
         if !terminal_active {
             return false;
         }
@@ -231,16 +219,57 @@ impl WorkspaceApp {
         let Some(next) = adjusted_terminal_font_size(current, delta) else {
             return;
         };
-        self.edit_settings(|settings| settings.terminal.font_size = next, cx);
+        // Each shortcut press applies the new size live, but the persisted
+        // settings write coalesces behind a short debounce so a burst of
+        // presses performs a single save.
+        self.settings_store.settings_mut().terminal.font_size = next;
+        let settings = self.settings_store.settings().clone();
+        self.apply_loaded_settings_to_runtime(&settings, cx);
+        self.pending_terminal_font_size = Some(next);
+        self.terminal_font_size_save_task = Some(cx.spawn(async move |weak, cx| {
+            Timer::after(TERMINAL_FONT_SIZE_SAVE_DELAY).await;
+            let _ = weak.update(cx, |this, cx| {
+                this.terminal_font_size_save_task = None;
+                if this.pending_terminal_font_size.take().is_some() {
+                    this.persist_terminal_font_size(cx);
+                }
+            });
+        }));
+        self.sync_tab_titles(cx);
+        cx.notify();
         self.show_terminal_font_size_hud(next, cx);
     }
 
     pub(super) fn reset_terminal_font_size(&mut self, cx: &mut Context<Self>) {
+        // The reset is a single user action, so it saves synchronously; a
+        // stale debounce would only re-save identical state afterwards.
+        self.pending_terminal_font_size = None;
+        self.terminal_font_size_save_task = None;
         self.edit_settings(
             |settings| settings.terminal.font_size = TERMINAL_FONT_SIZE_DEFAULT,
             cx,
         );
         self.show_terminal_font_size_hud(TERMINAL_FONT_SIZE_DEFAULT, cx);
+    }
+
+    fn persist_terminal_font_size(&mut self, cx: &mut Context<Self>) {
+        if self.settings_store.save().is_ok() {
+            // Keep the external watcher aligned with this Entity-owned write.
+            self.settings_workspace.update(cx, |settings, _cx| {
+                settings.acknowledge_external_store_state()
+            });
+        }
+    }
+
+    pub(super) fn flush_pending_terminal_font_size(&mut self, cx: &mut App) {
+        self.terminal_font_size_save_task = None;
+        if self.pending_terminal_font_size.take().is_some() {
+            if self.settings_store.save().is_ok() {
+                self.settings_workspace.update(cx, |settings, _cx| {
+                    settings.acknowledge_external_store_state()
+                });
+            }
+        }
     }
 
     fn show_terminal_font_size_hud(&mut self, font_size: i64, cx: &mut Context<Self>) {
@@ -253,58 +282,7 @@ impl WorkspaceApp {
         );
     }
 
-    pub(super) fn dispatch_registered_keybinding(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some((definition, combo)) = crate::keybindings::matched_action_for_keystroke(
-            &event.keystroke,
-            &self.settings_store.settings().keybindings.overrides,
-        ) else {
-            return false;
-        };
-
-        let terminal_active = self.active_tab(cx).is_some_and(|tab| {
-            matches!(
-                tab.kind,
-                TabKind::SshTerminal
-            )
-        });
-        if matches!(
-            definition.scope,
-            crate::keybindings::ActionScope::Terminal | crate::keybindings::ActionScope::Split
-        ) && !terminal_active
-        {
-            return false;
-        }
-
-        let terminal_panel_open = self.search.visible || self.context_sidebar_visible();
-        if !crate::keybindings::action_allowed_by_terminal_behavior(
-            definition,
-            &combo,
-            terminal_active,
-            terminal_panel_open,
-        ) {
-            return false;
-        }
-
-        self.dispatch_keybinding_action(definition.id, window, cx)
-    }
-
-    pub(super) fn registered_keybinding_matches(&self, event: &KeyDownEvent) -> bool {
-        // Tauri's capture dispatcher checks built-in actions before plugin
-        // keybindings. Even when terminal gating lets the key pass through, the
-        // plugin layer must not steal a built-in combo.
-        crate::keybindings::matched_action_for_keystroke(
-            &event.keystroke,
-            &self.settings_store.settings().keybindings.overrides,
-        )
-        .is_some()
-    }
-
-    pub(super) fn dispatch_keybinding_action(
+    pub(super) fn dispatch_palette_action(
         &mut self,
         action_id: &str,
         window: &mut Window,
@@ -337,7 +315,6 @@ impl WorkspaceApp {
             "app.fontIncrease" => self.adjust_terminal_font_size(1, cx),
             "app.fontDecrease" => self.adjust_terminal_font_size(-1, cx),
             "app.fontReset" => self.reset_terminal_font_size(cx),
-            "app.showShortcuts" => self.open_shortcuts_modal(cx),
             "terminal.search" => self.open_search(window, cx),
             "terminal.copy" => self.copy(cx),
             "terminal.cut" => {
@@ -355,13 +332,6 @@ impl WorkspaceApp {
             "split.closePane" => self.close_active_pane(window, cx),
             "split.navLeft" => self.focus_adjacent_pane(false, window, cx),
             "split.navRight" => self.focus_adjacent_pane(true, window, cx),
-            "palette.eventLog" => {
-                // Tauri switches the Activity panel to the event log before
-                // opening it, so the palette shortcut must not land on
-                // Notifications when the previous activity view was different.
-                self.notification_center.active_view = WorkspaceActivityView::EventLog;
-                self.open_notification_center_tab(window, cx);
-            }
             "palette.broadcast" => self.toggle_terminal_broadcast(cx),
             _ => return false,
         }
@@ -541,7 +511,15 @@ impl WorkspaceApp {
                     | ContextSidebarTool::Filesystems
                     | ContextSidebarTool::Packages
             );
-        if connection_monitor_keys_visible && self.handle_connection_monitor_select_key(event, cx) {
+        let connection_selector_owns_keys = {
+            let host_tools = self.host_tools.read(cx);
+            host_tools.ui.focused_input.is_none()
+                && (host_tools.selector_open() || host_tools.selector_focus_origin().is_some())
+        };
+        if connection_monitor_keys_visible
+            && connection_selector_owns_keys
+            && self.handle_connection_monitor_select_key(event, cx)
+        {
             return;
         }
 
@@ -626,7 +604,7 @@ impl WorkspaceApp {
         }
 
         if self.active_session_manager_input(cx).is_some() {
-            let _ = self.handle_session_manager_key(event, cx);
+            let _ = self.handle_oxide_dialog_footer_key(event, cx);
             return;
         }
 
@@ -645,23 +623,6 @@ impl WorkspaceApp {
             && self.launcher.read(cx).focused_input().is_some()
         {
             let _ = self.handle_launcher_key(event, cx);
-            return;
-        }
-
-        let close_panel_shortcut = crate::keybindings::keystroke_matches_action(
-            &event.keystroke,
-            "terminal.closePanel",
-            &self.settings_store.settings().keybindings.overrides,
-        );
-
-        if close_panel_shortcut && self.search.visible {
-            self.close_search(window, cx);
-            return;
-        }
-
-        if close_panel_shortcut && self.context_sidebar_visible() {
-            self.collapse_context_sidebar(cx);
-            self.focus_active_pane(window, cx);
             return;
         }
 
@@ -716,12 +677,9 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let terminal_active = self.active_tab(cx).is_some_and(|tab| {
-            matches!(
-                tab.kind,
-                TabKind::SshTerminal
-            )
-        });
+        let terminal_active = self
+            .active_tab(cx)
+            .is_some_and(|tab| is_terminal_tab_kind(&tab.kind));
         if !terminal_active {
             return false;
         }
@@ -743,20 +701,12 @@ impl WorkspaceApp {
         self.standard_confirm_focused_action
     }
 
-    pub(super) fn standard_confirm_focus_owner(&self) -> Option<ConfirmDialogAction> {
-        self.standard_confirm_focused_action
-    }
-
     pub(super) fn reset_standard_confirm_focus(&mut self) {
         // Tauri useConfirm does not paint a default footer button highlight.
         // Keyboard activation still falls back to Cancel inside
         // handle_standard_confirm_key; visible focus appears only after an
         // explicit Tab/arrow navigation writes an action owner.
         self.standard_confirm_focused_action = None;
-    }
-
-    pub(super) fn set_standard_confirm_focus(&mut self, action: ConfirmDialogAction) {
-        self.standard_confirm_focused_action = Some(action);
     }
 
     pub(super) fn clear_standard_confirm_focus(&mut self) {
@@ -802,7 +752,7 @@ impl WorkspaceApp {
     pub(super) fn handle_settings_confirm_key(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if self
@@ -815,49 +765,8 @@ impl WorkspaceApp {
             }
             // The import dialog owns keyboard input while it is mounted.
             true
-        } else if self.handle_keybinding_reset_confirm_key(event, window, cx) {
-            true
         } else {
             self.handle_settings_data_directory_confirm_key(event, cx)
-        }
-    }
-
-    pub(super) fn handle_keybinding_reset_confirm_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !self
-            .settings_workspace
-            .read(cx)
-            .keybinding_reset_confirm_snapshot()
-            .is_some_and(|snapshot| snapshot.phase == oxideterm_gpui_ui::motion::ExitPhase::Visible)
-        {
-            return false;
-        }
-        let key_action = self.settings_workspace.update(cx, |settings, cx| {
-            settings.handle_keybinding_reset_confirm_key(
-                event.keystroke.key.as_str(),
-                event.keystroke.modifiers.shift,
-                event.keystroke.modifiers.platform || event.keystroke.modifiers.control,
-                cx,
-            )
-        });
-        match key_action {
-            Some(settings::KeybindingResetConfirmKeyAction::Cancel) => {
-                self.begin_keybinding_reset_all_confirm_exit(cx);
-                cx.notify();
-                true
-            }
-            Some(settings::KeybindingResetConfirmKeyAction::Confirm) => {
-                if self.begin_keybinding_reset_all_confirm_exit(cx) {
-                    self.reset_all_keybindings(window, cx);
-                }
-                true
-            }
-            Some(settings::KeybindingResetConfirmKeyAction::Handled) => true,
-            None => false,
         }
     }
 
@@ -988,234 +897,6 @@ impl WorkspaceApp {
         }
     }
 
-    pub(super) fn handle_keybinding_recording_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let overrides = &self.settings_store.settings().keybindings.overrides;
-        let action = self.settings_workspace.update(cx, |settings, cx| {
-            settings.handle_keybinding_recording_key(event, overrides, cx)
-        });
-        if action == Some(settings::KeybindingRecordingKeyAction::Confirm) {
-            self.confirm_keybinding_recording(window, cx);
-        }
-    }
-
-    pub(super) fn activate_keybinding_recording_footer_action(
-        &mut self,
-        action: settings::KeybindingRecordingFooterAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let should_confirm = self.settings_workspace.update(cx, |settings, cx| {
-            settings.activate_keybinding_recording_footer(action, cx)
-        });
-        if should_confirm {
-            self.confirm_keybinding_recording(window, cx);
-        }
-    }
-
-    pub(super) fn confirm_keybinding_recording(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(commit) = self.settings_workspace.update(cx, |settings, cx| {
-            settings.take_keybinding_recording_commit(cx)
-        }) else {
-            return;
-        };
-        let Some(definition) = crate::keybindings::action_definition(&commit.action_id) else {
-            return;
-        };
-
-        let side = crate::keybindings::KeybindingSide::current();
-        let previous = crate::keybindings::effective_combo(
-            definition,
-            &self.settings_store.settings().keybindings.overrides,
-            side,
-        );
-        let runtime_bindings = crate::keybindings::runtime_rebind_key_bindings(
-            &commit.action_id,
-            previous.as_ref(),
-            Some(&commit.combo),
-        );
-
-        self.edit_settings(
-            move |settings| {
-                crate::keybindings::set_override(
-                    &mut settings.keybindings.overrides,
-                    &commit.action_id,
-                    side,
-                    commit.combo,
-                );
-            },
-            cx,
-        );
-        self.apply_runtime_key_bindings(runtime_bindings, window, cx);
-    }
-
-    pub(super) fn cancel_keybinding_recording(&mut self, cx: &mut Context<Self>) {
-        self.settings_workspace.update(cx, |settings, cx| {
-            settings.stop_keybinding_recording(cx);
-        });
-    }
-
-    pub(super) fn reset_keybinding(
-        &mut self,
-        action_id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(definition) = crate::keybindings::action_definition(action_id) else {
-            return;
-        };
-        let side = crate::keybindings::KeybindingSide::current();
-        let previous = crate::keybindings::effective_combo(
-            definition,
-            &self.settings_store.settings().keybindings.overrides,
-            side,
-        );
-        let next = definition.default_combo(side);
-        let runtime_bindings = crate::keybindings::runtime_rebind_key_bindings(
-            action_id,
-            previous.as_ref(),
-            Some(next),
-        );
-        self.edit_settings(
-            |settings| {
-                crate::keybindings::reset_override(
-                    &mut settings.keybindings.overrides,
-                    action_id,
-                    side,
-                );
-            },
-            cx,
-        );
-        self.cancel_keybinding_recording(cx);
-        self.apply_runtime_key_bindings(runtime_bindings, window, cx);
-    }
-
-    pub(super) fn unbind_keybinding(
-        &mut self,
-        action_id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(definition) = crate::keybindings::action_definition(action_id) else {
-            return;
-        };
-        let side = crate::keybindings::KeybindingSide::current();
-        let previous = crate::keybindings::effective_combo(
-            definition,
-            &self.settings_store.settings().keybindings.overrides,
-            side,
-        );
-        let runtime_bindings =
-            crate::keybindings::runtime_rebind_key_bindings(action_id, previous.as_ref(), None);
-        self.edit_settings(
-            |settings| {
-                crate::keybindings::set_unbound_override(
-                    &mut settings.keybindings.overrides,
-                    action_id,
-                    side,
-                );
-            },
-            cx,
-        );
-        self.cancel_keybinding_recording(cx);
-        self.apply_runtime_key_bindings(runtime_bindings, window, cx);
-    }
-
-    pub(super) fn reset_all_keybindings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let side = crate::keybindings::KeybindingSide::current();
-        let runtime_bindings = {
-            let overrides = &self.settings_store.settings().keybindings.overrides;
-            crate::keybindings::ACTION_DEFINITIONS
-                .iter()
-                .flat_map(|definition| {
-                    let previous = crate::keybindings::effective_combo(definition, overrides, side);
-                    crate::keybindings::runtime_rebind_key_bindings(
-                        definition.id,
-                        previous.as_ref(),
-                        Some(definition.default_combo(side)),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        self.edit_settings(|settings| settings.keybindings.overrides.clear(), cx);
-        self.cancel_keybinding_recording(cx);
-        self.apply_runtime_key_bindings(runtime_bindings, window, cx);
-    }
-
-    pub(super) fn export_keybindings(&mut self, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some(SharedString::from(
-                self.i18n.t("settings_view.keybindings.export"),
-            )),
-        });
-        let selection = async move {
-            match receiver.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            }
-        };
-        let overrides = self.settings_store.settings().keybindings.overrides.clone();
-        let runtime = self.forwarding_runtime.handle().clone();
-        self.settings_workspace.update(cx, |settings, cx| {
-            settings.start_keybinding_export(selection, overrides, runtime, cx);
-        });
-    }
-
-    pub(super) fn import_keybindings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some(SharedString::from(
-                self.i18n.t("settings_view.keybindings.import"),
-            )),
-        });
-        let selection = async move {
-            match receiver.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            }
-        };
-        let runtime = self.forwarding_runtime.handle().clone();
-        let target_window = window.window_handle();
-        self.settings_workspace.update(cx, |settings, cx| {
-            settings.start_keybinding_import(selection, runtime, target_window, cx);
-        });
-    }
-
-    fn apply_runtime_key_bindings(
-        &self,
-        bindings: Vec<gpui::KeyBinding>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_runtime_key_bindings_to_window_handle(bindings, window.window_handle(), cx);
-    }
-
-    pub(in crate::workspace) fn apply_runtime_key_bindings_to_window_handle(
-        &self,
-        bindings: Vec<gpui::KeyBinding>,
-        window_handle: AnyWindowHandle,
-        cx: &mut Context<Self>,
-    ) {
-        if bindings.is_empty() {
-            return;
-        }
-        let _ = cx.update_window(window_handle, move |_root, _window, app| {
-            app.bind_keys(bindings);
-        });
-    }
 
     pub(super) fn handle_terminal_cast_search_key(
         &mut self,

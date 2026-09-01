@@ -47,13 +47,21 @@ pub(crate) fn text_run_for_cell(
     }
 }
 
-pub(crate) fn marked_text_run(text: &str, metrics: &TerminalMetrics) -> TextRun {
-    let color = rgb(0xe6e8eb).into();
+pub(crate) fn marked_text_run(
+    text: &str,
+    theme: &TerminalUiTheme,
+    metrics: &TerminalMetrics,
+) -> TextRun {
+    // IME preedit must stay readable over any cell background on both dark and
+    // light themes, so it follows the same accent token the editor uses for
+    // marked text instead of a fixed bright color.
+    let accent = theme.tokens.ui.accent;
+    let color = rgb(accent).into();
     TextRun {
         len: text.len(),
         font: metrics.font.clone(),
         color,
-        background_color: Some(rgba(0x528bff33).into()),
+        background_color: Some(rgba((accent << 8) | 0x33).into()),
         underline: Some(UnderlineStyle {
             thickness: px(1.0),
             color: Some(color),

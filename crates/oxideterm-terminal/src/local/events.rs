@@ -81,7 +81,6 @@ impl EventListener for LocalEventListener {
 pub enum TerminalEvent {
     Output(Vec<u8>),
     TriggerMatched(oxideterm_terminal_triggers::TriggerMatched),
-    PrivilegePrompt(TerminalPrivilegePromptEvent),
     TitleChanged(String),
     TitleReset,
     Bell,

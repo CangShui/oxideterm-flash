@@ -16,7 +16,65 @@ const TERMINAL_COMMAND_SPECS_EDITOR_MIN_HEIGHT: f32 = 520.0;
 const TERMINAL_COMMAND_SPECS_ACTION_ICON_SIZE: f32 = 12.0;
 
 impl WorkspaceApp {
-    pub(in crate::workspace) fn settings_general_section(
+        /// Opens a native file picker and applies the chosen executable to the
+    /// external-editor setting, so operators do not have to type paths by hand.
+    pub(in crate::workspace) fn browse_external_editor_path(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(SharedString::from(
+                self.i18n.t("settings_view.general.external_editor_prompt"),
+            )),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.first().and_then(|path| path.to_str()) else {
+                return;
+            };
+            let picked = path.to_string();
+            let _ = this.update(cx, |this, cx| {
+                this.settings_input_draft = picked;
+                this.apply_settings_input_draft(SettingsInput::ExternalEditorPath, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn render_external_editor_browse_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.tokens.ui;
+        div()
+            .id("settings-external-editor-browse")
+            .flex_none()
+            .w(px(self.tokens.metrics.ui_button_sm_height))
+            .h(px(self.tokens.metrics.ui_button_sm_height))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(self.tokens.radii.md))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.bg_hover))
+            .cursor_pointer()
+            .hover(move |button| button.bg(rgb(theme.bg_panel)))
+            .child(Self::render_lucide_icon(
+                LucideIcon::FolderOpen,
+                14.0,
+                rgb(theme.text),
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.browse_external_editor_path(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+    }
+
+pub(in crate::workspace) fn settings_general_section(
         &self,
         section_index: usize,
         cx: &mut Context<Self>,
@@ -32,13 +90,19 @@ impl WorkspaceApp {
                     self.setting_row(
                         "settings_view.general.external_editor",
                         "settings_view.general.external_editor_hint",
-                        self.settings_text_input_control(
-                            SettingsInput::ExternalEditorPath,
-                            settings.general.external_editor.clone(),
-                            "notepad++.exe".to_string(),
-                            360.0,
-                            cx,
-                        ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(self.settings_text_input_control(
+                                SettingsInput::ExternalEditorPath,
+                                settings.general.external_editor.clone(),
+                                "notepad++.exe".to_string(),
+                                300.0,
+                                cx,
+                            ))
+                            .child(self.render_external_editor_browse_button(cx))
+                            .into_any_element(),
                         cx,
                     ),
                 ],
@@ -129,6 +193,384 @@ impl WorkspaceApp {
             }
             _ => div().into_any_element(),
         }
+    }
+
+    /// Self-hosted cloud sync: endpoint, room, transport mode, and manual
+    /// push/pull actions. Engine lifecycle is handled by autostart_cloud_sync.
+    pub(in crate::workspace) fn settings_cloud_sync_section(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let settings = self.settings_store.settings();
+        let status = self
+            .cloud_sync_status
+            .clone()
+            .unwrap_or_else(|| self.i18n.t("settings_view.general.cloudsync.status_idle"));
+        let mode_label = oxideterm_gpui_settings_view::cloud_sync_mode_label(
+            settings.cloud_sync.mode,
+            &self.i18n,
+        );
+        self.plain_settings_card(vec![
+            self.card_title("settings_view.general.cloudsync.title"),
+            div()
+                .text_size(px(self.tokens.metrics.ui_text_xs))
+                .text_color(rgb(self.tokens.ui.text_muted))
+                .child(self.i18n.t("settings_view.general.cloudsync.description"))
+                .into_any_element(),
+            self.setting_row(
+                "settings_view.general.cloudsync.enabled",
+                "settings_view.general.cloudsync.enabled_hint",
+                checkbox(&self.tokens, String::new(), settings.cloud_sync.enabled)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.edit_settings(
+                                |settings| settings.cloud_sync.enabled = !settings.cloud_sync.enabled,
+                                cx,
+                            );
+                        }),
+                    )
+                    .into_any_element(),
+                cx,
+            ),
+            self.card_separator(),
+            self.setting_row(
+                "settings_view.general.cloudsync.server",
+                "settings_view.general.cloudsync.server_hint",
+                self.settings_text_input_control(
+                    SettingsInput::CloudSyncServerUrl,
+                    settings.cloud_sync.server_url.clone(),
+                    crate::workspace::cloud_sync::DEFAULT_CLOUD_SYNC_SERVER.to_string(),
+                    320.0,
+                    cx,
+                ),
+                cx,
+            ),
+            self.card_separator(),
+            self.setting_row(
+                "settings_view.general.cloudsync.room",
+                "settings_view.general.cloudsync.room_hint",
+                self.settings_text_input_control(
+                    SettingsInput::CloudSyncRoom,
+                    settings.cloud_sync.room.clone(),
+                    String::new(),
+                    240.0,
+                    cx,
+                ),
+                cx,
+            ),
+            self.card_separator(),
+            self.setting_row(
+                "settings_view.general.cloudsync.sync_passwords",
+                "settings_view.general.cloudsync.sync_passwords_hint",
+                checkbox(&self.tokens, String::new(), settings.cloud_sync.sync_passwords)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.edit_settings(
+                                |settings| {
+                                    settings.cloud_sync.sync_passwords =
+                                        !settings.cloud_sync.sync_passwords
+                                },
+                                cx,
+                            );
+                        }),
+                    )
+                    .into_any_element(),
+                cx,
+            ),
+            self.card_separator(),
+            self.setting_row(
+                "settings_view.general.cloudsync.mode",
+                "settings_view.general.cloudsync.mode_hint",
+                self.settings_select_control(
+                    SettingsSelect::CloudSyncMode,
+                    mode_label,
+                    false,
+                    Some(160.0),
+                    cx,
+                ),
+                cx,
+            ),
+            self.card_separator(),
+            div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(12.0))
+                .child(self.workspace_toolbar_action_button(
+                    self.i18n.t("settings_view.general.cloudsync.push"),
+                    None,
+                    ToolbarButtonOptions {
+                        button: ButtonOptions {
+                            variant: ButtonVariant::Default,
+                            size: ButtonSize::Default,
+                            radius: ButtonRadius::Md,
+                            disabled: self.cloud_sync.is_none(),
+                        },
+                        ..ToolbarButtonOptions::default()
+                    },
+                    cx.listener(|this, _event, _window, cx| {
+                        this.cloud_sync_broadcast_snapshot(cx);
+                        cx.stop_propagation();
+                    }),
+                ))
+                .child(self.workspace_toolbar_action_button(
+                    self.i18n.t("settings_view.general.cloudsync.pull"),
+                    None,
+                    ToolbarButtonOptions {
+                        button: ButtonOptions {
+                            variant: ButtonVariant::Default,
+                            size: ButtonSize::Default,
+                            radius: ButtonRadius::Md,
+                            disabled: self.cloud_sync.is_none(),
+                        },
+                        ..ToolbarButtonOptions::default()
+                    },
+                    cx.listener(|this, _event, _window, cx| {
+                        this.cloud_sync_request_snapshot();
+                        cx.stop_propagation();
+                    }),
+                ))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .flex_1()
+                        .text_size(px(self.tokens.metrics.ui_text_xs))
+                        .text_color(rgb(self.tokens.ui.text_muted))
+                        .truncate()
+                        .child(status),
+                )
+                .into_any_element(),
+        ])
+    }
+
+    /// Session import/export: import from third-party clients (SecureCRT,
+    /// Xshell, Termius, MobaXterm, WindTerm, Electerm, FinalShell) or export
+    /// saved sessions to the same client formats. Passwords are never included
+    /// in either direction.
+    pub(in crate::workspace) fn settings_session_io_section(
+        &mut self,
+        section_index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match section_index {
+            0 => {
+                // Full importer surface moved from the Connections page: source
+                // picker, path selection, preview, and apply stay one surface.
+                let mut importer = self
+                    .settings_workspace
+                    .read(cx)
+                    .connection_import_snapshot();
+                let mut rows = vec![self.connection_import_input_row(
+                    importer.source,
+                    &importer.paths,
+                    cx,
+                )];
+
+                if let Some(preview) = importer.preview.take() {
+                    rows.push(self.connection_import_preview_toolbar(
+                        &preview,
+                        &importer.selected_draft_ids,
+                        importer.duplicate_strategy,
+                        cx,
+                    ));
+                    rows.push(self.connection_import_preview_list(
+                        preview,
+                        &importer.selected_draft_ids,
+                        cx,
+                    ));
+                }
+                if let Some(status) = importer.status {
+                    rows.push(self.connection_status_row(status.to_string()));
+                }
+
+                self.connection_section(
+                    "settings_view.connections.importers.title",
+                    "settings_view.connections.importers.description",
+                    rows,
+                )
+            }
+            1 => {
+                // Export card: pick a client format then write sessions.
+                let connections = self.connection_store.connections();
+                let count = connections.len();
+                let format = self.session_export_format(cx);
+                let format_label = session_export_format_label(format, &self.i18n);
+                self.plain_settings_card(vec![
+                    self.card_title("settings_view.sessionio.export_title"),
+                    div()
+                        .text_size(px(self.tokens.metrics.ui_text_xs))
+                        .text_color(rgb(self.tokens.ui.text_muted))
+                        .child(self.i18n.t("settings_view.sessionio.export_desc"))
+                        .into_any_element(),
+                    self.setting_row(
+                        "settings_view.sessionio.export_format",
+                        "settings_view.sessionio.export_format_hint",
+                        self.settings_select_control(
+                            SettingsSelect::SessionExportFormat,
+                            format_label,
+                            false,
+                            Some(220.0),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    self.card_separator(),
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .child(self.workspace_toolbar_action_button(
+                            format!(
+                                "{} ({count})",
+                                self.i18n.t("settings_view.sessionio.export_button")
+                            ),
+                            None,
+                            ToolbarButtonOptions {
+                                button: ButtonOptions {
+                                    variant: ButtonVariant::Default,
+                                    size: ButtonSize::Default,
+                                    radius: ButtonRadius::Md,
+                                    disabled: count == 0,
+                                },
+                                ..ToolbarButtonOptions::default()
+                            },
+                            cx.listener(|this, _event, _window, cx| {
+                                this.export_sessions_to_file(cx);
+                                cx.stop_propagation();
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(self.tokens.metrics.ui_text_xs))
+                                .text_color(rgb(self.tokens.ui.text_muted))
+                                .child(self.i18n.t("settings_view.sessionio.no_passwords")),
+                        )
+                        .into_any_element(),
+                ])
+            }
+            _ => div().into_any_element(),
+        }
+    }
+
+    fn export_sessions_to_file(&mut self, cx: &mut Context<Self>) {
+        use oxideterm_connections::{
+            export_sessions, export_sessions_to_finalshell_directory, suggested_file_name,
+            SessionExportContent,
+        };
+        let format = self.session_export_format(cx);
+        let connections = self.connection_store.connections().to_vec();
+        let directory = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join("Downloads"))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        if format.is_directory() {
+            // FinalShell import expects a folder tree; pick the destination
+            // directory instead of a file path.
+            let prompt_key = "settings_view.sessionio.export_choose_directory";
+            let receiver = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some(SharedString::from(self.i18n.t(prompt_key))),
+            });
+            let settings_path = self.settings_store.path().to_path_buf();
+            cx.spawn(async move |workspace, cx| {
+                if let Ok(Ok(Some(paths))) = receiver.await {
+                    let Some(target) = paths.into_iter().next() else {
+                        return;
+                    };
+                    let result =
+                        export_sessions_to_finalshell_directory(&connections, &target)
+                            .map(|count| format!("{} ({count} files)", target.display()));
+                    workspace.update(cx, |workspace, cx| {
+                        match result {
+                            Ok(description) => {
+                                workspace.push_workspace_notice(TerminalNotice {
+                                    title: workspace.i18n.t("settings_view.sessionio.export_done"),
+                                    description: Some(description),
+                                    status_text: None,
+                                    progress: None,
+                                    variant: TerminalNoticeVariant::Success,
+                                }, cx);
+                            }
+                            Err(error) => {
+                                workspace.push_workspace_notice(TerminalNotice {
+                                    title: workspace
+                                        .i18n
+                                        .t("settings_view.sessionio.export_failed"),
+                                    description: Some(format!("{error:#}")),
+                                    status_text: None,
+                                    progress: None,
+                                    variant: TerminalNoticeVariant::Error,
+                                }, cx);
+                            }
+                        }
+                        let _ = settings_path;
+                    });
+                }
+            })
+            .detach();
+            return;
+        }
+
+        // File-based formats render once and reuse the same write flow.
+        let content = match export_sessions(&connections, format) {
+            Ok(content) => content,
+            Err(error) => {
+                self.push_workspace_notice(TerminalNotice {
+                    title: self.i18n.t("settings_view.sessionio.export_failed"),
+                    description: Some(format!("{error:#}")),
+                    status_text: None,
+                    progress: None,
+                    variant: TerminalNoticeVariant::Error,
+                }, cx);
+                return;
+            }
+        };
+        let suggested = suggested_file_name(format);
+        let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
+        let settings_path = self.settings_store.path().to_path_buf();
+        cx.spawn(async move |workspace, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                let result = match content {
+                    SessionExportContent::Text(text) => {
+                        std::fs::write(&path, text.as_bytes()).map_err(|error| error.to_string())
+                    }
+                    SessionExportContent::Binary(bytes) => {
+                        std::fs::write(&path, bytes).map_err(|error| error.to_string())
+                    }
+                };
+                workspace.update(cx, |workspace, cx| {
+                    match result {
+                        Ok(()) => {
+                            workspace.push_workspace_notice(TerminalNotice {
+                                title: workspace.i18n.t("settings_view.sessionio.export_done"),
+                                description: Some(path.display().to_string()),
+                                status_text: None,
+                                progress: None,
+                                variant: TerminalNoticeVariant::Success,
+                            }, cx);
+                        }
+                        Err(error) => {
+                            workspace.push_workspace_notice(TerminalNotice {
+                                title: workspace.i18n.t("settings_view.sessionio.export_failed"),
+                                description: Some(error),
+                                status_text: None,
+                                progress: None,
+                                variant: TerminalNoticeVariant::Error,
+                            }, cx);
+                        }
+                    }
+                    let _ = settings_path;
+                });
+            }
+        })
+        .detach();
     }
 
     #[cfg(target_os = "macos")]
@@ -434,7 +876,6 @@ impl WorkspaceApp {
                 default_path: path.clone(),
                 path,
                 is_custom: false,
-                is_portable: false,
                 can_change: false,
             }
         })
@@ -839,30 +1280,15 @@ impl WorkspaceApp {
             (TerminalSettingsPage::Awareness, 0) => self.settings_card(
                 "settings_view.terminal.awareness_title",
                 "settings_view.terminal.awareness_description",
-                vec![
-                    self.bool_row(
-                        "settings_view.terminal.awareness_enabled",
-                        "settings_view.terminal.awareness_enabled_hint",
-                        settings.terminal.command_bar.current_directory_awareness,
-                        set_command_bar_current_directory_awareness,
-                        cx,
-                    ),
-                    self.card_separator(),
-                    self.select_setting_row(
-                        "settings_view.connections.shell_integration.mode_label",
-                        "settings_view.connections.shell_integration.mode_hint",
-                        SettingsSelect::RemoteShellIntegrationMode,
-                        remote_shell_integration_mode_label(
-                            settings.terminal.remote_shell_integration_mode,
-                            &self.i18n,
-                        ),
-                        self.tokens.metrics.settings_select_width,
-                        cx,
-                    ),
-                ],
+                vec![self.bool_row(
+                    "settings_view.terminal.awareness_enabled",
+                    "settings_view.terminal.awareness_enabled_hint",
+                    settings.terminal.command_bar.current_directory_awareness,
+                    set_command_bar_current_directory_awareness,
+                    cx,
+                )],
             ),
-            (TerminalSettingsPage::Awareness, 1) => self.remote_shell_integration_card(cx),
-            (TerminalSettingsPage::Awareness, 2) => self.terminal_triggers_settings_card(cx),
+            (TerminalSettingsPage::Awareness, 1) => self.terminal_triggers_settings_card(cx),
             (TerminalSettingsPage::Transfer, 0) => self.settings_card(
                 "settings_view.terminal.in_band_transfer.title",
                 "settings_view.terminal.in_band_transfer.runtime_note",

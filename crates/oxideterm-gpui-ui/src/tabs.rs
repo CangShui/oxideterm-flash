@@ -1,4 +1,4 @@
-use gpui::{Div, ParentElement, Styled, div, px, rgb};
+use gpui::{Div, InteractiveElement, ParentElement, Styled, div, px, rgb};
 use oxideterm_theme::ThemeTokens;
 
 pub fn segmented_tabs(tokens: &ThemeTokens) -> Div {
@@ -39,6 +39,9 @@ pub fn tabs_trigger(tokens: &ThemeTokens, label: String, selected: bool) -> Div 
         } else {
             rgb(theme.bg_panel)
         })
+        // Tauri TabsTrigger keeps hover:bg-theme-bg-hover; the selected trigger
+        // holds its raised surface so the active state stays readable.
+        .hover(move |trigger| if selected { trigger } else { trigger.bg(rgb(theme.bg_hover)) })
         .text_size(px(tokens.metrics.ui_text_sm))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(if selected {

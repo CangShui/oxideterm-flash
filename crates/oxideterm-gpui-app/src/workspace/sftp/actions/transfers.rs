@@ -186,6 +186,7 @@ impl SftpWorkspaceEntity {
                 size: progress.total_bytes.max(1),
                 transferred: progress.transferred_bytes,
                 speed: 0,
+                smoothed_speed: 0,
                 state: SftpTransferState::Pending,
                 error: None,
             });
@@ -275,6 +276,9 @@ impl SftpWorkspaceEntity {
             }
             item.transferred = snapshot.transferred;
             item.speed = snapshot.backend_speed.unwrap_or(item.speed);
+            // A restored backend rate seeds the smoothed average so a resumed
+            // row does not display an empty rate until the next sample.
+            item.smoothed_speed = item.speed;
             item.state = state;
             item.error = snapshot.error;
             return;
@@ -295,6 +299,7 @@ impl SftpWorkspaceEntity {
             size,
             transferred: snapshot.transferred,
             speed: snapshot.backend_speed.unwrap_or_default(),
+            smoothed_speed: 0,
             state,
             error: snapshot.error,
         });

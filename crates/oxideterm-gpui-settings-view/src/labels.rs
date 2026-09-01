@@ -3,7 +3,7 @@ use oxideterm_i18n::I18n;
 use oxideterm_render_policy::RenderProfile;
 use oxideterm_settings::{
     AiThinkingStyle, AnimationSpeed, ConflictAction, FileTransferProtocolPreference, FontFamily,
-    FrostedGlassMode, IdeAgentMode, RemoteShellIntegrationMode, UiDensity,
+    FrostedGlassMode, CloudSyncMode, UiDensity,
 };
 
 pub fn file_transfer_protocol_label(
@@ -26,28 +26,11 @@ pub fn conflict_label(action: ConflictAction, i18n: &I18n) -> String {
     }
 }
 
-pub fn remote_shell_integration_mode_label(
-    mode: RemoteShellIntegrationMode,
-    i18n: &I18n,
-) -> String {
+pub fn cloud_sync_mode_label(mode: CloudSyncMode, i18n: &I18n) -> String {
     match mode {
-        RemoteShellIntegrationMode::Ask => {
-            i18n.t("settings_view.connections.shell_integration.mode_ask")
-        }
-        RemoteShellIntegrationMode::Enabled => {
-            i18n.t("settings_view.connections.shell_integration.mode_enabled")
-        }
-        RemoteShellIntegrationMode::Disabled => {
-            i18n.t("settings_view.connections.shell_integration.mode_disabled")
-        }
-    }
-}
-
-pub fn ide_agent_label(mode: IdeAgentMode, i18n: &I18n) -> String {
-    match mode {
-        IdeAgentMode::Ask => i18n.t("settings_view.ide.agent_mode_ask"),
-        IdeAgentMode::Enabled => i18n.t("settings_view.ide.agent_mode_enabled"),
-        IdeAgentMode::Disabled => i18n.t("settings_view.ide.agent_mode_disabled"),
+        CloudSyncMode::Auto => i18n.t("settings_view.general.cloudsync.mode_auto"),
+        CloudSyncMode::Relay => i18n.t("settings_view.general.cloudsync.mode_relay"),
+        CloudSyncMode::PeerToPeer => i18n.t("settings_view.general.cloudsync.mode_p2p"),
     }
 }
 

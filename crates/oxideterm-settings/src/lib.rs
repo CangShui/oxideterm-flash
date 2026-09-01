@@ -18,7 +18,6 @@ pub use oxide_snapshot::{
     ALL_OXIDE_SETTINGS_SECTIONS, DEFAULT_OXIDE_SETTINGS_SECTIONS, OXIDE_SETTINGS_FORMAT,
     OXIDE_SETTINGS_VERSION, export_oxide_settings_snapshot_json, merge_oxide_settings_snapshot,
 };
-pub use oxideterm_portable_runtime as portable_runtime;
 pub use store::{
     DataDirectoryCheck, DataDirectoryInfo, SETTINGS_FILENAME, SettingsLoadResult,
     SettingsSaveResult, SettingsStore, SettingsStoreCheckpoint, check_data_directory,

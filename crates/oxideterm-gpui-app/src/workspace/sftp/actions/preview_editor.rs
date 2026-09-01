@@ -2,13 +2,33 @@ use super::external::open_path_in_external_app;
 use super::*;
 
 impl WorkspaceApp {
+    pub(in crate::workspace::sftp) fn sftp_editor_runtime_settings(
+        &self,
+    ) -> SftpEditorRuntimeSettings {
+        let terminal = &self.settings_store.settings().terminal;
+        SftpEditorRuntimeSettings {
+            editor_font_size: terminal.font_size as f32,
+            editor_line_height: terminal.line_height as f32,
+            word_wrap: false,
+            background_active: terminal.background_image.is_some(),
+        }
+    }
+
     pub(in crate::workspace) fn open_or_preview_sftp_file(
         &mut self,
         pane: SftpPane,
         file: &SftpFileEntry,
         cx: &mut Context<Self>,
     ) {
-        if file.file_type == SftpFileType::Directory {
+        if file.name == ".." && file.file_type == SftpFileType::Directory {
+            // The pinned parent entry always normalizes to the parent itself;
+            // a textual join would leave a non-canonical "/dir/.." path.
+            let base = match pane {
+                SftpPane::Local => self.sftp_view.read(cx).local_path.clone(),
+                SftpPane::Remote => self.sftp_view.read(cx).remote_path.clone(),
+            };
+            self.set_sftp_path(pane, parent_path(&base, pane == SftpPane::Remote), cx);
+        } else if file.file_type == SftpFileType::Directory {
             let base = match pane {
                 SftpPane::Local => self.sftp_view.read(cx).local_path.clone(),
                 SftpPane::Remote => self.sftp_view.read(cx).remote_path.clone(),
@@ -95,12 +115,12 @@ impl WorkspaceApp {
         let syntax_language =
             sftp_editor_language_id(language.as_deref(), preview_path.as_deref(), name, &data);
         let tokens = self.tokens;
-        let runtime_settings = self.ide_runtime_settings();
+        let runtime_settings = self.sftp_editor_runtime_settings();
         let context_menu_labels = EditorContextMenuLabels {
             copy: self.i18n.t("menu.copy"),
-            cut: self.i18n.t("fileManager.cut"),
+            cut: self.i18n.t("menu.cut"),
             paste: self.i18n.t("menu.paste"),
-            select_all: self.i18n.t("fileManager.selectAll"),
+            select_all: self.i18n.t("menu.select_all"),
         };
         let sftp_entity = self.sftp_view.clone();
         let (editor_text, line_ending) = normalize_text_line_endings(&data);
@@ -274,6 +294,7 @@ impl WorkspaceApp {
                 id,
                 transfer_id: transfer_id.clone(),
                 batch_id: None,
+                smoothed_speed: 0,
                 remote_id: remote_id.clone(),
                 name: name.to_string(),
                 local_path: local_path.clone(),

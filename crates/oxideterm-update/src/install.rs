@@ -14,7 +14,6 @@ use crate::{InstallFlavor, NativeUpdateError, PlatformTarget, current_platform_t
 use crate::{
     WindowsUpdateHelperOptions, windows_update_helper_arguments, windows_update_helper_path,
 };
-use crate::{execute_portable_update, portable_update_root};
 
 #[cfg(windows)]
 const WINDOWS_BACKGROUND_PROCESS_CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -30,13 +29,11 @@ pub enum InstallPackageKind {
     LinuxAppImage,
     LinuxAppImageArchive,
     LinuxPackage,
-    PortableArchive,
     Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstallStrategy {
-    PortableReplaceArchive,
     MacOpenDmg,
     MacReplaceAppBundle,
     MacReplaceAppArchive,
@@ -63,20 +60,17 @@ pub struct NativeInstallContext {
     pub current_exe: PathBuf,
     pub process_id: u32,
     pub install_flavor: InstallFlavor,
-    pub portable_root: Option<PathBuf>,
 }
 
 impl NativeInstallContext {
-    pub fn current(portable: bool) -> Result<Self, NativeUpdateError> {
+    pub fn current() -> Result<Self, NativeUpdateError> {
         let target = current_platform_target();
         let current_exe = current_install_executable()?;
-        let portable_root = portable.then(portable_update_root).transpose()?;
         Ok(Self {
-            install_flavor: InstallFlavor::infer(&target, &current_exe, portable),
+            install_flavor: InstallFlavor::infer(&target, &current_exe),
             target,
             current_exe,
             process_id: std::process::id(),
-            portable_root,
         })
     }
 }
@@ -102,7 +96,6 @@ pub struct NativeInstallPlan {
     pub package_path: PathBuf,
     pub current_exe: PathBuf,
     pub process_id: u32,
-    pub portable_root: Option<PathBuf>,
     pub requires_app_exit: bool,
     pub summary: String,
 }
@@ -127,22 +120,6 @@ pub fn plan_native_install(
 ) -> NativeInstallPlan {
     let package_path = package_path.as_ref().to_path_buf();
     let package_kind = classify_package(&package_path);
-
-    if context.install_flavor == InstallFlavor::Portable {
-        return NativeInstallPlan {
-            strategy: InstallStrategy::PortableReplaceArchive,
-            action: InstallActionKind::LaunchUpdateHelper,
-            package_kind,
-            package_path,
-            current_exe: context.current_exe.clone(),
-            process_id: context.process_id,
-            portable_root: context.portable_root.clone(),
-            requires_app_exit: true,
-            summary:
-                "Portable update staged. OxideTerm will restart after replacing application files."
-                    .to_string(),
-        };
-    }
 
     let (strategy, action, requires_app_exit, summary) =
         match (context.target.os(), context.install_flavor, package_kind) {
@@ -225,7 +202,6 @@ pub fn plan_native_install(
         package_path,
         current_exe: context.current_exe.clone(),
         process_id: context.process_id,
-        portable_root: context.portable_root.clone(),
         requires_app_exit,
         summary: summary.to_string(),
     }
@@ -235,7 +211,6 @@ pub fn execute_install_plan(
     plan: &NativeInstallPlan,
 ) -> Result<NativeInstallOutcome, NativeUpdateError> {
     match plan.strategy {
-        InstallStrategy::PortableReplaceArchive => execute_portable_update(plan),
         InstallStrategy::MacReplaceAppBundle | InstallStrategy::MacReplaceAppArchive => {
             execute_macos_app_replacement(plan)
         }
@@ -269,11 +244,7 @@ fn classify_package(path: &Path) -> InstallPackageKind {
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    if (file_name.contains("_portable.") || file_name.contains("-portable."))
-        && (extension == "zip" || file_name.ends_with(".tar.gz") || extension == "tgz")
-    {
-        InstallPackageKind::PortableArchive
-    } else if extension == "app" {
+    if extension == "app" {
         InstallPackageKind::MacAppBundle
     } else if extension == "dmg" {
         InstallPackageKind::MacDmg
@@ -557,7 +528,6 @@ fn execute_windows_archive_installer(
         package_path: installer,
         current_exe: plan.current_exe.clone(),
         process_id: plan.process_id,
-        portable_root: plan.portable_root.clone(),
         requires_app_exit: matches!(package_kind, InstallPackageKind::WindowsExe),
         summary: plan.summary.clone(),
     };
@@ -827,8 +797,6 @@ mod tests {
             current_exe: PathBuf::from(exe),
             process_id: 42,
             install_flavor,
-            portable_root: (install_flavor == InstallFlavor::Portable)
-                .then(|| PathBuf::from(exe).parent().unwrap().to_path_buf()),
         }
     }
 
@@ -952,27 +920,6 @@ mod tests {
             assert_eq!(plan.action, InstallActionKind::OpenPackage);
             assert_eq!(plan.package_kind, InstallPackageKind::LinuxPackage);
             assert!(!plan.requires_app_exit);
-        }
-    }
-
-    #[test]
-    fn every_platform_portable_package_uses_the_update_helper() {
-        // Portable archives differ by platform, but all use the same guarded
-        // replacement protocol instead of an installed-package flow.
-        let cases = [
-            ("macos", "/tmp/OxideTerm_macos_x64_portable.tar.gz"),
-            ("windows", "C:/Temp/OxideTerm_windows_x64_portable.zip"),
-            ("linux", "/tmp/OxideTerm_linux_x64_portable.tar.gz"),
-        ];
-
-        for (os, package_path) in cases {
-            let plan = plan_native_install(
-                package_path,
-                &context(os, InstallFlavor::Portable, "/apps/oxideterm-native"),
-            );
-            assert_eq!(plan.strategy, InstallStrategy::PortableReplaceArchive);
-            assert_eq!(plan.package_kind, InstallPackageKind::PortableArchive);
-            assert!(plan.requires_app_exit);
         }
     }
 

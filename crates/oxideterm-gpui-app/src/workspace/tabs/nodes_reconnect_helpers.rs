@@ -1,25 +1,5 @@
 use super::*;
 
-pub(super) fn event_log_severity_for_connection_status(status: &str) -> WorkspaceEventSeverity {
-    match status {
-        // Mirrors Tauri `useEventLogCapture.statusSeverity`: link loss is the
-        // disruptive event, while a final explicit disconnect is informational.
-        "link_down" => WorkspaceEventSeverity::Error,
-        "reconnecting" => WorkspaceEventSeverity::Warn,
-        "connected" | "disconnected" => WorkspaceEventSeverity::Info,
-        _ => WorkspaceEventSeverity::Info,
-    }
-}
-
-pub(super) fn event_log_title_for_node_readiness(readiness: &NodeReadiness) -> &'static str {
-    match readiness {
-        NodeReadiness::Ready => "event_log.events.node_state_ready",
-        NodeReadiness::Connecting => "event_log.events.node_state_connecting",
-        NodeReadiness::Error => "event_log.events.node_state_error",
-        NodeReadiness::Disconnected => "event_log.events.node_state_disconnected",
-    }
-}
-
 pub(super) fn node_readiness_became_ready(
     previous: Option<&NodeReadiness>,
     current: &NodeReadiness,
@@ -72,46 +52,6 @@ mod node_reconnect_helper_tests {
             Some(&NodeReadiness::Error),
             &NodeReadiness::Disconnected
         ));
-    }
-
-    #[test]
-    fn connection_status_event_severity_matches_tauri_event_log_capture() {
-        assert_eq!(
-            event_log_severity_for_connection_status("connected"),
-            WorkspaceEventSeverity::Info
-        );
-        assert_eq!(
-            event_log_severity_for_connection_status("link_down"),
-            WorkspaceEventSeverity::Error
-        );
-        assert_eq!(
-            event_log_severity_for_connection_status("reconnecting"),
-            WorkspaceEventSeverity::Warn
-        );
-        assert_eq!(
-            event_log_severity_for_connection_status("disconnected"),
-            WorkspaceEventSeverity::Info
-        );
-    }
-
-    #[test]
-    fn node_readiness_event_titles_match_tauri_event_log_keys() {
-        assert_eq!(
-            event_log_title_for_node_readiness(&NodeReadiness::Ready),
-            "event_log.events.node_state_ready"
-        );
-        assert_eq!(
-            event_log_title_for_node_readiness(&NodeReadiness::Connecting),
-            "event_log.events.node_state_connecting"
-        );
-        assert_eq!(
-            event_log_title_for_node_readiness(&NodeReadiness::Error),
-            "event_log.events.node_state_error"
-        );
-        assert_eq!(
-            event_log_title_for_node_readiness(&NodeReadiness::Disconnected),
-            "event_log.events.node_state_disconnected"
-        );
     }
 
     #[test]

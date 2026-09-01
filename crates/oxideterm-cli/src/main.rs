@@ -16,7 +16,6 @@ mod json_query;
 mod output;
 mod oxide;
 mod paths;
-mod portable;
 mod quick_commands;
 mod report;
 mod secrets;
@@ -62,7 +61,6 @@ fn run(cli: Cli) -> CliResult<i32> {
         Command::Open(args) => uri::run(args),
         Command::Forwards(command) => forwards::run(command),
         Command::QuickCommands(command) => quick_commands::run(command),
-        Command::Portable(command) => portable::run(command),
         Command::Secrets(command) => secrets::run(command),
         Command::Oxide(command) => oxide::run(command),
         Command::Paths(args) => {

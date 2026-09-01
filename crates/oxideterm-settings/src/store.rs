@@ -38,7 +38,6 @@ pub struct DataDirectoryInfo {
     pub path: PathBuf,
     pub is_custom: bool,
     pub default_path: PathBuf,
-    pub is_portable: bool,
     pub can_change: bool,
 }
 
@@ -115,10 +114,6 @@ fn now_ms() -> u64 {
 }
 
 pub fn default_settings_path() -> PathBuf {
-    if let Ok(Some(data_dir)) = oxideterm_portable_runtime::portable_data_dir() {
-        return user_visible_data_dir_path(data_dir).join(SETTINGS_FILENAME);
-    }
-
     if let Some(data_dir) = bootstrap_data_dir() {
         return data_dir.join(SETTINGS_FILENAME);
     }
@@ -141,21 +136,11 @@ fn default_settings_dir() -> PathBuf {
 }
 
 pub fn data_directory_info() -> Result<DataDirectoryInfo> {
-    let is_portable = oxideterm_portable_runtime::is_portable_mode()
-        .map_err(|error| anyhow!("failed to detect portable mode: {}", error))?;
     let default_path = user_visible_data_dir_path(default_settings_dir());
-    let path = if is_portable {
-        oxideterm_portable_runtime::portable_data_dir()
-            .map_err(|error| anyhow!("failed to resolve portable data directory: {}", error))?
-            .map(user_visible_data_dir_path)
-            .unwrap_or_else(|| default_path.clone())
-    } else {
-        bootstrap_data_dir().unwrap_or_else(|| default_path.clone())
-    };
+    let path = bootstrap_data_dir().unwrap_or_else(|| default_path.clone());
     Ok(DataDirectoryInfo {
-        is_custom: !is_portable && path != default_path,
-        can_change: !is_portable,
-        is_portable,
+        is_custom: path != default_path,
+        can_change: true,
         path,
         default_path,
     })
@@ -199,11 +184,6 @@ pub fn check_data_directory(path: &Path) -> Result<DataDirectoryCheck> {
 }
 
 pub fn set_data_directory(path: &Path) -> Result<()> {
-    if oxideterm_portable_runtime::is_portable_mode()
-        .map_err(|error| anyhow!("failed to detect portable mode: {}", error))?
-    {
-        return Err(anyhow!("Data directory cannot be changed in portable mode"));
-    }
     if !path.is_absolute() {
         return Err(anyhow!("Data directory must be an absolute path"));
     }
@@ -229,11 +209,6 @@ pub fn set_data_directory(path: &Path) -> Result<()> {
 }
 
 pub fn reset_data_directory() -> Result<()> {
-    if oxideterm_portable_runtime::is_portable_mode()
-        .map_err(|error| anyhow!("failed to detect portable mode: {}", error))?
-    {
-        return Err(anyhow!("Data directory cannot be reset in portable mode"));
-    }
     save_bootstrap_config(&BootstrapConfig::default())
 }
 

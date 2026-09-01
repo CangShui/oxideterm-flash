@@ -1,4 +1,5 @@
 use crate::assets::LucideIcon;
+use oxideterm_connections::ConnectionTransport;
 
 #[derive(Clone, Copy)]
 pub(super) struct SessionIconChoice {
@@ -342,4 +343,59 @@ pub(super) fn session_icon_from_id(icon_id: Option<&str>) -> Option<LucideIcon> 
         .iter()
         .find(|choice| choice.id == icon_id)
         .map(|choice| choice.icon)
+}
+
+pub(super) const fn default_connection_transport_icon(
+    transport: ConnectionTransport,
+) -> LucideIcon {
+    match transport {
+        ConnectionTransport::LocalTerminal => LucideIcon::Terminal,
+        ConnectionTransport::Ssh => LucideIcon::Server,
+        ConnectionTransport::StandaloneSftp => LucideIcon::FolderSync,
+        ConnectionTransport::Telnet => LucideIcon::Network,
+        ConnectionTransport::Serial => LucideIcon::Radio,
+        ConnectionTransport::Rdp | ConnectionTransport::Vnc => LucideIcon::Monitor,
+    }
+}
+
+pub(super) const fn default_connection_transport_icon_id(
+    transport: ConnectionTransport,
+) -> &'static str {
+    match transport {
+        ConnectionTransport::LocalTerminal => "terminal",
+        ConnectionTransport::Ssh => "server",
+        ConnectionTransport::StandaloneSftp => "folder-sync",
+        ConnectionTransport::Telnet => "network",
+        ConnectionTransport::Serial => "radio",
+        ConnectionTransport::Rdp | ConnectionTransport::Vnc => "monitor",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_transport_icons_match_the_connection_selector() {
+        assert_eq!(
+            default_connection_transport_icon(ConnectionTransport::Ssh),
+            LucideIcon::Server
+        );
+        assert_eq!(
+            default_connection_transport_icon(ConnectionTransport::Telnet),
+            LucideIcon::Network
+        );
+        assert_eq!(
+            default_connection_transport_icon(ConnectionTransport::Serial),
+            LucideIcon::Radio
+        );
+        assert_eq!(
+            default_connection_transport_icon(ConnectionTransport::Rdp),
+            LucideIcon::Monitor
+        );
+        assert_eq!(
+            default_connection_transport_icon(ConnectionTransport::Vnc),
+            LucideIcon::Monitor
+        );
+    }
 }

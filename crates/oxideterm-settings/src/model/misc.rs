@@ -103,24 +103,28 @@ pub enum FileTransferProtocolPreference {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IdeSettings {
-    pub auto_save: bool,
-    pub font_size: Option<i64>,
-    pub line_height: Option<f64>,
-    pub agent_mode: IdeAgentMode,
-    pub word_wrap: bool,
+pub struct CloudSyncSettings {
+    pub enabled: bool,
+    pub server_url: String,
+    pub room: String,
+    pub mode: CloudSyncMode,
+    /// When true, keychain-backed connection credentials travel through the
+    /// sync room so receiving devices can authenticate without re-entry.
+    /// Defaults to false because credential material is sensitive.
+    #[serde(default)]
+    pub sync_passwords: bool,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
 
-impl Default for IdeSettings {
+impl Default for CloudSyncSettings {
     fn default() -> Self {
         Self {
-            auto_save: false,
-            font_size: None,
-            line_height: None,
-            agent_mode: IdeAgentMode::Ask,
-            word_wrap: false,
+            enabled: false,
+            server_url: String::new(),
+            room: String::new(),
+            mode: CloudSyncMode::Auto,
+            sync_passwords: false,
             extra: ExtraFields::new(),
         }
     }
@@ -289,12 +293,6 @@ impl Default for ExperimentalSettings {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct KeybindingSettings {
-    pub overrides: Map<String, Value>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LauncherSettings {
     pub enabled: bool,
 }
@@ -429,7 +427,8 @@ pub struct PersistedSettings {
     pub settings_navigation: SettingsNavigationSettings,
     pub local_terminal: LocalTerminalSettings,
     pub sftp: SftpSettings,
-    pub ide: IdeSettings,
+    #[serde(default)]
+    pub cloud_sync: CloudSyncSettings,
     pub reconnect: ReconnectSettings,
     pub connection_pool: ConnectionPoolSettings,
     #[serde(default)]
@@ -441,8 +440,6 @@ pub struct PersistedSettings {
     pub onboarding_completed: bool,
     #[serde(default)]
     pub command_palette_mru: Vec<String>,
-    #[serde(default)]
-    pub keybindings: KeybindingSettings,
     #[serde(default)]
     pub custom_themes: Map<String, Value>,
     #[serde(default)]
@@ -476,7 +473,7 @@ impl Default for PersistedSettings {
             settings_navigation: SettingsNavigationSettings::default(),
             local_terminal: LocalTerminalSettings::default(),
             sftp: SftpSettings::default(),
-            ide: IdeSettings::default(),
+            cloud_sync: CloudSyncSettings::default(),
             reconnect: ReconnectSettings::default(),
             connection_pool: ConnectionPoolSettings::default(),
             network: NetworkSettings::default(),
@@ -484,7 +481,6 @@ impl Default for PersistedSettings {
             onboarding_disclaimer_accepted: false,
             onboarding_completed: false,
             command_palette_mru: Vec::new(),
-            keybindings: KeybindingSettings::default(),
             custom_themes: Map::new(),
             launcher: LauncherSettings::default(),
             agent_roles: None,

@@ -5,7 +5,7 @@ use std::{
 };
 
 use gpui::SharedString;
-use oxideterm_terminal::{TerminalCell, TerminalColor, TerminalSnapshot};
+use oxideterm_terminal::{TerminalCell, TerminalSnapshot};
 
 #[derive(Clone, Debug)]
 struct LinkText {
@@ -42,7 +42,12 @@ pub(crate) fn link_should_be_styled(
 }
 
 pub(crate) fn is_link_stylable_cell(cell: &TerminalCell) -> bool {
-    cell.bg == TerminalColor::rgb(0x0d, 0x0f, 0x12)
+    // The renderer derives link styling from the painted cell style, so the
+    // test uses the same source of truth: only cells whose background was not
+    // explicitly set by ANSI styling may be restyled as links. Comparing
+    // against a fixed RGB constant would instead couple link detection to one
+    // built-in palette.
+    !cell.style_origin.background_explicit
 }
 
 #[cfg(test)]
@@ -307,7 +312,13 @@ pub(crate) fn path_link_to_file_url(target: &str, base_dir: &Path) -> Option<Str
         }
     };
 
-    Some(format!("file://{}", percent_encode_path(&path)))
+    // file URLs always use forward slashes; a platform backslash would be
+    // percent-encoded into a literal %5C that browsers cannot resolve.
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    Some(format!(
+        "file://{}",
+        percent_encode_path(Path::new(&normalized))
+    ))
 }
 
 pub(crate) fn home_dir() -> Option<PathBuf> {

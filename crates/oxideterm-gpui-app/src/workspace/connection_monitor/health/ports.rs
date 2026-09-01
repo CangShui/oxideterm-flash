@@ -500,6 +500,7 @@ impl HostToolsEntity {
         let state = host_port_state_display(i18n, &entry.state);
 
         div()
+            .id(("host-port-row", index))
             .w_full()
             .min_w_0()
             .border_b_1()

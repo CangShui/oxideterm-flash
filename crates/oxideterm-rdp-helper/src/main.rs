@@ -68,8 +68,8 @@ use oxideterm_remote_desktop::{
     RemoteDesktopErrorCategory, RemoteDesktopFakeBackend, RemoteDesktopFrameFormat,
     RemoteDesktopHelperEvent, RemoteDesktopHelperRequest, RemoteDesktopLockKeys,
     RemoteDesktopMonitorLayout, RemoteDesktopMouseButtonState, RemoteDesktopProtocol,
-    RemoteDesktopSecret, RemoteDesktopSessionOptions, RemoteDesktopSessionStatus,
-    RemoteDesktopSize, read_request_line, run_fake_backend_stdio,
+    RemoteDesktopRdpNetworkProfile, RemoteDesktopSecret, RemoteDesktopSessionOptions,
+    RemoteDesktopSessionStatus, RemoteDesktopSize, read_request_line, run_fake_backend_stdio,
 };
 use sha2::{Digest as _, Sha256};
 use smallvec::SmallVec;
@@ -108,7 +108,7 @@ use event_writer::{SharedEventWriter, send_event};
 use frame::*;
 use input::*;
 
-const RDP_CLIENT_NAME: &str = "oxideterm-flash";
+const RDP_CLIENT_NAME: &str = "OxideTerm";
 const RDP_CLIENT_LOOP_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const RDP_CLIENT_REQUEST_DRAIN_LIMIT: usize = 128;
 const RDP_CLIENT_OUTPUT_DRAIN_LIMIT: usize = 32;
@@ -190,6 +190,7 @@ fn run_real_rdp_stdio(reader: &mut impl BufRead) -> Result<(), String> {
         endpoint,
         transport_endpoint,
         password_available: _,
+        username_available: _,
         size,
         scale_factor,
         read_only,

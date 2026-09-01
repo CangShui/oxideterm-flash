@@ -16,7 +16,6 @@ use oxideterm_editor_core::utf16::{
 
 use super::WorkspaceApp;
 use super::connection_monitor::HostToolsTextInput;
-use super::file_manager::FileManagerInput;
 use super::forwards::ForwardInput;
 use super::launcher::LauncherInput;
 use super::new_connection::{
@@ -24,7 +23,7 @@ use super::new_connection::{
     refresh_connection_timeout_seconds, refresh_identity_agent_availability,
 };
 use super::quick_commands::QuickCommandInput;
-use super::session_manager::{SessionManagerInput, SessionManagerState};
+use super::connection_workspace::{ConnectionWorkspaceInput, ConnectionWorkspaceState};
 use super::sftp::SftpInput;
 use super::terminal_git::TerminalGitPanelSection;
 use oxideterm_gpui_settings_view::SettingsInput;
@@ -66,13 +65,13 @@ fn ime_text_snapshot(target: WorkspaceImeTarget, value: &str) -> String {
 }
 
 fn session_manager_ime_text(
-    session_manager: &SessionManagerState,
-    input: SessionManagerInput,
+    connection_workspace: &ConnectionWorkspaceState,
+    input: ConnectionWorkspaceInput,
 ) -> Option<String> {
-    if session_manager.focused_input() != Some(input) {
+    if connection_workspace.focused_input() != Some(input) {
         return None;
     }
-    let value = session_manager.input_value(input)?;
+    let value = connection_workspace.input_value(input)?;
     Some(ime_text_snapshot(
         WorkspaceImeTarget::SessionManager(input),
         value,
@@ -111,7 +110,6 @@ impl TextInputAnchorStore {
 pub(super) enum WorkspaceImeTarget {
     ReadOnlyText(u64),
     CommandPalette,
-    ShortcutsModalSearch,
     Search,
     TerminalCwdSearch,
     TerminalGitBranchSearch,
@@ -131,11 +129,11 @@ pub(super) enum WorkspaceImeTarget {
     HostPackageSearch,
     QuickCommand(QuickCommandInput),
     Settings(SettingsInput),
-    SessionManager(SessionManagerInput),
+    SessionManager(ConnectionWorkspaceInput),
     Forwards(ForwardInput),
-    FileManager(FileManagerInput),
     Launcher(LauncherInput),
     TabRename,
+    NewSessionFolder,
     Sftp(SftpInput),
     NewConnection(NewConnectionField),
     KeyboardInteractive(usize),
@@ -475,7 +473,6 @@ impl WorkspaceImeTarget {
         let id = match self {
             Self::ReadOnlyText(id) => id.wrapping_add(50_000),
             Self::CommandPalette => 4,
-            Self::ShortcutsModalSearch => 5,
             Self::Search => 1,
             Self::TerminalCwdSearch => 18,
             Self::TerminalGitBranchSearch => 17,
@@ -497,9 +494,9 @@ impl WorkspaceImeTarget {
             Self::Settings(input) => 1_000 + input.anchor_key(),
             Self::SessionManager(input) => 1_500 + input.anchor_key(),
             Self::Forwards(input) => 1_700 + input.anchor_key(),
-            Self::FileManager(input) => 1_800 + input.anchor_key(),
             Self::Launcher(input) => 1_850 + input.anchor_key(),
             Self::TabRename => 1_890,
+            Self::NewSessionFolder => 1_895,
             Self::Sftp(input) => 1_900 + input.anchor_key(),
             Self::NewConnection(field) => 2_000 + field as u64,
             Self::KeyboardInteractive(index) => 3_000 + index as u64,
@@ -886,6 +883,9 @@ impl WorkspaceApp {
             // The blocking rename dialog owns text input ahead of background surfaces.
             return Some(WorkspaceImeTarget::TabRename);
         }
+        if self.new_session_folder_dialog.is_some() {
+            return Some(WorkspaceImeTarget::NewSessionFolder);
+        }
         if let Some(focused_prompt) = self
             .connection_flow
             .read(cx)
@@ -927,10 +927,6 @@ impl WorkspaceApp {
 
         if self.command_palette.read(cx).is_open() {
             return Some(WorkspaceImeTarget::CommandPalette);
-        }
-
-        if self.shortcuts_modal.open {
-            return Some(WorkspaceImeTarget::ShortcutsModalSearch);
         }
 
         if self.host_tools_visibility(cx).main_window_is_visible()
@@ -995,14 +991,6 @@ impl WorkspaceApp {
             && let Some(input) = self.forwarding.read(cx).view().focused_input
         {
             return Some(WorkspaceImeTarget::Forwards(input));
-        }
-
-        if self
-            .active_tab(cx)
-            .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::FileManager)
-            && let Some(input) = self.file_manager.read(cx).focused_input()
-        {
-            return Some(WorkspaceImeTarget::FileManager(input));
         }
 
         if self
@@ -1491,10 +1479,7 @@ impl WorkspaceApp {
     fn ime_target_content_align(target: WorkspaceImeTarget) -> TextInputContentAlign {
         match target {
             WorkspaceImeTarget::Settings(
-                SettingsInput::TerminalFontSize
-                | SettingsInput::TerminalLineHeight
-                | SettingsInput::IdeFontSize
-                | SettingsInput::IdeLineHeight,
+                SettingsInput::TerminalFontSize | SettingsInput::TerminalLineHeight,
             ) => TextInputContentAlign::Center,
             _ => TextInputContentAlign::Start,
         }
@@ -1685,7 +1670,6 @@ impl WorkspaceApp {
             WorkspaceImeTarget::CommandPalette => {
                 Some(self.command_palette.read(cx).query().to_string())
             }
-            WorkspaceImeTarget::ShortcutsModalSearch => Some(self.shortcuts_modal.query.clone()),
             WorkspaceImeTarget::Search => Some(self.search.query.clone()),
             WorkspaceImeTarget::TerminalCwdSearch => {
                 let terminal = self.terminal.read(cx);
@@ -1801,19 +1785,11 @@ impl WorkspaceApp {
                 }
             }
             WorkspaceImeTarget::SessionManager(input) => {
-                session_manager_ime_text(self.session_manager.read(cx), input)
+                session_manager_ime_text(self.connection_workspace.read(cx), input)
             }
             WorkspaceImeTarget::Forwards(input) => {
                 if self.forwarding.read(cx).view().focused_input == Some(input) {
                     Some(self.forward_input_value(input, cx).to_string())
-                } else {
-                    None
-                }
-            }
-            WorkspaceImeTarget::FileManager(input) => {
-                let file_manager = self.file_manager.read(cx);
-                if file_manager.focused_input() == Some(input) {
-                    Some(file_manager.input_value(input).to_string())
                 } else {
                     None
                 }
@@ -1830,6 +1806,10 @@ impl WorkspaceApp {
                 .tab_rename_dialog
                 .as_ref()
                 .map(|dialog| dialog.draft.clone()),
+            WorkspaceImeTarget::NewSessionFolder => self
+                .new_session_folder_dialog
+                .as_ref()
+                .map(|dialog| dialog.folder_name.clone()),
             WorkspaceImeTarget::Sftp(input) => {
                 if self.sftp_view.read(cx).focused_input() == Some(input) {
                     Some(self.sftp_view.read(cx).input_value(input).to_string())
@@ -1967,9 +1947,6 @@ impl WorkspaceApp {
             return false;
         };
         let path_completion_visible = match target {
-            WorkspaceImeTarget::FileManager(FileManagerInput::Path) => {
-                self.file_manager.read(cx).path_completion.is_visible()
-            }
             WorkspaceImeTarget::Sftp(SftpInput::LocalPath) => {
                 self.sftp_view.read(cx).local_path_completion.is_visible()
             }
@@ -2122,6 +2099,14 @@ impl WorkspaceApp {
         match copy_shortcut_owner_for_target(target, selection.as_ref()) {
             CopyShortcutOwner::SelectedRange(range) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(utf16_slice(&text, range)));
+                // Acknowledge the copy with the same localized confirmation the
+                // terminal copy path uses; the notice never includes the value.
+                self.push_command_palette_toast(
+                    self.i18n.t("terminal.command_selection.copied_confirmation"),
+                    None,
+                    oxideterm_gpui_terminal::TerminalNoticeVariant::Success,
+                    cx,
+                );
                 true
             }
             CopyShortcutOwner::FocusedEditableInput => true,
@@ -2384,12 +2369,6 @@ impl WorkspaceApp {
                 self.show_active_input_caret(cx);
                 cx.notify();
             }
-            WorkspaceImeTarget::ShortcutsModalSearch => {
-                replace_utf16(&mut self.shortcuts_modal.query, replacement_range, text);
-                self.shortcuts_modal.scroll_handle = gpui::UniformListScrollHandle::new();
-                self.show_active_input_caret(cx);
-                cx.notify();
-            }
             WorkspaceImeTarget::Search => {
                 replace_utf16(&mut self.search.query, replacement_range, text);
                 self.update_search_query(cx);
@@ -2551,37 +2530,20 @@ impl WorkspaceApp {
                 }
             }
             WorkspaceImeTarget::SessionManager(input) => {
-                let search_changed = self.session_manager.update(cx, |session_manager, cx| {
-                    if session_manager.focused_input() != Some(input) {
+                self.connection_workspace.update(cx, |connection_workspace, cx| {
+                    if connection_workspace.focused_input() != Some(input) {
                         return false;
                     }
                     // The Entity owns secret buffers and applies the platform
                     // replacement without copying their contents to WorkspaceApp.
-                    if !session_manager.replace_input(input, replacement_range, text, cx) {
-                        return false;
-                    }
-                    input == SessionManagerInput::Search
+                    connection_workspace.replace_input(input, replacement_range, text, cx)
                 });
-                if search_changed {
-                    self.clear_session_selection_for_invisible_rows(cx);
-                }
             }
             WorkspaceImeTarget::Forwards(input) => {
                 if self.forwarding.read(cx).view().focused_input == Some(input) {
                     self.forwarding.update(cx, |forwarding, _cx| {
                         forwarding.replace_input_text(input, replacement_range, text);
                     });
-                    self.show_active_input_caret(cx);
-                    cx.notify();
-                }
-            }
-            WorkspaceImeTarget::FileManager(input) => {
-                if self.file_manager.update(cx, |file_manager, cx| {
-                    file_manager.replace_input(input, replacement_range, text, cx)
-                }) {
-                    if input == FileManagerInput::Path {
-                        self.refresh_file_manager_path_completion(cx);
-                    }
                     self.show_active_input_caret(cx);
                     cx.notify();
                 }
@@ -2597,6 +2559,13 @@ impl WorkspaceApp {
             WorkspaceImeTarget::TabRename => {
                 if let Some(dialog) = self.tab_rename_dialog.as_mut() {
                     replace_utf16(&mut dialog.draft, replacement_range, text);
+                    self.show_active_input_caret(cx);
+                    cx.notify();
+                }
+            }
+            WorkspaceImeTarget::NewSessionFolder => {
+                if let Some(dialog) = self.new_session_folder_dialog.as_mut() {
+                    replace_utf16(&mut dialog.folder_name, replacement_range, text);
                     self.show_active_input_caret(cx);
                     cx.notify();
                 }
@@ -2657,10 +2626,14 @@ impl WorkspaceApp {
     }
 }
 
+// IME candidates belong to any terminal-class tab that accepts text input,
+// not only SSH transports.
 fn is_terminal_tab(tab: &oxideterm_workspace::Tab) -> bool {
     matches!(
         tab.kind,
         oxideterm_workspace::TabKind::SshTerminal
+            | oxideterm_workspace::TabKind::Telnet
+            | oxideterm_workspace::TabKind::Serial
     )
 }
 
@@ -2948,7 +2921,7 @@ fn ime_target_accepts_newline(target: WorkspaceImeTarget) -> bool {
         WorkspaceImeTarget::ReadOnlyText(_) => true,
         WorkspaceImeTarget::Settings(input) => input.accepts_newline(),
         WorkspaceImeTarget::NewConnection(NewConnectionField::Notes) => true,
-        WorkspaceImeTarget::SessionManager(SessionManagerInput::OxideExportDescription) => true,
+        WorkspaceImeTarget::SessionManager(ConnectionWorkspaceInput::OxideExportDescription) => true,
         _ => false,
     }
 }
@@ -3185,8 +3158,7 @@ fn path_completion_owns_vertical_navigation(
         && matches!(key, "up" | "arrowup" | "down" | "arrowdown")
         && matches!(
             target,
-            WorkspaceImeTarget::FileManager(FileManagerInput::Path)
-                | WorkspaceImeTarget::Sftp(SftpInput::LocalPath)
+            WorkspaceImeTarget::Sftp(SftpInput::LocalPath)
                 | WorkspaceImeTarget::Sftp(SftpInput::RemotePath)
         )
 }
@@ -3197,7 +3169,7 @@ mod tests {
     use zeroize::{Zeroize, Zeroizing};
 
     use super::{
-        CopyShortcutOwner, FileManagerInput, HostToolsPlainTextImeFrame, HostToolsTextInput,
+        CopyShortcutOwner, HostToolsPlainTextImeFrame, HostToolsTextInput,
         NewConnectionField, PendingPlatformTextCommit, SettingsInput, SftpInput,
         TextInputAnchorStore, WorkspaceCaretState, WorkspaceCaretVisibility,
         WorkspaceImeMarkedText, WorkspaceImeTarget, active_ime_should_defer_input_key,
@@ -3226,7 +3198,7 @@ mod tests {
         let now = std::time::Instant::now();
         let visibility = WorkspaceCaretVisibility::default();
         let mut caret = WorkspaceCaretState::new(visibility.clone());
-        let target = WorkspaceImeTarget::Settings(SettingsInput::KeybindingSearch);
+        let target = WorkspaceImeTarget::Settings(SettingsInput::SettingsSearch);
         assert!(caret.sync_active_target(Some(target)));
         assert!(caret.pause_settings_caret(now + std::time::Duration::from_millis(700)));
         assert_eq!(
@@ -3244,7 +3216,7 @@ mod tests {
         let now = std::time::Instant::now();
         let visibility = WorkspaceCaretVisibility::default();
         let mut caret = WorkspaceCaretState::new(visibility.clone());
-        let settings_target = WorkspaceImeTarget::Settings(SettingsInput::KeybindingSearch);
+        let settings_target = WorkspaceImeTarget::Settings(SettingsInput::SettingsSearch);
         caret.sync_active_target(Some(settings_target));
         caret.pause_settings_caret(now + std::time::Duration::from_secs(1));
         caret.advance_tick(now + std::time::Duration::from_secs(1));
@@ -3430,7 +3402,7 @@ mod tests {
 
         assert!(!platform_text_commit_is_duplicate(
             &mut pending,
-            WorkspaceImeTarget::ShortcutsModalSearch,
+            WorkspaceImeTarget::Search,
             "a",
         ));
         assert!(!platform_text_commit_is_duplicate(
@@ -3638,7 +3610,6 @@ mod tests {
     #[test]
     fn visible_path_completion_owns_unmodified_vertical_navigation() {
         for target in [
-            WorkspaceImeTarget::FileManager(FileManagerInput::Path),
             WorkspaceImeTarget::Sftp(SftpInput::LocalPath),
             WorkspaceImeTarget::Sftp(SftpInput::RemotePath),
         ] {

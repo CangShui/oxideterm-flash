@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["crates/ironrdp"]
 members = [
   "crates/oxideterm-atomic-file",
   "crates/oxideterm-gpui-markdown",
@@ -14,20 +15,16 @@ members = [
   "crates/oxideterm-editor-core",
   "crates/oxideterm-editor-syntax",
   "crates/oxideterm-gpui-editor",
-  "crates/oxideterm-gpui-ide",
   "crates/oxideterm-connections",
+  "crates/oxideterm-cloud-sync",
   "crates/oxideterm-desktop-presence",
   "crates/oxideterm-quick-commands",
   "crates/oxideterm-connection-monitor",
-  "crates/oxideterm-notification-center",
   "crates/oxideterm-network-proxy",
   "crates/oxideterm-topology",
   "crates/oxideterm-backend-classification",
-  "crates/oxideterm-ide-core",
-  "crates/oxideterm-ide-fs",
   "crates/oxideterm-forwarding",
   "crates/oxideterm-preview",
-  "crates/oxideterm-portable-runtime",
   "crates/oxideterm-secret-store",
   "crates/oxideterm-update",
   "crates/oxideterm-i18n",
@@ -348,3 +345,55 @@ opt-level = 0
 debug = 1
 incremental = true
 split-debuginfo = "unpacked"
+
+# Vendored IronRDP (pinned fork rev 5c6bd6d) with a local fix: bitmap updates
+# whose source size differs from the destination rectangle are now stretched
+# (MS-RDPBCGR requires client-side stretch). Without this, xrdp-style servers
+# send scaled glyph regions that were silently dropped and rendered as stripes.
+[patch."https://github.com/AnalyseDeCircuit/IronRDP"]
+ironrdp = { path = "crates/ironrdp/crates/ironrdp" }
+ironrdp-acceptor = { path = "crates/ironrdp/crates/ironrdp-acceptor" }
+ironrdp-async = { path = "crates/ironrdp/crates/ironrdp-async" }
+ironrdp-blocking = { path = "crates/ironrdp/crates/ironrdp-blocking" }
+ironrdp-bulk = { path = "crates/ironrdp/crates/ironrdp-bulk" }
+ironrdp-client = { path = "crates/ironrdp/crates/ironrdp-client" }
+ironrdp-cliprdr = { path = "crates/ironrdp/crates/ironrdp-cliprdr" }
+ironrdp-cliprdr-format = { path = "crates/ironrdp/crates/ironrdp-cliprdr-format" }
+ironrdp-cliprdr-native = { path = "crates/ironrdp/crates/ironrdp-cliprdr-native" }
+ironrdp-connector = { path = "crates/ironrdp/crates/ironrdp-connector" }
+ironrdp-core = { path = "crates/ironrdp/crates/ironrdp-core" }
+ironrdp-displaycontrol = { path = "crates/ironrdp/crates/ironrdp-displaycontrol" }
+ironrdp-dvc = { path = "crates/ironrdp/crates/ironrdp-dvc" }
+ironrdp-dvc-com-plugin = { path = "crates/ironrdp/crates/ironrdp-dvc-com-plugin" }
+ironrdp-dvc-pipe-proxy = { path = "crates/ironrdp/crates/ironrdp-dvc-pipe-proxy" }
+ironrdp-echo = { path = "crates/ironrdp/crates/ironrdp-echo" }
+ironrdp-egfx = { path = "crates/ironrdp/crates/ironrdp-egfx" }
+ironrdp-error = { path = "crates/ironrdp/crates/ironrdp-error" }
+ironrdp-futures = { path = "crates/ironrdp/crates/ironrdp-futures" }
+ironrdp-graphics = { path = "crates/ironrdp/crates/ironrdp-graphics" }
+ironrdp-input = { path = "crates/ironrdp/crates/ironrdp-input" }
+ironrdp-mstsgu = { path = "crates/ironrdp/crates/ironrdp-mstsgu" }
+ironrdp-nscodec = { path = "crates/ironrdp/crates/ironrdp-nscodec" }
+ironrdp-pdu = { path = "crates/ironrdp/crates/ironrdp-pdu" }
+ironrdp-pdu-generators = { path = "crates/ironrdp/crates/ironrdp-pdu-generators" }
+ironrdp-propertyset = { path = "crates/ironrdp/crates/ironrdp-propertyset" }
+ironrdp-rdcleanpath = { path = "crates/ironrdp/crates/ironrdp-rdcleanpath" }
+ironrdp-rdpdr = { path = "crates/ironrdp/crates/ironrdp-rdpdr" }
+ironrdp-rdpdr-native = { path = "crates/ironrdp/crates/ironrdp-rdpdr-native" }
+ironrdp-rdpeusb = { path = "crates/ironrdp/crates/ironrdp-rdpeusb" }
+ironrdp-rdpfile = { path = "crates/ironrdp/crates/ironrdp-rdpfile" }
+ironrdp-rdpsnd = { path = "crates/ironrdp/crates/ironrdp-rdpsnd" }
+ironrdp-rdpsnd-native = { path = "crates/ironrdp/crates/ironrdp-rdpsnd-native" }
+ironrdp-rpc = { path = "crates/ironrdp/crates/ironrdp-rpc" }
+ironrdp-server = { path = "crates/ironrdp/crates/ironrdp-server" }
+ironrdp-session = { path = "crates/ironrdp/crates/ironrdp-session" }
+ironrdp-session-generators = { path = "crates/ironrdp/crates/ironrdp-session-generators" }
+ironrdp-str = { path = "crates/ironrdp/crates/ironrdp-str" }
+ironrdp-svc = { path = "crates/ironrdp/crates/ironrdp-svc" }
+ironrdp-testsuite-core = { path = "crates/ironrdp/crates/ironrdp-testsuite-core" }
+ironrdp-testsuite-extra = { path = "crates/ironrdp/crates/ironrdp-testsuite-extra" }
+ironrdp-tls = { path = "crates/ironrdp/crates/ironrdp-tls" }
+ironrdp-tokio = { path = "crates/ironrdp/crates/ironrdp-tokio" }
+ironrdp-viewer = { path = "crates/ironrdp/crates/ironrdp-viewer" }
+ironrdp-vmconnect = { path = "crates/ironrdp/crates/ironrdp-vmconnect" }
+ironrdp-web = { path = "crates/ironrdp/crates/ironrdp-web" }

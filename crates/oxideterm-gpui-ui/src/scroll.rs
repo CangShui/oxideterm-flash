@@ -119,14 +119,21 @@ pub trait ScrollableElement: InteractiveElement + Styled + ParentElement + Eleme
         )
     }
 
+    // `#[track_caller]` forwards the construction site into
+    // `Scrollable::new`, so each call site owns a distinct keyed-state
+    // identity. Without it every instance would share one CodeLocation inside
+    // this file and sibling scrollables would reuse a single `ScrollHandle`.
+    #[track_caller]
     fn overflow_y_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Vertical)
     }
 
+    #[track_caller]
     fn overflow_x_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Horizontal)
     }
 
+    #[track_caller]
     fn overflow_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Both)
     }
@@ -152,6 +159,10 @@ impl<E> Scrollable<E>
 where
     E: InteractiveElement + Styled + ParentElement + Element,
 {
+    // The keyed scroll state is namespaced by the element path plus this id.
+    // Callers must not construct two instances from the same call site inside
+    // one element path (for example a per-item loop); the `#[track_caller]`
+    // convenience methods only disambiguate distinct call sites.
     #[track_caller]
     fn new(element: E, axis: ScrollbarAxis) -> Self {
         Self {

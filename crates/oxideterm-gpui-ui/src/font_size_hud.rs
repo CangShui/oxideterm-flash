@@ -1,9 +1,24 @@
+use std::time::Duration;
+
 use gpui::{Div, ParentElement, Styled, div, px, rgb, rgba};
 use oxideterm_theme::ThemeTokens;
 
-pub const FONT_SIZE_HUD_DURATION_MS: u64 = 1200;
+// Normal-cadence baseline for the HUD dwell time. It feeds the motion token
+// scaling so faster/slower profiles keep the same relative cadence.
+const FONT_SIZE_HUD_BASELINE_MS: u64 = 1200;
 
-pub fn font_size_hud(tokens: &ThemeTokens, size: f32) -> Div {
+pub fn font_size_hud_duration(tokens: &ThemeTokens) -> Duration {
+    // The dwell time is informational rather than animated, so a disabled
+    // motion profile keeps the baseline instead of scaled_duration_ms' zero,
+    // which would cut the HUD before it can be read.
+    if tokens.motion.enabled {
+        Duration::from_millis(tokens.motion.scaled_duration_ms(FONT_SIZE_HUD_BASELINE_MS))
+    } else {
+        Duration::from_millis(FONT_SIZE_HUD_BASELINE_MS)
+    }
+}
+
+pub fn font_size_hud(tokens: &ThemeTokens, size: f32, unit: &str) -> Div {
     div()
         .absolute()
         .top_0()
@@ -37,7 +52,9 @@ pub fn font_size_hud(tokens: &ThemeTokens, size: f32) -> Div {
                                 .text_size(px(tokens.metrics.ui_text_base))
                                 .font_weight(gpui::FontWeight::NORMAL)
                                 .text_color(rgb(tokens.ui.text_muted))
-                                .child("px"),
+                                // The unit is locale-owned (e.g. terminal.font_size_unit)
+                                // and must not be hardcoded here.
+                                .child(unit.to_string()),
                         ),
                 ),
         )

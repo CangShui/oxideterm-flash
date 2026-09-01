@@ -51,13 +51,16 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn onboarding_feature_tile(
         &self,
         icon: LucideIcon,
-        key: &'static str,
+        title_key: &'static str,
+        description_key: &'static str,
         _cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Full keys arrive as literals so the i18n audit can verify each one;
+        // composing "onboarding.{fragment}" here hid deletions from the scan.
         self.onboarding_info_card(
             Some((icon, self.tokens.ui.accent)),
-            &format!("onboarding.{key}"),
-            Some(&format!("onboarding.{key}_desc")),
+            title_key,
+            Some(description_key),
             false,
             _cx,
         )

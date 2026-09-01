@@ -418,6 +418,9 @@ impl WorkspaceApp {
         match action {
             WindowIntentAction::ShowMainWindow => {
                 oxideterm_desktop_presence::show_main_window();
+                // Showing alone leaves the window behind the active one when
+                // the request comes from a second launch; raise it too.
+                window.activate_window();
             }
             WindowIntentAction::HideMainWindow => {
                 oxideterm_desktop_presence::hide_main_window();

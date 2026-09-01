@@ -65,7 +65,14 @@ impl WorkspaceApp {
             return false;
         }
         match event.keystroke.key.as_str() {
-            "escape" => self.complete_version_migration_notice(cx),
+            // Escape only hides the wizard for this session; permanent
+            // acknowledgement stays an explicit button choice so a skipped
+            // tour is offered again on the next launch.
+            "escape" => {
+                self.version_migration.open = false;
+                self.version_migration.error = None;
+                cx.notify();
+            }
             "enter" | "arrowright" => self.version_migration_next(cx),
             "arrowleft" => self.version_migration_back(cx),
             _ => return false,

@@ -100,13 +100,10 @@ mod tests {
     fn matrix_manifest() -> NativeUpdateManifest {
         let platforms = [
             ("darwin-aarch64-app", "mac-app.zip"),
-            ("darwin-aarch64-portable", "mac-portable.tar.gz"),
             ("windows-x86_64-nsis", "windows-setup.exe"),
-            ("windows-x86_64-portable", "windows-portable.zip"),
             ("linux-x86_64-appimage", "linux.AppImage"),
             ("linux-x86_64-deb", "linux.deb"),
             ("linux-x86_64-rpm", "linux.rpm"),
-            ("linux-x86_64-portable", "linux-portable.tar.gz"),
         ]
         .into_iter()
         .map(|(key, file_name)| {
@@ -134,22 +131,10 @@ mod tests {
         let cases = [
             ("macos", "aarch64", InstallFlavor::MacApp, "mac-app.zip"),
             (
-                "macos",
-                "aarch64",
-                InstallFlavor::Portable,
-                "mac-portable.tar.gz",
-            ),
-            (
                 "windows",
                 "x86_64",
                 InstallFlavor::WindowsNsis,
                 "windows-setup.exe",
-            ),
-            (
-                "windows",
-                "x86_64",
-                InstallFlavor::Portable,
-                "windows-portable.zip",
             ),
             (
                 "linux",
@@ -159,12 +144,6 @@ mod tests {
             ),
             ("linux", "x86_64", InstallFlavor::LinuxDeb, "linux.deb"),
             ("linux", "x86_64", InstallFlavor::LinuxRpm, "linux.rpm"),
-            (
-                "linux",
-                "x86_64",
-                InstallFlavor::Portable,
-                "linux-portable.tar.gz",
-            ),
         ];
 
         for (os, arch, flavor, expected_file_name) in cases {
@@ -196,15 +175,6 @@ mod tests {
                     "1.0.0",
                     &PlatformTarget::new("linux", "x86_64"),
                     InstallFlavor::LinuxDeb,
-                )
-                .is_none()
-        );
-        assert!(
-            manifest
-                .select_package(
-                    "1.0.0",
-                    &PlatformTarget::new("linux", "x86_64"),
-                    InstallFlavor::Portable,
                 )
                 .is_none()
         );

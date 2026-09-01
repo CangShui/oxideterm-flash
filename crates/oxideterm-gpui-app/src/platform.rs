@@ -1,14 +1,13 @@
-use gpui::{KeyBinding, Menu, MenuItem, SystemMenuType};
+use gpui::{Menu, MenuItem, SystemMenuType};
 pub use oxideterm_gpui_platform::{window_options, window_options_with_bounds};
 use oxideterm_i18n::I18n;
-use oxideterm_settings::PersistedSettings;
 
 use crate::{
     CloseOtherTabs, ClosePane, CloseTab, CommandPalette, Copy, Cut, Find, FindNext, FindPrev,
     FontDecrease, FontIncrease, FontReset, NewConnection, NewTerminal, NextTab, OpenSettings,
     PaletteBroadcast, PaletteCancelReconnect, PaletteCleanupDead,
-    PaletteDetachTerminal, PaletteDisconnectAll, PaletteEventLog, PaletteHealthCheck,
-    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, Quit, ShellLauncher, ShowShortcuts,
+    PaletteDetachTerminal, PaletteDisconnectAll, PaletteHealthCheck,
+    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, Quit, ShellLauncher,
     SplitHorizontal, SplitVertical, TerminalRecording, ToggleSidebar, ZenMode,
 };
 
@@ -22,7 +21,6 @@ pub(crate) fn app_menus(i18n: &I18n) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action(i18n.t("command_palette.title"), CommandPalette),
                 MenuItem::action(i18n.t("menu.settings"), OpenSettings),
-                MenuItem::action(i18n.t("command_palette.cmd_show_shortcuts"), ShowShortcuts),
                 MenuItem::separator(),
                 MenuItem::action(i18n.t("menu.quit"), Quit),
             ],
@@ -57,7 +55,7 @@ pub(crate) fn app_menus(i18n: &I18n) -> Vec<Menu> {
                     PaletteBroadcast,
                 ),
                 MenuItem::action(
-                    i18n.t("settings_view.keybindings.actions.terminal.recording"),
+                    i18n.t("terminal.recording.title"),
                     TerminalRecording,
                 ),
                 MenuItem::action(
@@ -78,7 +76,6 @@ pub(crate) fn app_menus(i18n: &I18n) -> Vec<Menu> {
             items: vec![
                 MenuItem::action(i18n.t("command_palette.title"), CommandPalette),
                 MenuItem::action(i18n.t("command_palette.cmd_toggle_sidebar"), ToggleSidebar),
-                MenuItem::action(i18n.t("command_palette.cmd_toggle_panel"), PaletteEventLog),
                 MenuItem::separator(),
                 MenuItem::action(i18n.t("command_palette.cmd_font_increase"), FontIncrease),
                 MenuItem::action(i18n.t("command_palette.cmd_font_decrease"), FontDecrease),
@@ -125,8 +122,4 @@ pub(crate) fn app_menus(i18n: &I18n) -> Vec<Menu> {
             ],
         },
     ]
-}
-
-pub(crate) fn app_key_bindings(settings: &PersistedSettings) -> Vec<KeyBinding> {
-    crate::keybindings::startup_key_bindings(&settings.keybindings.overrides)
 }

@@ -245,7 +245,6 @@ pub(super) enum AuthSelectorContext {
     StandaloneSftpSecondary,
     EditProperties,
     Prompt,
-    DrillDown,
     Jump,
 }
 
@@ -1560,7 +1559,6 @@ impl WorkspaceApp {
             AuthSelectorContext::EditProperties => {
                 self.i18n.t("sessionManager.edit_properties.auth_type")
             }
-            AuthSelectorContext::DrillDown => self.i18n.t("ssh.drill_down.auth_method"),
             AuthSelectorContext::Jump => self.i18n.t("ssh.form.proxy_jump_auth"),
             AuthSelectorContext::Standard
             | AuthSelectorContext::StandaloneSftpSecondary
@@ -1669,7 +1667,7 @@ impl WorkspaceApp {
             .gap(px(self.tokens.spacing.three))
             .child(form_field(&self.tokens, label, row))
             .when(
-                active_family == SshAuthFamily::Key && context != AuthSelectorContext::DrillDown,
+                active_family == SshAuthFamily::Key,
                 |content| {
                     content.child(
                         self.render_key_auth_source_select(active_tab, context, jump_form, cx),
@@ -1922,11 +1920,6 @@ impl WorkspaceApp {
         context: AuthSelectorContext,
     ) -> &'static [(SshAuthFamily, &'static str)] {
         match context {
-            AuthSelectorContext::DrillDown => &[
-                (SshAuthFamily::Agent, "ssh.drill_down.auth_agent"),
-                (SshAuthFamily::Key, "ssh.drill_down.auth_key"),
-                (SshAuthFamily::Password, "ssh.drill_down.auth_password"),
-            ],
             AuthSelectorContext::Jump => &[
                 (SshAuthFamily::Password, "ssh.auth.password"),
                 (SshAuthFamily::Key, "ssh.auth.key"),
@@ -1960,9 +1953,6 @@ impl WorkspaceApp {
             AuthSelectorContext::Prompt => {
                 crate::workspace::selection_motion::PROMPT_CONNECTION_AUTH_SELECTOR_ID
             }
-            AuthSelectorContext::DrillDown => {
-                crate::workspace::selection_motion::DRILL_DOWN_AUTH_SELECTOR_ID
-            }
             AuthSelectorContext::Jump => {
                 crate::workspace::selection_motion::JUMP_CONNECTION_AUTH_SELECTOR_ID
             }
@@ -1986,7 +1976,6 @@ impl WorkspaceApp {
                 SshKeyAuthSource::ManagedKey,
                 SshKeyAuthSource::Certificate,
             ],
-            AuthSelectorContext::DrillDown => &[SshKeyAuthSource::SshKey],
         }
     }
 
@@ -1995,13 +1984,7 @@ impl WorkspaceApp {
         cx: &Context<Self>,
     ) -> AuthSelectorContext {
         let mode = self.connection_form_state(cx).mode();
-        if self
-            .connection_form_state(cx)
-            .drill_down_parent_node_id
-            .is_some()
-        {
-            AuthSelectorContext::DrillDown
-        } else if mode == NewConnectionFormMode::SavedConnectionPrompt {
+        if mode == NewConnectionFormMode::SavedConnectionPrompt {
             AuthSelectorContext::Prompt
         } else if mode == NewConnectionFormMode::EditProperties {
             AuthSelectorContext::EditProperties
@@ -2450,53 +2433,46 @@ impl WorkspaceApp {
                 NewConnectionTransport::Ssh,
                 self.i18n.t("modals.new_connection.transport_ssh"),
                 NewConnectionField::Name,
-                LucideIcon::Server,
+                default_connection_transport_icon(NewConnectionTransport::Ssh),
                 false,
             ),
             (
                 NewConnectionTransport::Telnet,
                 self.i18n.t("modals.new_connection.transport_telnet"),
                 NewConnectionField::Host,
-                LucideIcon::Network,
+                default_connection_transport_icon(NewConnectionTransport::Telnet),
                 false,
             ),
             (
                 NewConnectionTransport::Serial,
                 self.i18n.t("modals.new_connection.transport_serial"),
                 NewConnectionField::SerialPortPath,
-                LucideIcon::Radio,
+                default_connection_transport_icon(NewConnectionTransport::Serial),
                 false,
             ),
             (
                 NewConnectionTransport::Rdp,
                 self.i18n.t("modals.new_connection.transport_rdp"),
                 NewConnectionField::Host,
-                LucideIcon::Monitor,
+                default_connection_transport_icon(NewConnectionTransport::Rdp),
                 false,
             ),
             (
                 NewConnectionTransport::Vnc,
                 self.i18n.t("modals.new_connection.transport_vnc"),
                 NewConnectionField::Host,
-                LucideIcon::Monitor,
+                default_connection_transport_icon(NewConnectionTransport::Vnc),
                 false,
             ),
         ];
-        // Local terminals are one-shot launch targets, so keep them after saved transports.
-        choices.push((
-            NewConnectionTransport::LocalTerminal,
-            self.i18n
-                .t("modals.new_connection.transport_local_terminal"),
-            NewConnectionField::Name,
-            LucideIcon::Terminal,
-            false,
-        ));
+        // Local Terminal is intentionally disabled: the new-connection form
+        // only creates persisted remote protocols, never ad-hoc local shells.
         choices.push((
             NewConnectionTransport::StandaloneSftp,
             self.i18n
                 .t("modals.new_connection.transport_standalone_sftp"),
             NewConnectionField::Name,
-            LucideIcon::FolderSync,
+            default_connection_transport_icon(NewConnectionTransport::StandaloneSftp),
             true,
         ));
         let mut sidebar = div()
@@ -2666,6 +2642,16 @@ impl WorkspaceApp {
                             }
                             apply_transport_default_port(form, previous_transport, transport);
                             apply_transport_default_username(form, previous_transport, transport);
+                            crate::workspace::new_connection::apply_transport_default_icon(
+                                form,
+                                previous_transport,
+                                transport,
+                            );
+                            crate::workspace::new_connection::apply_transport_default_remote_desktop_options(
+                                form,
+                                previous_transport,
+                                transport,
+                            );
                             form.transport = transport;
                             form.focused_field = focus_field;
                             form.field_focused = false;
@@ -2706,7 +2692,6 @@ impl WorkspaceApp {
             port,
             username,
             keeps_saved_password,
-            save_password,
             group,
             notes,
             ssh_gateway_connection_id,
@@ -2718,7 +2703,6 @@ impl WorkspaceApp {
                 form.username.clone(),
                 form.remote_desktop_profile_id.is_some()
                     && form.saved_password_keychain_id.is_some(),
-                form.save_password,
                 form.group.clone(),
                 form.notes.clone(),
                 form.remote_desktop_ssh_gateway_connection_id.clone(),
@@ -2814,12 +2798,9 @@ impl WorkspaceApp {
                 NewConnectionField::Password,
                 cx,
             ))
-            .child(self.render_connection_checkbox(
-                self.i18n.t("ssh.form.save_password"),
-                save_password,
-                |form| form.save_password = !form.save_password,
-                cx,
-            ))
+            // Remote desktop credentials always persist to the keychain (the
+            // same contract the SSH edit flow uses); no opt-out checkbox is
+            // rendered, so a saved profile never asks for its password twice.
             .into_any_element();
 
         div()

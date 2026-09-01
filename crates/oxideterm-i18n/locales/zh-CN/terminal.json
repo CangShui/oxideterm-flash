@@ -13,23 +13,15 @@
     },
     "command_bar": {
       "command": "命令",
-      "command_mode": "命令模式",
       "command_placeholder": "输入命令...",
-      "run_command": "执行命令",
-      "collapse_input": "收起命令输入",
-      "expand_input": "展开命令输入",
       "local_shell": "本地 Shell",
       "remote_shell": "远程 Shell",
       "all_targets": "全部",
-      "recording": "录制中",
       "source_runtime": "历史",
-      "source_local_history": "本地",
-      "source_ai_ledger": "AI",
       "source_history": "历史",
       "source_command": "命令",
       "source_option": "选项",
       "source_path": "路径",
-      "source_ai": "AI",
       "group_history": "历史",
       "group_command": "命令",
       "group_option": "选项",
@@ -79,7 +71,6 @@
       "deselect_all": "取消全选",
       "target_count": "广播中"
     },
-    "typeLocal": "本地",
     "typeSsh": "SSH",
     "paste": {
       "title": "检测到多行内容 ({{count}} 行)",
@@ -93,7 +84,6 @@
       "copy": "复制",
       "copy_title": "复制命令输出",
       "copy_command": "复制命令",
-      "send_to_ai": "发送到 OxideSens",
       "fill_command_bar": "填入命令栏",
       "insert_selection_into_command": "在此插入选区",
       "replace_command_with_selection": "用选区替换当前命令",
@@ -102,7 +92,8 @@
       "select_command": "选择命令",
       "previous_command": "上一个命令",
       "next_command": "下一个命令",
-      "clear_screen": "清屏"
+      "clear_screen": "清屏",
+      "copied_confirmation": "已复制到剪贴板"
     },
     "modem": {
       "binary_transfer": "二进制传输",
@@ -111,7 +102,17 @@
       "ymodem_upload": "YMODEM 上传",
       "ymodem_receive": "YMODEM 接收",
       "zmodem_upload": "ZMODEM 上传",
-      "zmodem_receive": "ZMODEM 接收"
+      "zmodem_receive": "ZMODEM 接收",
+      "select_upload_files_title": "选择要通过调制解调器传输发送的文件",
+      "select_download_directory_title": "选择下载位置",
+      "completed_title": "调制解调器传输完成",
+      "cancelled_title": "调制解调器传输已取消",
+      "failed_title": "调制解调器传输失败",
+      "connection_lost_title": "调制解调器传输因连接中断而中止",
+      "invalid_selection": "所选路径与请求的调制解调器传输不匹配。",
+      "invalid_file_name": "本地文件名无法用于此次调制解调器传输。",
+      "wrong_direction": "远端正在等待 X/YMODEM 上传，而不是下载。",
+      "worker_stopped": "调制解调器传输工作线程意外停止。"
     },
     "serial_control": {
       "serial": "串口",
@@ -217,12 +218,8 @@
     },
     "quick_commands": {
       "title": "快捷命令",
-      "open": "快捷命令",
-      "close": "关闭快捷命令",
       "search_placeholder": "搜索快捷命令...",
       "add": "新增",
-      "edit": "编辑",
-      "delete": "删除",
       "run": "执行",
       "save": "保存",
       "cancel": "取消",
@@ -237,17 +234,13 @@
       "confirm_risky_description": "此命令可能具有破坏性或涉及敏感操作。执行：{{command}}",
       "toast_executed": "快捷命令已发送",
       "add_group": "新增组",
-      "edit_group": "编辑组",
-      "delete_group": "删除组",
       "save_group": "保存组",
       "group_name_placeholder": "组名称",
-      "icon_terminal": "终端",
-      "icon_server": "服务器",
-      "icon_folder": "文件夹",
       "icon_docker": "Docker",
-      "icon_zap": "自定义",
-      "pin": "固定面板",
-      "unpin": "执行后关闭"
+      "icon_folder": "文件夹",
+      "icon_server": "服务器",
+      "icon_terminal": "终端",
+      "icon_zap": "自定义"
     },
     "cwd": {
       "search_directories": "搜索文件和目录...",
@@ -258,7 +251,6 @@
       "parent_directory": "..（上级目录）",
       "enter_directory": "进入目录",
       "go_to_path": "跳转到路径",
-      "inferred": "推断",
       "scope_local": "本地",
       "scope_ssh": "SSH",
       "source_process": "进程",
@@ -270,9 +262,7 @@
       "host": "主机",
       "switch_to_directory": "切换到此目录",
       "copy_path": "复制路径",
-      "open_file_manager": "在文件管理器中打开",
-      "open_sftp": "在 SFTP 中打开",
-      "open_ide": "在 IDE 中打开"
+      "open_sftp": "在 SFTP 中打开"
     },
     "project": {
       "search_tasks": "搜索项目任务...",
@@ -319,18 +309,14 @@
       "action_commit": "提交",
       "commit_message_placeholder": "提交信息...",
       "action_amend": "修订",
-      "action_ai_commit_message": "AI 消息",
       "action_rebase": "变基",
       "action_rebase_pull": "变基拉取",
       "action_conflict_files": "冲突文件",
       "action_continue": "继续",
       "action_abort": "中止",
       "action_skip": "跳过",
-      "checkout_success": "已切换到 {{branch}}",
       "checkout_failed": "无法切换到 {{branch}}",
-      "section_commit": "提交",
       "section_history": "历史",
-      "section_refs": "引用",
       "section_more": "更多",
       "group_repository": "仓库信息",
       "group_advanced": "高级操作",
@@ -356,7 +342,6 @@
       "group_conflicts": "冲突",
       "group_staged": "已暂存",
       "group_modified": "未暂存",
-      "group_untracked": "未跟踪",
       "clean_title": "工作树干净",
       "clean_description": "此仓库没有本地变更。",
       "path_action_stage": "暂存",
@@ -371,42 +356,14 @@
       "path_state_untracked": "新",
       "path_state_conflict": "冲"
     },
-    "privilege_helper": {
-      "fill": "填充密码",
-      "filling": "填充中...",
-      "fill_title": "填充 {{label}}",
-      "enter_fill": "按 Enter 填充",
-      "enter_fill_title": "按 Enter 或点击填充 {{label}}",
-      "inline_fill_hint": "按 Enter 填入已保存的提权密码",
-      "load_failed": "无法加载提权凭据",
-      "send_failed": "无法发送提权凭据",
-      "manage": "提权凭据",
-      "manage_title": "打开此作用域的提权凭据设置",
-      "local_manage_unavailable": "本地 Shell 的提权凭据管理尚未开放。"
-    }
+    "split": {
+      "ssh_unsupported": "SSH 终端标签不支持分屏。"
+    },
+    "font_size_unit": "px"
   },
   "search": {
     "placeholder": "搜索",
-    "previous": "上一个",
-    "next": "下一个",
-    "close": "x",
     "no_results": "无结果",
     "visible_terminal_hint": "搜索当前可见的终端滚动缓冲。"
-  },
-  "workspace": {
-    "new_local_terminal": "新建本地终端"
-  },
-  "local_shell": {
-    "toast": {
-      "detached": "会话已移至后台",
-      "detached_desc": "{{shell}} 正在后台运行",
-      "attached": "会话已恢复"
-    },
-    "background": {
-      "title": "后台会话",
-      "lines": "行",
-      "resume": "恢复",
-      "kill": "终止"
-    }
   }
 }

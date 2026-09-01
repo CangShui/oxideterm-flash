@@ -4,6 +4,7 @@ mod draft;
 mod keychain;
 pub mod oxide_file;
 mod secret;
+pub mod session_export;
 mod ssh_config;
 mod ssh_config_sync;
 mod ssh_keys;
@@ -27,6 +28,10 @@ pub use draft::{
     saved_connection_from_ssh_host,
 };
 pub use secret::SecretString;
+pub use session_export::{
+    SessionExportContent, SessionExportFormat, export_sessions,
+    export_sessions_to_finalshell_directory, suggested_directory_name, suggested_file_name,
+};
 pub use ssh_config::{
     SshBatchImportResult, SshConfigHost, SshConfigImportError, SshConfigProxyHop,
     canonical_ssh_config_alias, default_ssh_config_path, import_ssh_config_alias,
@@ -45,14 +50,14 @@ pub use store::{
     ConnectionX11ForwardingMode, ConnectionX11ForwardingOptions,
     DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS, DEFAULT_X11_UNTRUSTED_TIMEOUT_SECONDS,
     DeletedConnectionTombstone, GLOBAL_UPSTREAM_PROXY_PASSWORD_KEYCHAIN_ID,
-    LOCAL_SHELL_PRIVILEGE_CONNECTION_ID, LocalSyncMetadata, ManagedSshKeyInfo, ManagedSshKeyOrigin,
-    ManagedSshKeyUsage, PreparedSavedConnectionsSync, PrivilegeCredentialKind, ProxyHopInfo,
+    LocalSyncMetadata, ManagedSshKeyInfo, ManagedSshKeyOrigin,
+    ManagedSshKeyUsage, PreparedSavedConnectionsSync, ProxyHopInfo,
     RemoteDesktopProfile, RemoteDesktopProfilesSyncSnapshot, SaveConnectionRequest,
-    SavePrivilegeCredentialRequest, SaveRemoteDesktopProfileRequest,
+    SaveRemoteDesktopProfileRequest,
     SaveSerialProfileRequest, SaveStandaloneSftpProfileRequest, SaveTelnetProfileRequest,
     SavedAuth, SavedConnection, SavedConnectionRuntimeSecrets, SavedConnectionSyncRecord,
     SavedConnectionsConflictStrategy, SavedConnectionsSyncCleanup, SavedConnectionsSyncSnapshot,
-    SavedPrivilegeCredential, SavedProxyCommand, SavedProxyHop,
+    SavedProxyCommand, SavedProxyHop,
     SavedStandaloneSftpEndpointRuntimeSecrets, SavedStandaloneSftpProfileRuntimeSecrets,
     SavedUpstreamProxyAuth, SavedUpstreamProxyConfig, SavedUpstreamProxyPolicy,
     SavedUpstreamProxyProtocol, SerialFlowControl, SerialParity, SerialProfile,

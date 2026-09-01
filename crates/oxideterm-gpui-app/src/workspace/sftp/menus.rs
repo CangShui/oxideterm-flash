@@ -193,6 +193,20 @@ impl WorkspaceApp {
                 });
             },
             cx,
+        ))
+        .child(self.render_sftp_context_menu_guarded_item(
+            LucideIcon::FilePlus,
+            self.i18n.t("sftp.context.new_file"),
+            false,
+            false,
+            pane_loading,
+            has_background,
+            move |this, _event, _window, cx| {
+                this.sftp_view.update(cx, |sftp, cx| {
+                    sftp.open_new_file_dialog(menu.pane, cx);
+                });
+            },
+            cx,
         ));
 
         self.workspace_context_menu_backdrop(

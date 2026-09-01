@@ -8,8 +8,8 @@
 
 use oxideterm_gpui_ui::select::SelectAnchorId;
 pub use oxideterm_settings_model::{
-    SettingsBackgroundTabIcon, SettingsInput, SettingsKeybindingScopeFilter, SettingsSelect,
-    SettingsSlider, SettingsTab, SettingsTabIcon, TerminalSettingsPage,
+    SettingsBackgroundTabIcon, SettingsInput, SettingsSelect, SettingsSlider, SettingsTab,
+    SettingsTabIcon, TerminalSettingsPage,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,17 +21,13 @@ pub enum ActiveSurface {
 pub fn settings_tab_from_ai_section(section: &str) -> Option<SettingsTab> {
     match section {
         "general" => Some(SettingsTab::General),
-        "portable" => Some(SettingsTab::Portable),
         "terminal" => Some(SettingsTab::Terminal),
         "appearance" => Some(SettingsTab::Appearance),
         "local" | "local_terminal" => Some(SettingsTab::Terminal),
         "connections" | "connection_manager" => Some(SettingsTab::Connections),
-        "privilege" | "privilege_credentials" | "sudo" | "su" => Some(SettingsTab::Privilege),
         "ssh" | "ssh_keys" => Some(SettingsTab::Connections),
         "reconnect" => Some(SettingsTab::Connections),
         "sftp" => Some(SettingsTab::Sftp),
-        "ide" => Some(SettingsTab::Ide),
-        "keybindings" | "keyboard" => Some(SettingsTab::Keybindings),
         "help" => Some(SettingsTab::Help),
         _ => None,
     }
@@ -67,7 +63,6 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             Self::TerminalBackspaceSequence => SelectAnchorId::SettingsTerminalBackspaceSequence,
             Self::TerminalDeleteSequence => SelectAnchorId::SettingsTerminalDeleteSequence,
             Self::TerminalCursorStyle => SelectAnchorId::SettingsTerminalCursorStyle,
-            Self::RemoteShellIntegrationMode => SelectAnchorId::SettingsRemoteShellIntegrationMode,
             Self::TerminalTriggerMatchMode => SelectAnchorId::SettingsTerminalTriggerMatchMode,
             Self::TerminalTriggerAction => SelectAnchorId::SettingsTerminalTriggerAction,
             Self::TerminalTriggerProcessMode => SelectAnchorId::SettingsTerminalTriggerProcessMode,
@@ -76,12 +71,11 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             }
             Self::TerminalTriggerTiming => SelectAnchorId::SettingsTerminalTriggerTiming,
             Self::TerminalTriggerScope => SelectAnchorId::SettingsTerminalTriggerScope,
-            Self::IdeAgentMode => SelectAnchorId::SettingsIdeAgentMode,
+            Self::CloudSyncMode => SelectAnchorId::SettingsCloudSyncMode,
             Self::LocalShell => SelectAnchorId::SettingsLocalShell,
             Self::LocalShellSemanticScheme(index) => {
                 SelectAnchorId::SettingsLocalShellSemanticScheme(index)
             }
-            Self::LocalPrivilegeKind => SelectAnchorId::SettingsLocalPrivilegeKind,
             Self::ConnectionIdleTimeout => SelectAnchorId::SettingsConnectionIdleTimeout,
             Self::ReconnectMaxAttempts => SelectAnchorId::SettingsReconnectMaxAttempts,
             Self::ReconnectBaseDelay => SelectAnchorId::SettingsReconnectBaseDelay,
@@ -97,7 +91,6 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             Self::SftpDirectoryParallelism => SelectAnchorId::SettingsSftpDirectoryParallelism,
             Self::SftpConflict => SelectAnchorId::SettingsSftpConflict,
             Self::TerminalSemanticScheme => SelectAnchorId::SettingsTerminalSemanticScheme,
-            _ => SelectAnchorId::SettingsLanguage,
             Self::SemanticSchemeRuleClass(index) => {
                 SelectAnchorId::SettingsSemanticSchemeRuleClass(index)
             }
@@ -112,12 +105,15 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             Self::ConnectionImportDuplicateStrategy => {
                 SelectAnchorId::SettingsConnectionImportDuplicateStrategy
             }
+            Self::SessionExportFormat => SelectAnchorId::SettingsSessionExportFormat,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -131,14 +127,6 @@ mod tests {
             Some(TerminalSettingsPage::Local)
         );
         assert_eq!(
-            settings_tab_from_ai_section("assistant"),
-            Some(SettingsTab::Ai)
-        );
-        assert_eq!(
-            settings_tab_from_ai_section("keyboard"),
-            Some(SettingsTab::Keybindings)
-        );
-        assert_eq!(
             settings_tab_from_ai_section("ssh_keys"),
             Some(SettingsTab::Connections)
         );
@@ -147,5 +135,80 @@ mod tests {
             Some(SettingsTab::Connections)
         );
         assert_eq!(settings_tab_from_ai_section("missing"), None);
+    }
+
+    #[test]
+    fn every_settings_select_resolves_to_its_own_non_language_anchor() {
+        // A catch-all arm placed before explicit arms silently redirected
+        // every later select (import source, highlight rule set, export
+        // format) to the Language anchor, so their popups opened at the
+        // stale Language trigger position. Enumerate all variants so the
+        // compiler keeps this table complete and distinct.
+        let selects = [
+            SettingsSelect::Language,
+            SettingsSelect::UpdateChannel,
+            SettingsSelect::UpdateProxyMode,
+            SettingsSelect::UpdateProxyProtocol,
+            SettingsSelect::AppearanceTheme,
+            SettingsSelect::AppearanceDensity,
+            SettingsSelect::AppearanceAnimation,
+            SettingsSelect::AppearanceRenderProfile,
+            SettingsSelect::AppearanceFrostedGlass,
+            SettingsSelect::AppearanceBackgroundFit,
+            SettingsSelect::TerminalFontFamily,
+            SettingsSelect::TerminalCjkFontFamily,
+            SettingsSelect::TerminalEncoding,
+            SettingsSelect::TerminalBackspaceSequence,
+            SettingsSelect::TerminalDeleteSequence,
+            SettingsSelect::TerminalCursorStyle,
+            SettingsSelect::TerminalTriggerMatchMode,
+            SettingsSelect::TerminalTriggerAction,
+            SettingsSelect::TerminalTriggerProcessMode,
+            SettingsSelect::TerminalTriggerQuickCommand,
+            SettingsSelect::TerminalTriggerTiming,
+            SettingsSelect::TerminalTriggerScope,
+            SettingsSelect::CloudSyncMode,
+            SettingsSelect::LocalShell,
+            SettingsSelect::LocalShellSemanticScheme(0),
+            SettingsSelect::ConnectionIdleTimeout,
+            SettingsSelect::ReconnectMaxAttempts,
+            SettingsSelect::ReconnectBaseDelay,
+            SettingsSelect::ReconnectMaxDelay,
+            SettingsSelect::NetworkApplicationProxyMode,
+            SettingsSelect::NetworkProxyProtocol,
+            SettingsSelect::NetworkProxyAuth,
+            SettingsSelect::SftpPresentation,
+            SettingsSelect::SftpProtocol,
+            SettingsSelect::SftpConcurrent,
+            SettingsSelect::SftpDirectoryParallelism,
+            SettingsSelect::SftpConflict,
+            SettingsSelect::TerminalSemanticScheme,
+            SettingsSelect::SemanticSchemeRuleClass(0),
+            SettingsSelect::SemanticSchemeRuleContext(0),
+            SettingsSelect::HighlightRuleSet,
+            SettingsSelect::HighlightPreset,
+            SettingsSelect::HighlightRenderMode(0),
+            SettingsSelect::HighlightMatchScope(0),
+            SettingsSelect::ConnectionImportSource,
+            SettingsSelect::ConnectionImportDuplicateStrategy,
+            SettingsSelect::SessionExportFormat,
+        ];
+        let mut anchors = HashSet::new();
+        for select in selects {
+            let anchor = select.anchor_id();
+            if select == SettingsSelect::Language {
+                assert_eq!(anchor, SelectAnchorId::SettingsLanguage);
+                continue;
+            }
+            assert_ne!(
+                anchor,
+                SelectAnchorId::SettingsLanguage,
+                "{select:?} fell back to the Language anchor"
+            );
+            assert!(
+                anchors.insert(anchor),
+                "{select:?} reuses the anchor of another select"
+            );
+        }
     }
 }

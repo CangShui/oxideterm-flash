@@ -499,6 +499,7 @@ fn cursor_blink_mode_on_does_not_wait_for_terminal_control_sequence() {
         false,
         false,
         TerminalCursorShape::Block,
+        false,
     ));
 }
 
@@ -510,6 +511,7 @@ fn terminal_controlled_cursor_blink_still_respects_terminal_state() {
         false,
         false,
         TerminalCursorShape::Block,
+        false,
     ));
     assert!(should_blink_cursor_for_mode(
         TerminalBlinkMode::TerminalControlled,
@@ -517,6 +519,7 @@ fn terminal_controlled_cursor_blink_still_respects_terminal_state() {
         true,
         false,
         TerminalCursorShape::Block,
+        false,
     ));
 }
 
@@ -528,6 +531,7 @@ fn cursor_blink_is_disabled_when_unfocused_alt_screen_hidden_or_off() {
         true,
         false,
         TerminalCursorShape::Block,
+        false,
     ));
     assert!(!should_blink_cursor_for_mode(
         TerminalBlinkMode::On,
@@ -535,6 +539,7 @@ fn cursor_blink_is_disabled_when_unfocused_alt_screen_hidden_or_off() {
         true,
         true,
         TerminalCursorShape::Block,
+        false,
     ));
     assert!(!should_blink_cursor_for_mode(
         TerminalBlinkMode::On,
@@ -542,6 +547,7 @@ fn cursor_blink_is_disabled_when_unfocused_alt_screen_hidden_or_off() {
         true,
         false,
         TerminalCursorShape::Hidden,
+        false,
     ));
     assert!(!should_blink_cursor_for_mode(
         TerminalBlinkMode::Off,
@@ -549,6 +555,19 @@ fn cursor_blink_is_disabled_when_unfocused_alt_screen_hidden_or_off() {
         true,
         false,
         TerminalCursorShape::Block,
+        false,
+    ));
+}
+
+#[test]
+fn cursor_blink_is_disabled_under_reduced_motion() {
+    assert!(!should_blink_cursor_for_mode(
+        TerminalBlinkMode::On,
+        true,
+        true,
+        false,
+        TerminalCursorShape::Block,
+        true,
     ));
 }
 

@@ -1,15 +1,11 @@
-// The native GPUI app is a Windows GUI process. Without this subsystem flag,
-// Windows launches a console host for the installed app and closing that
-// console also terminates OxideTerm.
-#![cfg_attr(any(), windows_subsystem = "windows")]
+// Windows GUI builds must not allocate a console host that can terminate the app when closed.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app_icon;
 mod assets;
-mod keybindings;
 mod logging;
 mod migration_snapshot;
 mod platform;
-mod portable_bootstrap;
 mod single_instance;
 mod window_placement;
 mod workspace;
@@ -52,7 +48,6 @@ actions!(
         FontIncrease,
         FontDecrease,
         FontReset,
-        ShowShortcuts,
         Copy,
         Cut,
         Paste,
@@ -63,7 +58,6 @@ actions!(
         OpenSettings,
         SwitchLocaleEnglish,
         SwitchLocaleChinese,
-        SwitchLocaleTraditionalChinese,
         SplitHorizontal,
         SplitVertical,
         ClosePane,
@@ -72,7 +66,6 @@ actions!(
         TerminalClearScreen,
         TerminalRecording,
         TerminalFreeTypeMode,
-        PaletteEventLog,
         PaletteBroadcast,
         PaletteDisconnectAll,
         PaletteReconnectAll,
@@ -93,11 +86,6 @@ fn main() {
 
     // Match Tauri's startup ordering: portable detection and instance handling
     // happen before any settings or connection stores choose their data path.
-    eprintln!("[startup] 2 portable runtime init");
-    if let Err(error) = oxideterm_portable_runtime::initialize_portable_runtime() {
-        eprintln!("failed to initialize OxideTerm portable runtime: {error}");
-        std::process::exit(1);
-    }
     eprintln!("[startup] 3 single-instance guard");
     let single_instance = single_instance::acquire_or_forward(
         native_launch_args.handoff_path.clone(),
@@ -115,10 +103,6 @@ fn main() {
     else {
         return;
     };
-    if let Err(error) = oxideterm_portable_runtime::acquire_portable_instance_lock() {
-        eprintln!("failed to initialize OxideTerm portable runtime: {error}");
-        std::process::exit(1);
-    }
     // Only the primary process may snapshot mutable stores. This still runs
     // before SettingsStore or ConnectionStore can perform migrations.
     let settings_path = oxideterm_settings::default_settings_path();
@@ -251,7 +235,6 @@ fn main() {
         app_icon::install_runtime_app_icon(startup_settings.appearance.app_icon);
         cx.activate(true);
         cx.on_action(quit);
-        cx.bind_keys(platform::app_key_bindings(&startup_settings));
         cx.set_menus(platform::app_menus(&I18n::default()));
 
         let desktop_presence_menu = desktop_presence_menu(&I18n::new(locale_from_settings(
@@ -286,12 +269,6 @@ fn main() {
 fn confirm_update_after_initial_workspace() -> std::io::Result<()> {
     // Reaching this point confirms window and workspace construction. The old
     // files are recovery artifacts only and can now be removed without rollback.
-    if let Ok(info) = oxideterm_portable_runtime::portable_info()
-        && info.is_portable
-    {
-        oxideterm_update::confirm_applied_portable_update(&info.host_dir)?;
-    }
-
     #[cfg(target_os = "windows")]
     {
         let current_exe = std::env::current_exe()?;
@@ -369,19 +346,6 @@ fn open_primary_window(
     single_instance_rx: Option<single_instance::SingleInstanceReceiver>,
     settings_store: SettingsStore,
 ) -> anyhow::Result<bool> {
-    let portable_status = oxideterm_portable_runtime::portable_status_snapshot()?;
-    if portable_bootstrap::portable_startup_requires_bootstrap(portable_status.status) {
-        portable_bootstrap::open_portable_bootstrap_window(
-            cx,
-            portable_status,
-            settings_store.settings().clone(),
-            native_connection_launch,
-            desktop_presence_menu,
-            single_instance_rx,
-        )?;
-        return Ok(false);
-    }
-
     open_main_workspace_window(
         cx,
         native_connection_launch,

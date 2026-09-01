@@ -45,6 +45,45 @@ mod tests {
     }
 
     #[test]
+    fn empty_password_edit_preserves_live_keychain_secret() {
+        let mut store = load_empty_store("empty-password-edit");
+        let id = "conn-empty-edit";
+        store
+            .upsert(request(
+                id,
+                SavedAuth::Password {
+                    keychain_id: None,
+                    plaintext_password: Some(SecretString::from("original-secret")),
+                },
+            ))
+            .unwrap();
+        let original_auth = store.get(id).unwrap().auth.clone();
+        let keychain_id = match original_auth {
+            SavedAuth::Password { keychain_id, .. } => keychain_id.unwrap(),
+            _ => unreachable!(),
+        };
+
+        // This is the edit-form representation when a keychain password was
+        // opened but left untouched: no plaintext replacement is present.
+        store
+            .upsert(request(
+                id,
+                SavedAuth::Password {
+                    keychain_id: Some(keychain_id.clone()),
+                    plaintext_password: None,
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            store.get_saved_auth_password(&store.get(id).unwrap().auth)
+                .unwrap()
+                .expose_secret(),
+            "original-secret"
+        );
+    }
+
+    #[test]
     fn connection_notes_are_optional_multiline_metadata_and_not_searchable() {
         let mut store = load_empty_store("connection-notes");
         let mut with_notes = request("conn-notes", SavedAuth::Agent);
@@ -587,6 +626,26 @@ mod tests {
     }
 
     #[test]
+    fn upsert_existing_id_updates_instead_of_creating_sibling() {
+        let mut store = load_empty_store("upsert-existing-id");
+        store
+            .upsert(request("conn-edit", SavedAuth::Agent))
+            .unwrap();
+        assert_eq!(store.connections().len(), 1);
+
+        // Re-prompting / editing a saved connection keeps its id; the upsert
+        // must rewrite the same row instead of appending a duplicate sibling.
+        store
+            .upsert(request("conn-edit", SavedAuth::Agent))
+            .unwrap();
+        assert_eq!(store.connections().len(), 1);
+
+        // A new id still appends.
+        store.upsert(request("conn-new", SavedAuth::Agent)).unwrap();
+        assert_eq!(store.connections().len(), 2);
+    }
+
+    #[test]
     fn upsert_runtime_handoff_preserves_secret_allocations_and_persists_no_plaintext() {
         let store_path = temp_store_path("runtime-secret-handoff");
         let mut store = ConnectionStore::load(&store_path).expect("store should load");
@@ -939,7 +998,6 @@ mod tests {
             icon: None,
             tags: Vec::new(),
             post_connect_command: None,
-            privilege_credentials: Vec::new(),
         });
 
         let key = [7u8; CONFIG_ENCRYPTION_KEY_LEN];
@@ -1449,259 +1507,28 @@ mod tests {
         assert!(store.keychain.get(&proxy_keychain_id).is_err());
     }
 
-    #[test]
-    fn privilege_credential_secret_is_stored_outside_connection_json() {
-        let mut store = load_empty_store("privilege-save");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-
-        let credential = store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: None,
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: Some("root".to_string()),
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("sudo-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-
-        assert_eq!(
-            store
-                .get_privilege_credential_secret("conn-1", &credential.id)
-                .unwrap(),
-            SecretString::from("sudo-secret")
-        );
-        let saved = fs::read_to_string(store.path()).unwrap();
-        assert!(saved.contains("\"privilege_credentials\""));
-        assert!(!saved.contains("sudo-secret"));
-    }
-
-    #[test]
-    fn sudo_privilege_credential_uses_tauri_default_prompt_fragments() {
-        let mut store = load_empty_store("privilege-default-sudo-patterns");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-
-        let credential = store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: Some("cred-1".to_string()),
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("sudo-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-
-        // Prompt patterns are substring fragments, not glob patterns. Keep the
-        // defaults broad enough to match Tauri's helper behavior.
-        assert_eq!(
-            credential.prompt_patterns,
-            vec![
-                "[sudo]".to_string(),
-                "password for".to_string(),
-                "的密码".to_string(),
-                "sudo password".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn legacy_sudo_privilege_prompt_fragments_are_displayed_as_current_defaults() {
-        let mut store = load_empty_store("privilege-legacy-sudo-patterns");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-        let now = Utc::now();
+                                #[test]
+    fn duplicated_connection_copies_password_secret() {
+        let mut store = load_empty_store("password-duplicate");
         store
-            .privilege_credentials_for_scope_mut("conn-1")
-            .unwrap()
-            .push(SavedPrivilegeCredential {
-                id: "cred-legacy".to_string(),
-                connection_id: "conn-1".to_string(),
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: vec![
-                    "[sudo] password for".to_string(),
-                    "sudo password".to_string(),
-                ],
-                keychain_id: None,
-                plaintext_secret: None,
-                enabled: true,
-                require_click_to_send: true,
-                created_at: now,
-                updated_at: now,
-            });
-
-        let credentials = store.list_privilege_credentials("conn-1").unwrap();
-        assert_eq!(
-            credentials[0].prompt_patterns,
-            vec![
-                "[sudo]".to_string(),
-                "password for".to_string(),
-                "的密码".to_string(),
-                "sudo password".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn local_shell_privilege_credential_uses_dedicated_scope() {
-        let mut store = load_empty_store("privilege-local-shell");
-
-        let credential = store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: LOCAL_SHELL_PRIVILEGE_CONNECTION_ID.to_string(),
-                credential_id: Some("local-sudo".to_string()),
-                label: "local sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: Some("deploy".to_string()),
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("local-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
+            .upsert(request(
+                "conn-1",
+                SavedAuth::Password {
+                    keychain_id: None,
+                    plaintext_password: Some(SecretString::from("super-secret-password")),
+                },
+            ))
             .unwrap();
 
-        assert_eq!(
-            credential.connection_id,
-            LOCAL_SHELL_PRIVILEGE_CONNECTION_ID
-        );
-        assert_eq!(
-            store
-                .list_privilege_credentials(LOCAL_SHELL_PRIVILEGE_CONNECTION_ID)
-                .unwrap(),
-            vec![credential]
-        );
-        assert_eq!(
-            store
-                .get_privilege_credential_secret(LOCAL_SHELL_PRIVILEGE_CONNECTION_ID, "local-sudo")
-                .unwrap(),
-            SecretString::from("local-secret")
-        );
-        assert!(store.get("local-shell:default").is_none());
-    }
-
-    #[test]
-    fn privilege_credential_metadata_update_preserves_existing_secret() {
-        let mut store = load_empty_store("privilege-metadata-update");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-
-        let credential = store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: Some("cred-1".to_string()),
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: Some("deploy".to_string()),
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("sudo-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-        let keychain_id = credential.keychain_id;
-
-        let updated = store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: Some("cred-1".to_string()),
-                label: "renamed sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: Some("deploy".to_string()),
-                prompt_patterns: Vec::new(),
-                secret: None,
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-
-        assert_eq!(updated.keychain_id, keychain_id);
-        assert_eq!(
-            store
-                .get_privilege_credential_secret("conn-1", "cred-1")
-                .unwrap(),
-            SecretString::from("sudo-secret")
-        );
-    }
-
-    #[test]
-    fn privilege_credential_request_debug_redacts_secret() {
-        let request = SavePrivilegeCredentialRequest {
-            connection_id: "conn-1".to_string(),
-            credential_id: Some("cred-1".to_string()),
-            label: "sudo".to_string(),
-            kind: PrivilegeCredentialKind::SudoPassword,
-            username_hint: None,
-            prompt_patterns: Vec::new(),
-            secret: Some(SecretString::from("sudo-secret")),
-            enabled: true,
-            require_click_to_send: true,
-        };
-
-        let debug = format!("{request:?}");
-
-        assert!(debug.contains("[redacted secret]"));
-        assert!(!debug.contains("sudo-secret"));
-    }
-
-    #[test]
-    fn deleting_connection_removes_privilege_keychain_entries() {
-        let mut store = load_empty_store("privilege-delete");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-        let credential = store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: Some("cred-1".to_string()),
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("sudo-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-        let keychain_id = credential.keychain_id.unwrap();
-
-        assert!(store.delete("conn-1").unwrap());
-        assert!(store.privilege_keychain.get(&keychain_id).is_err());
-    }
-
-    #[test]
-    fn duplicated_connection_does_not_copy_privilege_credentials() {
-        let mut store = load_empty_store("privilege-duplicate");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-        store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: Some("cred-1".to_string()),
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("sudo-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
+        let original_pw = store.get_connection_password("conn-1").unwrap();
+        assert_eq!(original_pw.expose_secret(), "super-secret-password");
 
         let duplicate = store.duplicate("conn-1").unwrap().unwrap();
-
-        assert!(
-            store
-                .get(&duplicate.id)
-                .unwrap()
-                .privilege_credentials
-                .is_empty()
-        );
+        let dup_pw = store.get_connection_password(&duplicate.id).unwrap();
+        assert_eq!(dup_pw.expose_secret(), "super-secret-password");
     }
 
-    #[test]
+        #[test]
     fn explicit_proxy_hop_key_update_without_passphrase_clears_old_keychain_entry() {
         let mut store = load_empty_store("proxy-hop-passphrase-clear");
         let mut req = request("conn-1", SavedAuth::Agent);
@@ -1841,7 +1668,6 @@ mod tests {
             icon: None,
             tags: Vec::new(),
             post_connect_command: None,
-            privilege_credentials: Vec::new(),
         };
         let mut bad = good.clone();
         bad.id = "bad".to_string();
@@ -1854,52 +1680,7 @@ mod tests {
         assert!(store.connections().is_empty());
     }
 
-    #[test]
-    fn imported_privilege_targets_only_include_secrets_that_will_be_written() {
-        let mut store = load_empty_store("import-privilege-snapshot-scope");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-        let mut imported = store.get("conn-1").unwrap().clone();
-        let now = Utc::now();
-        imported.privilege_credentials = vec![
-            SavedPrivilegeCredential {
-                id: "preserved".to_string(),
-                connection_id: imported.id.clone(),
-                label: "Preserved".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: Vec::new(),
-                keychain_id: Some(privilege_keychain_id(&imported.id, "preserved")),
-                plaintext_secret: None,
-                enabled: true,
-                require_click_to_send: true,
-                created_at: now,
-                updated_at: now,
-            },
-            SavedPrivilegeCredential {
-                id: "replaced".to_string(),
-                connection_id: imported.id.clone(),
-                label: "Replaced".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: Vec::new(),
-                keychain_id: None,
-                plaintext_secret: Some(SecretString::from("replacement")),
-                enabled: true,
-                require_click_to_send: true,
-                created_at: now,
-                updated_at: now,
-            },
-        ];
-
-        let ids = collect_imported_privilege_keychain_ids(&[imported]);
-
-        assert_eq!(
-            ids,
-            HashSet::from([privilege_keychain_id("conn-1", "replaced")])
-        );
-    }
-
-    #[test]
+        #[test]
     fn saved_connection_sync_snapshot_exports_delete_tombstones() {
         let mut store = load_empty_store("sync-tombstone-export");
         store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
@@ -2157,21 +1938,6 @@ mod tests {
             } => keychain_id.clone(),
             other => panic!("unexpected auth: {other:?}"),
         };
-        let privilege = target
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: None,
-                label: "Sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("deferred-privilege-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-        let privilege_keychain_id = privilege.keychain_id.unwrap();
-
         let mut source = load_empty_store("sync-deferred-cleanup-source");
         source.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
         source.delete("conn-1").unwrap();
@@ -2185,7 +1951,7 @@ mod tests {
             .commit_prepared_saved_connections_snapshot(prepared)
             .unwrap();
 
-        assert_eq!(cleanup.pending_keychain_entries(), 2);
+        assert_eq!(cleanup.pending_keychain_entries(), 1);
         assert_eq!(
             target.keychain.get(&keychain_id).unwrap(),
             "deferred-secret"
@@ -2197,12 +1963,6 @@ mod tests {
 
         assert_eq!(cleanup.pending_keychain_entries(), 0);
         assert!(target.keychain.get(&keychain_id).is_err());
-        assert!(
-            target
-                .privilege_keychain
-                .get(&privilege_keychain_id)
-                .is_err()
-        );
     }
 
     #[test]
@@ -2979,7 +2739,6 @@ mod tests {
             icon: None,
             tags: Vec::new(),
             post_connect_command: None,
-            privilege_credentials: Vec::new(),
         };
 
         let info = ConnectionInfo::from(&conn);
@@ -3063,6 +2822,8 @@ mod tests {
                 use_all_monitors: true,
             },
             rdp: oxideterm_remote_desktop::RemoteDesktopRdpOptions {
+                network_profile:
+                    oxideterm_remote_desktop::RemoteDesktopRdpNetworkProfile::Broadband,
                 disable_graphics_pipeline: true,
             },
             vnc: oxideterm_remote_desktop::RemoteDesktopVncOptions {
@@ -3163,8 +2924,7 @@ mod tests {
                     &[],
                     &[],
                     &[],
-                    &[],
-                    std::slice::from_ref(&cleared.id),
+                    &[cleared.id.clone()],
                     Some("Moved"),
                 )
                 .unwrap(),
@@ -3328,4 +3088,89 @@ mod tests {
                 .is_none()
         );
     }
+
+
+    /// Real protocol test, enabled only in the local harness: save an SSH
+    /// password, edit it, resolve the keychain value, and authenticate against
+    /// the live sshd test endpoint. This proves the saved value—not merely a
+    /// draft—is what a later connection receives.
+    #[test]
+    fn live_edited_password_authenticates_against_test_sshd() {
+        let Ok(target) = std::env::var("OXIDETERM_LIVE_SSH_TARGET") else {
+            return;
+        };
+        let Ok(username) = std::env::var("OXIDETERM_LIVE_SSH_USER") else {
+            return;
+        };
+        let Ok(initial_password) = std::env::var("OXIDETERM_LIVE_SSH_INITIAL_PASSWORD") else {
+            return;
+        };
+        let Ok(edited_password) = std::env::var("OXIDETERM_LIVE_SSH_EDITED_PASSWORD") else {
+            return;
+        };
+        let (host, port) = target
+            .rsplit_once(':')
+            .map(|(host, port)| (host.to_string(), port.parse::<u16>().unwrap_or(22)))
+            .unwrap_or((target, 22));
+
+        let mut store = load_empty_store("live-edited-password");
+        let id = "live-edit";
+        let mut initial = request(
+            id,
+            SavedAuth::Password {
+                keychain_id: None,
+                plaintext_password: Some(SecretString::from(initial_password)),
+            },
+        );
+        initial.host = host.clone();
+        initial.port = port;
+        initial.username = username.clone();
+        store.upsert(initial).expect("initial password save");
+
+        let existing = store.get(id).expect("saved connection").auth.clone();
+        let keychain_id = match &existing {
+            SavedAuth::Password { keychain_id, .. } => keychain_id.clone(),
+            _ => None,
+        };
+        let mut edited = request(
+            id,
+            SavedAuth::Password {
+                keychain_id,
+                plaintext_password: Some(SecretString::from(edited_password.clone())),
+            },
+        );
+        edited.host = host;
+        edited.port = port;
+        edited.username = username;
+        store.upsert(edited).expect("edited password save");
+
+        let resolved = store
+            .get_saved_auth_password(&store.get(id).expect("edited connection").auth)
+            .expect("stored credential must resolve");
+        assert_eq!(resolved.expose_secret(), edited_password);
+
+        // Actual SSH protocol authentication is delegated to the local ssh CLI
+        // so this test verifies the saved credential reaches a real server.
+        let output = std::process::Command::new("sshpass")
+            .args(["-p", resolved.expose_secret(), "ssh"])
+            .args([
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-p",
+                &port.to_string(),
+                &format!("{}@{}", store.get(id).unwrap().username, store.get(id).unwrap().host),
+                "echo OXIDETERM-LIVE-SSH-OK",
+            ])
+            .output()
+            .expect("sshpass should run");
+        assert!(
+            output.status.success(),
+            "saved edited password did not authenticate: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("OXIDETERM-LIVE-SSH-OK"));
+    }
+
 }

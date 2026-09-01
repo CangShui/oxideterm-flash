@@ -347,3 +347,174 @@ fn semantic_word_selection_crosses_soft_wrapped_rows() {
         )
     );
 }
+
+fn identified_row(
+    text: &str,
+    cols: usize,
+    line_id: u64,
+    absolute_line: i64,
+) -> oxideterm_terminal::TerminalRow {
+    let mut row = row_from_text(text, cols);
+    row.line_id = line_id;
+    row.absolute_line = absolute_line;
+    row
+}
+
+#[test]
+fn selection_reanchors_to_its_text_after_output_shifts_the_viewport() {
+    let cols = 10;
+    let previous = TerminalSnapshot {
+        display_offset: 0,
+        rows: 3,
+        lines: vec![
+            identified_row("alpha", cols, 1, 0),
+            identified_row("bravo", cols, 2, 1),
+            identified_row("charlie", cols, 3, 2),
+        ],
+        ..test_snapshot(0, 5)
+    };
+    let selection = TerminalSelection {
+        anchor: TerminalGridPoint { line: 1, col: 0 },
+        head: TerminalGridPoint { line: 1, col: 4 },
+        mode: TerminalSelectionMode::Simple,
+    };
+
+    // New output moved every retained row one viewport row toward the top, so
+    // the viewport-relative grid line of the selection is stale.
+    let next = TerminalSnapshot {
+        display_offset: 0,
+        rows: 3,
+        lines: vec![
+            identified_row("bravo", cols, 2, 0),
+            identified_row("charlie", cols, 3, 1),
+            identified_row("delta", cols, 4, 2),
+        ],
+        ..test_snapshot(0, 5)
+    };
+
+    let reanchored = reanchor_selection(&previous, &next, Some(selection)).expect("reanchored");
+    assert_eq!(
+        reanchored.normalized(),
+        (
+            TerminalGridPoint { line: 0, col: 0 },
+            TerminalGridPoint { line: 0, col: 4 }
+        )
+    );
+}
+
+#[test]
+fn selection_reanchors_an_endpoint_that_left_the_visible_snapshot() {
+    let cols = 10;
+    let previous = TerminalSnapshot {
+        display_offset: 0,
+        rows: 3,
+        lines: vec![
+            identified_row("selected", cols, 1, 0),
+            identified_row("middle", cols, 2, 1),
+            identified_row("tail", cols, 3, 2),
+        ],
+        ..test_snapshot(0, 5)
+    };
+    let selection = TerminalSelection {
+        anchor: TerminalGridPoint { line: 0, col: 0 },
+        head: TerminalGridPoint { line: 2, col: 3 },
+        mode: TerminalSelectionMode::Simple,
+    };
+
+    // New output pushed the anchor into scrollback. The retained rows expose
+    // one shared translation, which is enough to preserve the off-screen end.
+    let next = TerminalSnapshot {
+        display_offset: 0,
+        rows: 3,
+        scrollback_lines: 2,
+        lines: vec![
+            identified_row("middle", cols, 2, 0),
+            identified_row("tail", cols, 3, 1),
+            identified_row("new", cols, 4, 2),
+        ],
+        ..test_snapshot(0, 5)
+    };
+
+    let reanchored = reanchor_selection(&previous, &next, Some(selection)).expect("reanchored");
+    assert_eq!(
+        reanchored.normalized(),
+        (
+            TerminalGridPoint { line: -1, col: 0 },
+            TerminalGridPoint { line: 1, col: 3 }
+        )
+    );
+
+    // A later refresh can no longer resolve the already off-screen anchor by
+    // identity, so it must continue following the same retained-row movement.
+    let later = TerminalSnapshot {
+        display_offset: 0,
+        rows: 3,
+        scrollback_lines: 3,
+        lines: vec![
+            identified_row("tail", cols, 3, 0),
+            identified_row("new", cols, 4, 1),
+            identified_row("later", cols, 5, 2),
+        ],
+        ..test_snapshot(0, 5)
+    };
+    let reanchored_again =
+        reanchor_selection(&next, &later, Some(reanchored)).expect("reanchored again");
+    assert_eq!(
+        reanchored_again.normalized(),
+        (
+            TerminalGridPoint { line: -2, col: 0 },
+            TerminalGridPoint { line: 0, col: 3 }
+        )
+    );
+
+    let copy_snapshot = TerminalSnapshot {
+        display_offset: 2,
+        rows: 3,
+        scrollback_lines: 3,
+        lines: vec![
+            identified_row("selected", cols, 1, -2),
+            identified_row("middle", cols, 2, -1),
+            identified_row("tail", cols, 3, 0),
+        ],
+        ..test_snapshot(0, 5)
+    };
+    assert_eq!(
+        selected_text_for_selection(&copy_snapshot, reanchored_again).as_deref(),
+        Some("selected\nmiddle\ntail")
+    );
+}
+
+#[test]
+fn selection_is_dropped_when_its_rows_leave_the_snapshot() {
+    let cols = 10;
+    let previous = TerminalSnapshot {
+        display_offset: 0,
+        rows: 3,
+        lines: vec![
+            identified_row("alpha", cols, 1, 0),
+            identified_row("bravo", cols, 2, 1),
+            identified_row("charlie", cols, 3, 2),
+        ],
+        ..test_snapshot(0, 5)
+    };
+    let selection = TerminalSelection {
+        anchor: TerminalGridPoint { line: 1, col: 0 },
+        head: TerminalGridPoint { line: 1, col: 4 },
+        mode: TerminalSelectionMode::Simple,
+    };
+
+    // A buffer rewrite recycles rows with fresh identities, so the selected
+    // text no longer exists and keeping the highlight would mislabel it.
+    let next = TerminalSnapshot {
+        display_offset: 0,
+        rows: 3,
+        lines: vec![
+            identified_row("one", cols, 5, 0),
+            identified_row("two", cols, 6, 1),
+            identified_row("three", cols, 7, 2),
+        ],
+        ..test_snapshot(0, 5)
+    };
+
+    assert!(reanchor_selection(&previous, &next, Some(selection)).is_none());
+}

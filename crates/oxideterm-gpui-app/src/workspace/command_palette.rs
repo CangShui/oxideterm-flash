@@ -9,8 +9,8 @@ use oxideterm_connections::{resolve_ssh_config_alias, saved_connection_from_ssh_
 use oxideterm_gpui_settings_view::{OXIDE_THEME_IDS, built_in_theme_exists, is_oxide_theme};
 use oxideterm_gpui_ui::{
     modal::{
-        dialog_content, dismissible_command_palette_backdrop, dismissible_dialog_backdrop,
-        overlay_content_boundary, rounded_shell_child_radius,
+        dialog_content, dismissible_command_palette_backdrop, overlay_content_boundary,
+        rounded_shell_child_radius,
     },
     text_input::{text_input_anchor_probe, text_input_value_segments},
 };
@@ -28,9 +28,6 @@ const COMMAND_PALETTE_LIST_MAX_HEIGHT: f32 = 400.0; // Tauri CommandList max-h-[
 const COMMAND_PALETTE_INPUT_HEIGHT: f32 = 40.0; // Tauri CommandInput h-10.
 const COMMAND_PALETTE_VIRTUAL_ROW_HEIGHT: f32 = 32.0; // Tauri CommandItem py-1.5 + text-sm line height.
 const COMMAND_PALETTE_VIRTUAL_OVERSCAN: usize = 8; // Browser CommandList keeps a small DOM buffer around the viewport.
-const SHORTCUTS_MODAL_LIST_MAX_HEIGHT: f32 = 420.0;
-const SHORTCUTS_MODAL_VIRTUAL_ROW_HEIGHT: f32 = 32.0;
-const SHORTCUTS_MODAL_VIRTUAL_OVERSCAN: usize = 8; // Tauri shortcuts modal uses the same command-row rhythm.
 const COMMAND_PALETTE_ICON_SLOT: f32 = 16.0; // Tauri CommandInput/CommandItem h-4 w-4 icons.
 const COMMAND_PALETTE_ITEM_GAP: f32 = 10.0; // Tauri CommandItem gap-2.5.
 const COMMAND_PALETTE_SELECTED_ALPHA: u32 = 0x26; // Tauri accent/15.
@@ -76,10 +73,6 @@ enum PaletteAction {
     OpenRemoteDesktopConnection(RemoteDesktopConnectionProfile),
     Sidebar(SidebarSection),
     OpenSftp,
-    OpenSavedConnections,
-    OpenSessionManager,
-    OpenRuntime(ConnectionRuntimeSection),
-    OpenTopology,
     ManageTerminalTriggers,
     ReloadWindow,
     CloseTab,
@@ -109,7 +102,6 @@ struct CommandSpec {
     id: &'static str,
     label_key: Cow<'static, str>,
     icon: LucideIcon,
-    shortcut_action: Option<&'static str>,
     action: PaletteAction,
 }
 
@@ -130,16 +122,6 @@ enum CommandPaletteVirtualRow {
     Empty,
 }
 
-#[derive(Clone)]
-enum ShortcutsModalVirtualRow {
-    Heading(String),
-    Row {
-        row: ShortcutModalRow,
-        show_separator: bool,
-    },
-    Empty,
-}
-
 impl WorkspaceApp {
     pub(super) fn open_command_palette(&mut self, cx: &mut Context<Self>) {
         self.release_active_remote_desktop_inputs(cx);
@@ -152,11 +134,18 @@ impl WorkspaceApp {
         cx.notify();
     }
 
-    pub(super) fn close_command_palette(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_command_palette(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.command_palette.update(cx, |palette, cx| {
             palette.close(cx);
         });
         self.ime_marked_text = None;
+        // The palette stole window focus for its input; hand focus back to the
+        // active terminal pane so typing continues without a stray click.
+        self.focus_active_pane(window, cx);
         cx.notify();
     }
 
@@ -176,22 +165,6 @@ impl WorkspaceApp {
             .collect()
     }
 
-    pub(super) fn open_shortcuts_modal(&mut self, cx: &mut Context<Self>) {
-        self.release_active_remote_desktop_inputs(cx);
-        self.shortcuts_modal.open = true;
-        self.shortcuts_modal.query.clear();
-        self.shortcuts_modal.scroll_handle = UniformListScrollHandle::new();
-        self.ime_marked_text = None;
-        cx.notify();
-    }
-
-    pub(super) fn close_shortcuts_modal(&mut self, cx: &mut Context<Self>) {
-        self.shortcuts_modal.open = false;
-        self.shortcuts_modal.query.clear();
-        self.ime_marked_text = None;
-        cx.notify();
-    }
-
     pub(super) fn handle_command_palette_key(
         &mut self,
         event: &KeyDownEvent,
@@ -200,7 +173,9 @@ impl WorkspaceApp {
     ) {
         let key = event.keystroke.key.as_str();
         match key {
-            "escape" if !event.keystroke.modifiers.platform => self.close_command_palette(cx),
+            "escape" if !event.keystroke.modifiers.platform => {
+                self.close_command_palette(window, cx)
+            }
             "enter" if !event.keystroke.modifiers.platform => {
                 self.execute_selected_command_palette_item(window, cx);
             }
@@ -261,6 +236,26 @@ impl WorkspaceApp {
                 self.command_palette
                     .update(cx, |palette, cx| palette.pop_query(cx));
             }
+            // Tab completes the query from the selected item's searchable
+            // value, mirroring shell-style completion in command palettes.
+            "tab" if !event.keystroke.modifiers.platform => {
+                let selected_index = self.command_palette.read(cx).selected_index();
+                let Some(item) = self
+                    .filtered_command_palette_items(cx)
+                    .get(selected_index)
+                    .cloned()
+                else {
+                    return;
+                };
+                let value = item.value;
+                if value.is_empty() {
+                    return;
+                }
+                self.command_palette.update(cx, |palette, cx| {
+                    palette.replace_query_utf16(None, &value, cx);
+                });
+                self.scroll_selected_command_palette_item_into_view(cx);
+            }
             _ => {
                 if let Some(text) = event.keystroke.key_char.as_deref()
                     && !event.keystroke.modifiers.platform
@@ -290,7 +285,9 @@ impl WorkspaceApp {
                     px(COMMAND_PALETTE_VIRTUAL_ROW_HEIGHT),
                     COMMAND_PALETTE_VIRTUAL_OVERSCAN,
                 ),
-                TauriVirtualScrollAlign::Center,
+                // cmdk reveals with minimal movement; centering every keypress
+                // makes the whole list lurch on each arrow key.
+                TauriVirtualScrollAlign::Nearest,
             );
         }
     }
@@ -370,36 +367,6 @@ impl WorkspaceApp {
         .into_any_element()
     }
 
-    pub(super) fn handle_shortcuts_modal_key(
-        &mut self,
-        event: &KeyDownEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let key = event.keystroke.key.as_str();
-        match key {
-            "escape" if !event.keystroke.modifiers.platform => self.close_shortcuts_modal(cx),
-            "backspace" if !event.keystroke.modifiers.platform => {
-                if self.shortcuts_modal.query.pop().is_some() {
-                    // Empty-query Backspace is a browser no-op; only repaint
-                    // after the visible filter text actually changes.
-                    self.shortcuts_modal.scroll_handle = UniformListScrollHandle::new();
-                    cx.notify();
-                }
-            }
-            _ => {
-                if let Some(text) = event.keystroke.key_char.as_deref()
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                    && !text.chars().any(char::is_control)
-                {
-                    self.shortcuts_modal.query.push_str(text);
-                    self.shortcuts_modal.scroll_handle = UniformListScrollHandle::new();
-                    cx.notify();
-                }
-            }
-        }
-    }
-
     fn execute_selected_command_palette_item(
         &mut self,
         window: &mut Window,
@@ -441,7 +408,7 @@ impl WorkspaceApp {
 
         match execution.action {
             PaletteAction::Keybinding(action_id) => {
-                let _ = self.dispatch_keybinding_action(action_id, window, cx);
+                let _ = self.dispatch_palette_action(action_id, window, cx);
             }
             PaletteAction::ActivateTab(tab_id) => self.set_active_tab(tab_id, window, cx),
             PaletteAction::OpenSavedConnection(connection_id) => {
@@ -477,12 +444,6 @@ impl WorkspaceApp {
                     self.set_sidebar_section(SidebarSection::Sessions, cx);
                 }
             }
-            PaletteAction::OpenSavedConnections => self.open_session_manager_tab(window, cx),
-            PaletteAction::OpenSessionManager => self.open_session_manager_tab(window, cx),
-            PaletteAction::OpenRuntime(section) => {
-                self.open_connection_runtime_tab(section, window, cx)
-            }
-            PaletteAction::OpenTopology => self.open_topology_tab(window, cx),
             PaletteAction::ManageTerminalTriggers => {
                 self.open_terminal_trigger_settings(window, cx)
             }
@@ -577,7 +538,7 @@ impl WorkspaceApp {
             .read(cx)
             .terminal_session_lifecycles();
         let (healthy, total) = command_palette_health_counts_from_lifecycles(lifecycles.iter());
-        self.sync_host_tools_lifecycle(true, cx);
+        self.sync_host_tools_lifecycle(cx);
         self.push_command_palette_toast(
             self.i18n_replace(
                 "command_palette.health_result",
@@ -755,7 +716,7 @@ impl WorkspaceApp {
             Ok(Some(host)) => match saved_connection_from_ssh_host(host) {
                 Ok(conn) => {
                     self.prepare_modal_interaction_boundary(cx);
-                    let form = super::session_manager::form_from_saved_connection(&conn, None);
+                    let form = super::connection_workspace::form_from_saved_connection(&conn, None);
                     self.update_connection_form_state(cx, |state| {
                         state.replace_with_new_form(form);
                     });
@@ -957,16 +918,8 @@ impl WorkspaceApp {
 
     fn command_palette_spec_item(&self, spec: CommandSpec, section: PaletteSection) -> PaletteItem {
         let label = self.i18n.t(spec.label_key.as_ref());
-        let shortcut = spec.shortcut_action.and_then(|action_id| {
-            crate::keybindings::action_definition(action_id).and_then(|definition| {
-                crate::keybindings::effective_combo(
-                    definition,
-                    &self.settings_store.settings().keybindings.overrides,
-                    crate::keybindings::KeybindingSide::current(),
-                )
-                .map(|combo| crate::keybindings::format_combo(&combo))
-            })
-        });
+        // Shortcut hints were removed together with the keybinding feature.
+        let shortcut = None;
         PaletteItem {
             id: spec.id.to_string(),
             label: label.clone(),
@@ -989,18 +942,11 @@ impl WorkspaceApp {
                         self.i18n.t("command_palette.session_ssh_terminal")
                     }
                     TabKind::Settings => self.i18n.t("settings_view.title"),
-                    TabKind::SessionManager => self.i18n.t("sidebar.panels.saved_connections"),
-                    TabKind::Runtime => self.i18n.t("sidebar.panels.runtime"),
-                    TabKind::ConnectionPool => self.i18n.t("sidebar.panels.runtime_overview"),
-                    TabKind::Topology => self.i18n.t("topology.title"),
-                    TabKind::NotificationCenter => self.i18n.t("sidebar.panels.notifications"),
                     TabKind::RemoteDesktop => {
                         self.i18n.t("settings_view.terminal.bg_tab_remote_desktop")
                     }
                     TabKind::Forwards => self.i18n.t("sidebar.panels.forwarding"),
                     TabKind::Sftp => self.i18n.t("sidebar.panels.sftp"),
-                    TabKind::Ide => self.i18n.t("settings_view.tabs.ide"),
-                    TabKind::FileManager => self.i18n.t("settings_view.help.category_file_manager"),
                     TabKind::Launcher => self.i18n.t("app.shellLauncher"),
                 };
                 PaletteItem {
@@ -1209,16 +1155,14 @@ impl WorkspaceApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
-                    this.close_command_palette(cx);
-                    window.focus(&this.focus_handle, cx);
+                    this.close_command_palette(window, cx);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _event, window, cx| {
-                    this.close_command_palette(cx);
-                    window.focus(&this.focus_handle, cx);
+                    this.close_command_palette(window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -1325,9 +1269,16 @@ impl WorkspaceApp {
             })
             .cursor(CursorStyle::PointingHand)
             .on_mouse_move(
-                cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
-                    this.command_palette
-                        .update(cx, |palette, cx| palette.set_selected_index(index, cx));
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    // Keyboard navigation scrolls rows underneath a stationary
+                    // pointer; only a genuinely moved pointer may take over
+                    // the highlight from the keyboard.
+                    let moved = this.command_palette_hover_position != Some(event.position);
+                    this.command_palette_hover_position = Some(event.position);
+                    if moved {
+                        this.command_palette
+                            .update(cx, |palette, cx| palette.set_selected_index(index, cx));
+                    }
                 }),
             )
             .on_mouse_down(
@@ -1437,445 +1388,51 @@ impl WorkspaceApp {
             .text_size(px(14.0))
             .line_height(px(20.0));
         let highlight_set = highlights.iter().copied().collect::<HashSet<_>>();
+        // Selected rows colorize every character, matching the previous
+        // per-character renderer; unselected rows keep plain runs neutral.
+        let plain_color = if selected {
+            self.tokens.ui.accent
+        } else {
+            self.tokens.ui.text
+        };
+        // Coalesce consecutive characters into runs so a 30-character row with
+        // one contiguous match paints 2 spans instead of 30 sibling divs.
+        enum Run {
+            Plain(String),
+            Highlight(String),
+        }
+        let mut runs: Vec<Run> = Vec::new();
         for (index, ch) in text.chars().enumerate() {
             let highlighted = highlight_set.contains(&index);
-            label = label.child(
-                div()
-                    .text_color(if highlighted || selected {
-                        rgb(self.tokens.ui.accent)
+            match runs.last_mut() {
+                Some(Run::Plain(run)) if !highlighted => run.push(ch),
+                Some(Run::Highlight(run)) if highlighted => run.push(ch),
+                _ => {
+                    if highlighted {
+                        runs.push(Run::Highlight(ch.to_string()));
                     } else {
-                        rgb(self.tokens.ui.text)
-                    })
-                    .when(highlighted, |part| {
-                        part.font_weight(gpui::FontWeight::SEMIBOLD)
-                    })
-                    .child(ch.to_string()),
-            );
+                        runs.push(Run::Plain(ch.to_string()));
+                    }
+                }
+            }
+        }
+        for run in runs {
+            match run {
+                Run::Plain(chunk) => {
+                    label = label.child(div().text_color(rgb(plain_color)).child(chunk));
+                }
+                Run::Highlight(chunk) => {
+                    label = label.child(
+                        div()
+                            .text_color(rgb(self.tokens.ui.accent))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(chunk),
+                    );
+                }
+            }
         }
         label.into_any_element()
     }
-
-    pub(super) fn render_shortcuts_modal(&self, cx: &mut Context<Self>) -> AnyElement {
-        let categories = self.filtered_shortcut_categories();
-        let query_placeholder = self.i18n.t("shortcuts_modal.search_placeholder");
-        let shortcut_count = categories
-            .iter()
-            .map(|category| category.rows.len())
-            .sum::<usize>();
-        let rows = Arc::new(shortcuts_modal_virtual_rows(categories));
-        let row_count = rows.len();
-        let rows_height = (row_count as f32 * SHORTCUTS_MODAL_VIRTUAL_ROW_HEIGHT)
-            .min(SHORTCUTS_MODAL_LIST_MAX_HEIGHT);
-        let virtual_rows = rows;
-        let entity = cx.entity();
-        dismissible_dialog_backdrop()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, window, cx| {
-                    this.close_shortcuts_modal(cx);
-                    window.focus(&this.focus_handle, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _event, window, cx| {
-                    this.close_shortcuts_modal(cx);
-                    window.focus(&this.focus_handle, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(overlay_content_boundary(
-                dialog_content(&self.tokens)
-                    .w(px(600.0))
-                    .child(
-                        div()
-                            .h(px(44.0))
-                            .px(px(16.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(12.0))
-                            .border_b_1()
-                            .border_color(rgb(self.tokens.ui.border))
-                            .child(Self::render_lucide_icon(
-                                LucideIcon::Search,
-                                16.0,
-                                rgb(self.tokens.ui.text_muted),
-                            ))
-                            .child(self.render_overlay_query_input(
-                                WorkspaceImeTarget::ShortcutsModalSearch,
-                                self.shortcuts_modal.query.clone(),
-                                query_placeholder,
-                                self.tokens.metrics.ui_text_sm,
-                                20.0,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .rounded(px(self.tokens.radii.sm))
-                                    .border_1()
-                                    .border_color(rgb(self.tokens.ui.border))
-                                    .bg(rgb(self.tokens.ui.bg))
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .font_family(settings_mono_font_family(
-                                        self.settings_store.settings(),
-                                    ))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(self.tokens.ui.text_muted))
-                                    .child(if cfg!(target_os = "macos") {
-                                        "⌘/".to_string()
-                                    } else {
-                                        "Ctrl+/".to_string()
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .h(px(rows_height))
-                            .max_h(px(SHORTCUTS_MODAL_LIST_MAX_HEIGHT))
-                            .px(px(16.0))
-                            .py(px(4.0))
-                            .child(tauri_virtual_uniform_list(
-                                "shortcuts-modal-virtual-list",
-                                row_count,
-                                self.shortcuts_modal.scroll_handle.clone(),
-                                TauriVirtualListSpec::new(
-                                    px(SHORTCUTS_MODAL_VIRTUAL_ROW_HEIGHT),
-                                    SHORTCUTS_MODAL_VIRTUAL_OVERSCAN,
-                                ),
-                                move |range, _window, cx| {
-                                    range
-                                        .map(|row_index| {
-                                            let row = virtual_rows[row_index].clone();
-                                            entity.update(cx, |this, cx| {
-                                                this.render_shortcuts_modal_virtual_row(row, cx)
-                                            })
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            )),
-                    )
-                    .child(
-                        div()
-                            .px(px(16.0))
-                            .py(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_t_1()
-                            .border_color(rgb(self.tokens.ui.border))
-                            .bg(rgb(self.tokens.ui.bg_panel))
-                            // This footer paints against the shared DialogContent
-                            // bottom edge, so it must own the same clipped inner
-                            // corners as Tauri's rounded dialog shell.
-                            .rounded_b(px(rounded_shell_child_radius(self.tokens.radii.md)))
-                            .text_size(px(11.0))
-                            .text_color(rgb(self.tokens.ui.text_muted))
-                            .child(self.i18n.t("shortcuts_modal.footer_hint"))
-                            .child(
-                                div()
-                                    .font_family(settings_mono_font_family(
-                                        self.settings_store.settings(),
-                                    ))
-                                    .child(format!(
-                                        "{} {}",
-                                        shortcut_count,
-                                        self.i18n.t("shortcuts_modal.shortcut_count")
-                                    )),
-                            ),
-                    ),
-            ))
-            .into_any_element()
-    }
-
-    fn filtered_shortcut_categories(&self) -> Vec<ShortcutModalCategory> {
-        let query = self.shortcuts_modal.query.trim().to_lowercase();
-        self.shortcut_modal_categories()
-            .into_iter()
-            .filter_map(|mut category| {
-                category.rows.retain(|row| {
-                    query.is_empty()
-                        || row.label.to_lowercase().contains(&query)
-                        || row.shortcut.to_lowercase().contains(&query)
-                        || category.title.to_lowercase().contains(&query)
-                });
-                if category.rows.is_empty() {
-                    None
-                } else {
-                    Some(category)
-                }
-            })
-            .collect()
-    }
-
-    fn shortcut_modal_categories(&self) -> Vec<ShortcutModalCategory> {
-        let side = crate::keybindings::KeybindingSide::current();
-        let overrides = &self.settings_store.settings().keybindings.overrides;
-        let binding = |action_id: &str| {
-            crate::keybindings::action_definition(action_id).and_then(|definition| {
-                crate::keybindings::effective_combo(definition, overrides, side)
-                    .map(|combo| crate::keybindings::format_combo(&combo))
-            })
-        };
-        let registry_row = |action_id: &str, label_key: &str| {
-            binding(action_id).map(|shortcut| ShortcutModalRow {
-                label: self.i18n.t(label_key),
-                shortcut,
-            })
-        };
-        let tab_range = binding("app.goToTab1").map(|shortcut| ShortcutModalRow {
-            label: self.i18n.t("settings_view.help.shortcut_go_to_tab"),
-            shortcut: format!("{}1-9", shortcut.trim_end_matches('1')),
-        });
-        let pane_nav = binding("split.navLeft").map(|shortcut| ShortcutModalRow {
-            label: self.i18n.t("settings_view.help.shortcut_nav_pane"),
-            shortcut: format!("{}Arrow", shortcut.trim_end_matches('←')),
-        });
-
-        let mut categories = vec![
-            ShortcutModalCategory::new(
-                self.i18n.t("settings_view.help.category_app"),
-                [
-                    registry_row("app.newTerminal", "settings_view.help.shortcut_new_tab"),
-                    registry_row(
-                        "app.shellLauncher",
-                        "settings_view.help.shortcut_shell_launcher",
-                    ),
-                    registry_row("app.closeTab", "settings_view.help.shortcut_close_tab"),
-                    registry_row(
-                        "app.closeOtherTabs",
-                        "settings_view.help.shortcut_close_other_tabs",
-                    ),
-                    registry_row("app.nextTab", "settings_view.help.shortcut_next_tab"),
-                    registry_row("app.prevTab", "settings_view.help.shortcut_prev_tab"),
-                    tab_range,
-                    registry_row(
-                        "app.newConnection",
-                        "settings_view.help.shortcut_new_connection",
-                    ),
-                    registry_row("app.navBack", "settings_view.help.shortcut_nav_back"),
-                    registry_row("app.navForward", "settings_view.help.shortcut_nav_forward"),
-                    registry_row(
-                        "app.commandPalette",
-                        "settings_view.help.shortcut_command_palette",
-                    ),
-                    registry_row(
-                        "app.toggleSidebar",
-                        "settings_view.help.shortcut_toggle_sidebar",
-                    ),
-                    registry_row("app.settings", "settings_view.help.shortcut_settings"),
-                    registry_row("app.zenMode", "settings_view.help.shortcut_zen_mode"),
-                    registry_row(
-                        "app.showShortcuts",
-                        "settings_view.help.shortcut_keyboard_shortcuts",
-                    ),
-                    registry_row(
-                        "app.fontIncrease",
-                        "settings_view.help.shortcut_font_increase",
-                    ),
-                    registry_row(
-                        "app.fontDecrease",
-                        "settings_view.help.shortcut_font_decrease",
-                    ),
-                    registry_row("app.fontReset", "settings_view.help.shortcut_font_reset"),
-                ]
-                .into_iter()
-                .flatten()
-                .collect(),
-            ),
-            ShortcutModalCategory::new(
-                self.i18n.t("settings_view.help.category_terminal"),
-                [
-                    registry_row("terminal.search", "settings_view.help.shortcut_find"),
-                    registry_row("terminal.paste", "settings_view.help.shortcut_paste"),
-                    registry_row("terminal.aiPanel", "settings_view.help.shortcut_ai_panel"),
-                    registry_row(
-                        "terminal.recording",
-                        "settings_view.help.shortcut_recording",
-                    ),
-                    registry_row(
-                        "terminal.closePanel",
-                        "settings_view.help.shortcut_close_panel",
-                    ),
-                ]
-                .into_iter()
-                .flatten()
-                .collect(),
-            ),
-            ShortcutModalCategory::new(
-                self.i18n.t("settings_view.help.category_split"),
-                [
-                    registry_row("split.horizontal", "settings_view.help.shortcut_split_h"),
-                    registry_row("split.vertical", "settings_view.help.shortcut_split_v"),
-                    registry_row("split.closePane", "settings_view.help.shortcut_close_pane"),
-                    pane_nav,
-                ]
-                .into_iter()
-                .flatten()
-                .collect(),
-            ),
-        ];
-
-        for (category_key, shortcut_rows) in shortcut_reference_rows() {
-            categories.push(ShortcutModalCategory::new(
-                self.i18n.t(category_key),
-                shortcut_rows
-                    .into_iter()
-                    .map(|(label_key, mac, other)| ShortcutModalRow {
-                        label: self.i18n.t(label_key),
-                        shortcut: if cfg!(target_os = "macos") {
-                            mac.to_string()
-                        } else {
-                            other.to_string()
-                        },
-                    })
-                    .collect(),
-            ));
-        }
-
-        categories.push(ShortcutModalCategory::new(
-            self.i18n.t("settings_view.help.category_palette"),
-            [
-                registry_row("palette.eventLog", "settings_view.help.shortcut_event_log"),
-                registry_row("palette.broadcast", "settings_view.help.shortcut_broadcast"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-        ));
-
-        categories
-    }
-
-    fn render_shortcut_modal_row(
-        &self,
-        row: ShortcutModalRow,
-        show_separator: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // Tauri KeyboardShortcutsModal renders each item as
-        // `flex items-center justify-between`: the label owns the left side and
-        // the kbd badge stays pinned to the row's right edge. Keep the explicit
-        // full-width/flex split here so GPUI virtual rows do not shrink to
-        // content and pull shortcuts next to the text.
-        div()
-            .w_full()
-            .h(px(SHORTCUTS_MODAL_VIRTUAL_ROW_HEIGHT))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(16.0))
-            .when(show_separator, |item| {
-                item.border_b_1()
-                    .border_color(rgba((self.tokens.ui.border << 8) | 0x33))
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(self.tokens.metrics.ui_text_sm))
-                    .text_color(rgb(self.tokens.ui.text))
-                    .child(self.render_selectable_display_text(
-                        "shortcuts-modal-label",
-                        &row.shortcut,
-                        row.label.clone(),
-                        self.tokens.ui.text,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .ml_auto()
-                    .rounded(px(self.tokens.radii.sm))
-                    .border_1()
-                    .border_color(rgb(self.tokens.ui.border))
-                    .bg(rgb(self.tokens.ui.bg_panel))
-                    .px(px(8.0))
-                    .py(px(2.0))
-                    .font_family(settings_mono_font_family(self.settings_store.settings()))
-                    .text_size(px(self.tokens.metrics.ui_text_xs))
-                    .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(self.render_selectable_display_text(
-                        "shortcuts-modal-shortcut",
-                        &row.label,
-                        row.shortcut.clone(),
-                        self.tokens.ui.text_muted,
-                        cx,
-                    )),
-            )
-            .into_any_element()
-    }
-
-    fn render_shortcuts_modal_virtual_row(
-        &self,
-        row: ShortcutsModalVirtualRow,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match row {
-            ShortcutsModalVirtualRow::Heading(title) => div()
-                .h(px(SHORTCUTS_MODAL_VIRTUAL_ROW_HEIGHT))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(self.tokens.metrics.ui_text_xs))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(rgb(self.tokens.ui.text_muted))
-                .child(Self::render_lucide_icon(
-                    LucideIcon::Keyboard,
-                    12.0,
-                    rgb(self.tokens.ui.text_muted),
-                ))
-                .child(self.render_selectable_display_text(
-                    "shortcuts-modal-heading",
-                    &title,
-                    title.to_uppercase(),
-                    self.tokens.ui.text_muted,
-                    cx,
-                ))
-                .into_any_element(),
-            ShortcutsModalVirtualRow::Row {
-                row,
-                show_separator,
-            } => self.render_shortcut_modal_row(row, show_separator, cx),
-            ShortcutsModalVirtualRow::Empty => div()
-                .h(px(SHORTCUTS_MODAL_VIRTUAL_ROW_HEIGHT))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(self.tokens.metrics.ui_text_sm))
-                .text_color(rgb(self.tokens.ui.text_muted))
-                .child(self.render_selectable_display_text(
-                    "shortcuts-modal-empty",
-                    "shortcuts_modal.no_results",
-                    self.i18n.t("shortcuts_modal.no_results"),
-                    self.tokens.ui.text_muted,
-                    cx,
-                ))
-                .into_any_element(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ShortcutModalCategory {
-    title: String,
-    rows: Vec<ShortcutModalRow>,
-}
-
-impl ShortcutModalCategory {
-    fn new(title: String, rows: Vec<ShortcutModalRow>) -> Self {
-        Self { title, rows }
-    }
-}
-
-#[derive(Clone)]
-struct ShortcutModalRow {
-    label: String,
-    shortcut: String,
 }
 
 fn command_palette_scroll_child_index(
@@ -1913,27 +1470,6 @@ fn command_palette_virtual_rows(ranked_items: Vec<RankedItem>) -> Vec<CommandPal
             ranked,
             item_index: index,
         });
-    }
-    rows
-}
-
-fn shortcuts_modal_virtual_rows(
-    categories: Vec<ShortcutModalCategory>,
-) -> Vec<ShortcutsModalVirtualRow> {
-    if categories.is_empty() {
-        return vec![ShortcutsModalVirtualRow::Empty];
-    }
-
-    let mut rows = Vec::new();
-    for category in categories {
-        rows.push(ShortcutsModalVirtualRow::Heading(category.title));
-        let row_count = category.rows.len();
-        for (index, row) in category.rows.into_iter().enumerate() {
-            rows.push(ShortcutsModalVirtualRow::Row {
-                row,
-                show_separator: index + 1 < row_count,
-            });
-        }
     }
     rows
 }
@@ -2022,18 +1558,11 @@ fn tab_kind_icon(kind: &TabKind) -> LucideIcon {
         TabKind::SshTerminal | TabKind::Telnet | TabKind::Serial => {
             LucideIcon::Terminal
         }
-        TabKind::FileManager => LucideIcon::FolderOpen,
         TabKind::Launcher => LucideIcon::Terminal,
-        TabKind::Runtime => LucideIcon::Gauge,
-        TabKind::ConnectionPool => LucideIcon::Gauge,
-        TabKind::Topology => LucideIcon::Network,
-        TabKind::NotificationCenter => LucideIcon::Bell,
         TabKind::Forwards => LucideIcon::ArrowLeftRight,
         TabKind::Sftp => LucideIcon::HardDrive,
-        TabKind::Ide => LucideIcon::Code2,
         TabKind::RemoteDesktop => LucideIcon::Monitor,
         TabKind::Settings => LucideIcon::Settings,
-        TabKind::SessionManager => LucideIcon::LayoutList,
     }
 }
 
@@ -2047,7 +1576,6 @@ fn keybinding_command(
         id,
         label_key: label_key.into(),
         icon,
-        shortcut_action: Some(action_id),
         action: PaletteAction::Keybinding(action_id),
     }
 }
@@ -2070,28 +1598,24 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             id: "cmd:open_telnet_terminal",
             label_key: Cow::Borrowed("command_palette.cmd_open_telnet_terminal"),
             icon: LucideIcon::Network,
-            shortcut_action: None,
             action: PaletteAction::OpenTelnetTerminal,
         },
         CommandSpec {
             id: "cmd:open_serial_terminal",
             label_key: Cow::Borrowed("command_palette.cmd_open_serial_terminal"),
             icon: LucideIcon::Radio,
-            shortcut_action: None,
             action: PaletteAction::OpenSerialTerminal,
         },
         CommandSpec {
             id: "cmd:open_rdp_preview",
             label_key: Cow::Borrowed("command_palette.cmd_open_rdp_preview"),
             icon: LucideIcon::Monitor,
-            shortcut_action: None,
             action: PaletteAction::OpenRemoteDesktopPreview(RemoteDesktopProtocol::Rdp),
         },
         CommandSpec {
             id: "cmd:open_vnc_preview",
             label_key: Cow::Borrowed("command_palette.cmd_open_vnc_preview"),
             icon: LucideIcon::Monitor,
-            shortcut_action: None,
             action: PaletteAction::OpenRemoteDesktopPreview(RemoteDesktopProtocol::Vnc),
         },
         keybinding_command(
@@ -2104,7 +1628,6 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             id: "cmd:manage_terminal_triggers",
             label_key: Cow::Borrowed("command_palette.cmd_manage_terminal_triggers"),
             icon: LucideIcon::Zap,
-            shortcut_action: None,
             action: PaletteAction::ManageTerminalTriggers,
         },
         keybinding_command(
@@ -2119,17 +1642,10 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             "app.zenMode",
             LucideIcon::AppWindow,
         ),
-        keybinding_command(
-            "cmd:toggle_panel",
-            "command_palette.cmd_toggle_panel",
-            "palette.eventLog",
-            LucideIcon::LayoutList,
-        ),
         CommandSpec {
             id: "cmd:close_tab",
             label_key: "command_palette.cmd_close_tab".into(),
             icon: LucideIcon::X,
-            shortcut_action: Some("app.closeTab"),
             action: PaletteAction::CloseTab,
         },
         keybinding_command(
@@ -2166,14 +1682,12 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             id: "cmd:close_other_tabs",
             label_key: "command_palette.cmd_close_other_tabs".into(),
             icon: LucideIcon::Layers,
-            shortcut_action: Some("app.closeOtherTabs"),
             action: PaletteAction::CloseOtherTabs,
         },
         CommandSpec {
             id: "cmd:close_all_tabs",
             label_key: "command_palette.cmd_close_all_tabs".into(),
             icon: LucideIcon::Layers,
-            shortcut_action: None,
             action: PaletteAction::CloseAllTabs,
         },
         keybinding_command(
@@ -2189,24 +1703,15 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             LucideIcon::ArrowRight,
         ),
         CommandSpec {
-            id: "cmd:open_connection_manager",
-            label_key: "command_palette.cmd_open_connection_manager".into(),
-            icon: LucideIcon::FolderOpen,
-            shortcut_action: None,
-            action: PaletteAction::OpenSessionManager,
-        },
-        CommandSpec {
             id: "cmd:theme_next",
             label_key: "command_palette.cmd_theme_next".into(),
             icon: LucideIcon::Sparkles,
-            shortcut_action: None,
             action: PaletteAction::ThemeNext(true),
         },
         CommandSpec {
             id: "cmd:theme_prev",
             label_key: "command_palette.cmd_theme_prev".into(),
             icon: LucideIcon::Sparkles,
-            shortcut_action: None,
             action: PaletteAction::ThemeNext(false),
         },
         keybinding_command(
@@ -2231,98 +1736,72 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             id: "cmd:cursor_block",
             label_key: "command_palette.cmd_cursor_block".into(),
             icon: LucideIcon::Square,
-            shortcut_action: None,
             action: PaletteAction::CursorStyle(SettingsCursorStyle::Block),
         },
         CommandSpec {
             id: "cmd:cursor_bar",
             label_key: "command_palette.cmd_cursor_bar".into(),
             icon: LucideIcon::Terminal,
-            shortcut_action: None,
             action: PaletteAction::CursorStyle(SettingsCursorStyle::Bar),
         },
         CommandSpec {
             id: "cmd:cursor_underline",
             label_key: "command_palette.cmd_cursor_underline".into(),
             icon: LucideIcon::ArrowDown,
-            shortcut_action: None,
             action: PaletteAction::CursorStyle(SettingsCursorStyle::Underline),
         },
         CommandSpec {
             id: "cmd:sidebar_sessions",
             label_key: "command_palette.cmd_sidebar_sessions".into(),
             icon: LucideIcon::ListTree,
-            shortcut_action: None,
             action: PaletteAction::Sidebar(SidebarSection::Sessions),
         },
         CommandSpec {
             id: "cmd:sidebar_saved",
             label_key: "command_palette.cmd_sidebar_saved".into(),
             icon: LucideIcon::Server,
-            shortcut_action: None,
-            action: PaletteAction::OpenSavedConnections,
+            action: PaletteAction::Sidebar(SidebarSection::Sessions),
         },
         CommandSpec {
             id: "cmd:sidebar_sftp",
             label_key: "command_palette.cmd_sidebar_sftp".into(),
             icon: LucideIcon::HardDrive,
-            shortcut_action: None,
             action: PaletteAction::OpenSftp,
-        },
-        CommandSpec {
-            id: "cmd:sidebar_forwards",
-            label_key: "command_palette.cmd_sidebar_forwards".into(),
-            icon: LucideIcon::ArrowLeftRight,
-            shortcut_action: None,
-            action: PaletteAction::Sidebar(SidebarSection::Forwards),
-        },
-        CommandSpec {
-            id: "cmd:open_runtime",
-            label_key: "command_palette.cmd_open_runtime".into(),
-            icon: LucideIcon::Gauge,
-            shortcut_action: None,
-            action: PaletteAction::OpenRuntime(ConnectionRuntimeSection::Overview),
         },
         CommandSpec {
             id: "cmd:disconnect_all",
             label_key: "command_palette.cmd_disconnect_all".into(),
             icon: LucideIcon::Power,
-            shortcut_action: None,
             action: PaletteAction::DisconnectAll,
         },
         CommandSpec {
             id: "cmd:reconnect_all",
             label_key: "command_palette.cmd_reconnect_all".into(),
             icon: LucideIcon::RefreshCw,
-            shortcut_action: None,
             action: PaletteAction::ReconnectAll,
         },
         CommandSpec {
             id: "cmd:cancel_reconnect",
             label_key: "command_palette.cmd_cancel_reconnect".into(),
             icon: LucideIcon::StopCircle,
-            shortcut_action: None,
             action: PaletteAction::CancelReconnect,
         },
         CommandSpec {
             id: "cmd:health_check",
             label_key: "command_palette.cmd_health_check".into(),
             icon: LucideIcon::Activity,
-            shortcut_action: None,
             action: PaletteAction::HealthCheck,
         },
         CommandSpec {
             id: "cmd:shell_launcher",
             label_key: "command_palette.cmd_shell_launcher".into(),
             icon: LucideIcon::Terminal,
-            shortcut_action: Some("app.shellLauncher"),
             action: PaletteAction::Keybinding("app.shellLauncher"),
         },
         CommandSpec {
             id: "cmd:toggle_terminal_performance",
             label_key: "command_palette.cmd_toggle_terminal_performance".into(),
             icon: LucideIcon::Gauge,
-            shortcut_action: None,
             action: PaletteAction::ToggleTerminalPerformance,
         },
         keybinding_command(
@@ -2347,28 +1826,18 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             id: "cmd:reset_panes",
             label_key: "command_palette.cmd_reset_panes".into(),
             icon: LucideIcon::Layers,
-            shortcut_action: None,
             action: PaletteAction::ResetPanes,
-        },
-        CommandSpec {
-            id: "cmd:open_topology",
-            label_key: "command_palette.cmd_open_topology".into(),
-            icon: LucideIcon::Network,
-            shortcut_action: None,
-            action: PaletteAction::OpenTopology,
         },
         CommandSpec {
             id: "cmd:reset_settings",
             label_key: "command_palette.cmd_reset_settings".into(),
             icon: LucideIcon::AlertTriangle,
-            shortcut_action: None,
             action: PaletteAction::ResetSettings,
         },
         CommandSpec {
             id: "cmd:reload_window",
             label_key: "command_palette.cmd_reload_window".into(),
             icon: LucideIcon::RefreshCw,
-            shortcut_action: None,
             action: PaletteAction::ReloadWindow,
         },
     ]
@@ -2377,144 +1846,16 @@ fn command_palette_specs() -> Vec<CommandSpec> {
 fn help_palette_specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec {
-            id: "cmd:show_shortcuts",
-            label_key: "command_palette.cmd_show_shortcuts".into(),
-            icon: LucideIcon::Keyboard,
-            shortcut_action: Some("app.showShortcuts"),
-            action: PaletteAction::Keybinding("app.showShortcuts"),
-        },
-        CommandSpec {
             id: "cmd:show_welcome",
             label_key: "command_palette.cmd_show_welcome".into(),
             icon: LucideIcon::Home,
-            shortcut_action: None,
             action: PaletteAction::ShowWelcome,
         },
         CommandSpec {
             id: "cmd:show_version_migration",
             label_key: "command_palette.cmd_show_version_migration".into(),
             icon: LucideIcon::Sparkles,
-            shortcut_action: None,
             action: PaletteAction::ShowVersionMigration,
         },
     ]
-}
-
-fn shortcut_reference_rows() -> Vec<(
-    &'static str,
-    Vec<(&'static str, &'static str, &'static str)>,
-)> {
-    vec![
-        (
-            "settings_view.help.category_file_manager",
-            vec![
-                ("settings_view.help.shortcut_select_all", "⌘A", "Ctrl+A"),
-                ("settings_view.help.shortcut_copy", "⌘C", "Ctrl+C"),
-                ("settings_view.help.shortcut_cut", "⌘X", "Ctrl+X"),
-                ("settings_view.help.shortcut_paste", "⌘V", "Ctrl+V"),
-                ("settings_view.help.shortcut_rename", "F2", "F2"),
-                ("settings_view.help.shortcut_delete", "Delete", "Delete"),
-                ("settings_view.help.shortcut_quick_look", "Space", "Space"),
-                ("settings_view.help.shortcut_open", "Enter", "Enter"),
-            ],
-        ),
-        (
-            "settings_view.help.category_sftp",
-            vec![
-                ("settings_view.help.shortcut_select_all", "⌘A", "Ctrl+A"),
-                ("settings_view.help.shortcut_quick_look", "Space", "Space"),
-                (
-                    "settings_view.help.shortcut_sftp_enter_dir",
-                    "Enter",
-                    "Enter",
-                ),
-                ("settings_view.help.shortcut_sftp_upload", "→", "→"),
-                ("settings_view.help.shortcut_sftp_download", "←", "←"),
-                ("settings_view.help.shortcut_rename", "F2", "F2"),
-                ("settings_view.help.shortcut_delete", "Delete", "Delete"),
-            ],
-        ),
-        (
-            "settings_view.help.category_editor",
-            vec![
-                ("settings_view.help.shortcut_save", "⌘S", "Ctrl+S"),
-                ("settings_view.help.shortcut_find", "⌘F", "Ctrl+F"),
-                ("settings_view.help.shortcut_copy", "⌘C", "Ctrl+C"),
-                ("settings_view.help.shortcut_paste", "⌘V", "Ctrl+V"),
-                ("settings_view.help.shortcut_close", "Esc", "Esc"),
-            ],
-        ),
-    ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quick_connect_host_parser_matches_tauri_shape() {
-        assert_eq!(
-            parse_explicit_user_host_port_target("root@example.com"),
-            Some(("root".to_string(), "example.com".to_string(), 22))
-        );
-        assert_eq!(
-            parse_explicit_user_host_port_target("root@example.com:2200"),
-            Some(("root".to_string(), "example.com".to_string(), 2200))
-        );
-        assert!(parse_explicit_user_host_port_target("example.com").is_none());
-        assert!(parse_explicit_user_host_port_target("root@example.com:abc").is_none());
-    }
-
-    #[test]
-    fn quick_connect_alias_query_rejects_tauri_excluded_characters() {
-        assert!(is_literal_ssh_config_alias_query("prod-db"));
-        assert!(!is_literal_ssh_config_alias_query(""));
-        assert!(!is_literal_ssh_config_alias_query("prod db"));
-        assert!(!is_literal_ssh_config_alias_query("user@host"));
-        assert!(!is_literal_ssh_config_alias_query("host:2222"));
-    }
-
-    #[test]
-    fn remote_desktop_quick_connect_uses_protocol_default_ports() {
-        let vnc = RemoteDesktopConnectionProfile::parse_quick_connect("vnc://example.com").unwrap();
-        let rdp = RemoteDesktopConnectionProfile::parse_quick_connect("rdp://example.com").unwrap();
-
-        assert_eq!(vnc.protocol, RemoteDesktopProtocol::Vnc);
-        assert_eq!(vnc.endpoint.host, "example.com");
-        assert_eq!(vnc.endpoint.port, 5900);
-        assert_eq!(vnc.label, "vnc://example.com:5900");
-        assert_eq!(rdp.protocol, RemoteDesktopProtocol::Rdp);
-        assert_eq!(rdp.endpoint.port, 3389);
-    }
-
-    #[test]
-    fn remote_desktop_quick_connect_accepts_explicit_port_and_ipv6() {
-        let explicit =
-            RemoteDesktopConnectionProfile::parse_quick_connect("vnc://example.com:5901").unwrap();
-        let ipv6 = RemoteDesktopConnectionProfile::parse_quick_connect("vnc://[::1]:5902").unwrap();
-
-        assert_eq!(explicit.endpoint.port, 5901);
-        assert_eq!(ipv6.endpoint.host, "::1");
-        assert_eq!(ipv6.endpoint.port, 5902);
-        assert_eq!(ipv6.quick_connect_target(), "vnc://[::1]:5902");
-    }
-
-    #[test]
-    fn remote_desktop_quick_connect_rejects_paths_credentials_and_bad_ports() {
-        assert!(
-            RemoteDesktopConnectionProfile::parse_quick_connect("vnc://example.com/screen")
-                .is_none()
-        );
-        assert!(
-            RemoteDesktopConnectionProfile::parse_quick_connect("vnc://user@example.com").is_none()
-        );
-        assert!(
-            RemoteDesktopConnectionProfile::parse_quick_connect("vnc://example.com:0").is_none()
-        );
-        assert!(
-            RemoteDesktopConnectionProfile::parse_quick_connect("vnc://example.com:not-a-port")
-                .is_none()
-        );
-        assert!(RemoteDesktopConnectionProfile::parse_quick_connect("ssh://example.com").is_none());
-    }
 }

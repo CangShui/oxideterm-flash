@@ -14,15 +14,12 @@ const EN_PARTS: &[&str] = &[
     include_str!("../locales/en/sessionManager.json"),
     include_str!("../locales/en/modals.json"),
     include_str!("../locales/en/connections.json"),
-    include_str!("../locales/en/eventLog.json"),
     include_str!("../locales/en/profiler.json"),
     include_str!("../locales/en/forwards.json"),
     include_str!("../locales/en/sftp.json"),
     include_str!("../locales/en/ssh.json"),
     include_str!("../locales/en/terminal.json"),
     include_str!("../locales/en/mosh.json"),
-    include_str!("../locales/en/ide.json"),
-    include_str!("../locales/en/fileManager.json"),
     include_str!("../locales/en/launcher.json"),
     include_str!("../locales/en/graphics.json"),
 ];
@@ -35,45 +32,20 @@ const ZH_CN_PARTS: &[&str] = &[
     include_str!("../locales/zh-CN/sessionManager.json"),
     include_str!("../locales/zh-CN/modals.json"),
     include_str!("../locales/zh-CN/connections.json"),
-    include_str!("../locales/zh-CN/eventLog.json"),
     include_str!("../locales/zh-CN/profiler.json"),
     include_str!("../locales/zh-CN/forwards.json"),
     include_str!("../locales/zh-CN/sftp.json"),
     include_str!("../locales/zh-CN/ssh.json"),
     include_str!("../locales/zh-CN/terminal.json"),
     include_str!("../locales/zh-CN/mosh.json"),
-    include_str!("../locales/zh-CN/ide.json"),
-    include_str!("../locales/zh-CN/fileManager.json"),
     include_str!("../locales/zh-CN/launcher.json"),
     include_str!("../locales/zh-CN/graphics.json"),
-];
-const ZH_TW_PARTS: &[&str] = &[
-    include_str!("../locales/zh-TW/common.json"),
-    include_str!("../locales/zh-TW/menu.json"),
-    include_str!("../locales/zh-TW/sidebar.json"),
-    include_str!("../locales/zh-TW/settings.json"),
-    include_str!("../locales/zh-TW/settings_view.json"),
-    include_str!("../locales/zh-TW/sessionManager.json"),
-    include_str!("../locales/zh-TW/modals.json"),
-    include_str!("../locales/zh-TW/connections.json"),
-    include_str!("../locales/zh-TW/eventLog.json"),
-    include_str!("../locales/zh-TW/profiler.json"),
-    include_str!("../locales/zh-TW/forwards.json"),
-    include_str!("../locales/zh-TW/sftp.json"),
-    include_str!("../locales/zh-TW/ssh.json"),
-    include_str!("../locales/zh-TW/terminal.json"),
-    include_str!("../locales/zh-TW/mosh.json"),
-    include_str!("../locales/zh-TW/ide.json"),
-    include_str!("../locales/zh-TW/fileManager.json"),
-    include_str!("../locales/zh-TW/launcher.json"),
-    include_str!("../locales/zh-TW/graphics.json"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Locale {
     En,
     ZhCn,
-    ZhTw,
 }
 
 #[derive(Clone, Debug)]
@@ -181,7 +153,6 @@ fn locale_parts(locale: Locale) -> &'static [&'static str] {
     match locale {
         Locale::En => EN_PARTS,
         Locale::ZhCn => ZH_CN_PARTS,
-        Locale::ZhTw => ZH_TW_PARTS,
     }
 }
 
@@ -238,9 +209,6 @@ mod tests {
         let mut i18n = I18n::new(Locale::ZhCn);
         assert_eq!(i18n.loaded_catalog_count(), 2);
 
-        i18n.set_locale(Locale::ZhTw);
-        assert_eq!(i18n.loaded_catalog_count(), 3);
-        assert_eq!(i18n.t("menu.new_terminal"), "新終端機");
     }
 
     #[test]
@@ -256,7 +224,7 @@ mod tests {
     fn locale_catalogs_have_the_same_complete_key_set() {
         use std::collections::BTreeSet;
 
-        let locales = [Locale::En, Locale::ZhCn, Locale::ZhTw];
+        let locales = [Locale::En, Locale::ZhCn];
         let english_keys: BTreeSet<_> = LocaleCatalog::from_json_parts(EN_PARTS)
             .messages
             .into_keys()
@@ -282,9 +250,8 @@ mod tests {
         let expected = [
             ("language.english", "English"),
             ("language.simplified_chinese", "简体中文"),
-            ("language.traditional_chinese", "繁體中文"),
         ];
-        let locales = [Locale::En, Locale::ZhCn, Locale::ZhTw];
+        let locales = [Locale::En, Locale::ZhCn];
 
         for locale in locales {
             let i18n = I18n::new(locale);

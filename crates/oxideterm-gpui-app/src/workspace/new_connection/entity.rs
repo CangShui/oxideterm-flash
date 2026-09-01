@@ -556,6 +556,10 @@ impl ConnectionFlowEntity {
                     form.error = None;
                 }
             }
+            // The jump sub-form is gone whether the exit committed or cancelled;
+            // a lingering Jump* focus would route later Tab or typing into a
+            // missing field owner and panic.
+            super::form_state::clear_stale_jump_field_focus(form);
         }
         self.form.jump_server_presence.reopen();
         cx.notify();
@@ -1332,6 +1336,28 @@ mod tests {
             assert!(form.jump_server_form.is_none());
             assert_eq!(form.proxy_hops.len(), 1);
             assert_eq!(form.proxy_hops[0].host, "jump.example.test");
+        });
+    }
+
+    #[gpui::test]
+    fn jump_server_exit_remaps_a_stale_jump_field_focus(cx: &mut TestAppContext) {
+        let entity = cx.new(ConnectionFlowEntity::new);
+
+        entity.update(cx, |entity, cx| {
+            let mut form = NewConnectionForm::default();
+            let mut jump_server = NewConnectionProxyHop::new();
+            jump_server.host = "jump.example.test".to_string();
+            form.jump_server_form = Some(jump_server);
+            form.focused_field = NewConnectionField::JumpHost;
+            form.field_focused = true;
+            entity.form.replace_with_new_form(form);
+
+            assert!(entity.begin_jump_server_form_exit(true, Duration::ZERO, cx));
+            let form = entity.form.form.as_ref().expect("retained connection form");
+            assert!(form.jump_server_form.is_none());
+            // Key routing must not keep pointing at the closed jump sub-form.
+            assert_eq!(form.focused_field, NewConnectionField::Name);
+            assert!(!form.field_focused);
         });
     }
 }

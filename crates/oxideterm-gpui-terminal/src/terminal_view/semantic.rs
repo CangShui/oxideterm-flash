@@ -44,8 +44,15 @@ pub(super) fn append_terminal_semantics_for_rows(
             semantic_scheme,
             semantic_shell,
         ) {
-            let start = line.text[..span.range.start].chars().count();
-            let end = line.text[..span.range.end].chars().count();
+            // Span offsets are byte indices over line text that can be rewritten
+            // between classification and layout; clamping to the nearest char
+            // boundary keeps slicing from panicking on multibyte characters.
+            let start = line.text[..clamp_to_char_boundary(&line.text, span.range.start)]
+                .chars()
+                .count();
+            let end = line.text[..clamp_to_char_boundary(&line.text, span.range.end)]
+                .chars()
+                .count();
             let Some(cells) = line.map.get(start..end) else {
                 continue;
             };
@@ -96,6 +103,16 @@ pub(super) fn append_terminal_semantics_for_rows(
             }
         }
     }
+}
+
+// Clamps a byte offset onto the character boundary at or before it so byte
+// indices that land inside a multibyte character never panic when slicing.
+fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn semantic_component_class(class: SemanticClass, ch: char, option_prefix: bool) -> SemanticClass {

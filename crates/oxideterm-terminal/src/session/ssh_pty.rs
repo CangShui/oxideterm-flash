@@ -44,7 +44,6 @@ pub struct SshPtySession {
     output_processor: Option<TerminalOutputProcessor>,
     output_events_enabled: bool,
     trigger_stream: Option<oxideterm_terminal_triggers::TerminalTriggerStream>,
-    privilege_prompt: TerminalPrivilegePromptStream,
     input_encoder: TerminalInputEncoder,
     encoding_detector: EncodingMismatchDetector,
     trzsz_consumer: Option<TrzszConsumer>,
@@ -263,7 +262,6 @@ impl SshPtySession {
             output_processor: None,
             output_events_enabled: false,
             trigger_stream: None,
-            privilege_prompt: TerminalPrivilegePromptStream::default(),
             input_encoder: TerminalInputEncoder::new(encoding),
             encoding_detector: EncodingMismatchDetector::new(encoding),
             trzsz_consumer,
@@ -397,10 +395,6 @@ impl SshPtySession {
                             self.pending_events
                                 .push(TerminalEvent::TriggerMatched(matched));
                         });
-                    }
-                    for event in self.privilege_prompt.observe(decoded.as_ref()) {
-                        self.pending_events
-                            .push(TerminalEvent::PrivilegePrompt(event));
                     }
                     if self.output_events_enabled {
                         // The scanner removes private OSC before persistence;
@@ -799,7 +793,6 @@ impl TerminalSessionBackend for SshPtySession {
         self.encoding = encoding;
         self.output_decoder.set_encoding(encoding);
         self.output_decoder.reset();
-        self.privilege_prompt = TerminalPrivilegePromptStream::default();
         self.input_encoder.set_encoding(encoding);
         self.encoding_detector.set_encoding(encoding);
     }
@@ -807,7 +800,6 @@ impl TerminalSessionBackend for SshPtySession {
     fn set_output_processor(&mut self, processor: Option<TerminalOutputProcessor>) {
         self.output_processor = processor;
         self.output_decoder.reset();
-        self.privilege_prompt = TerminalPrivilegePromptStream::default();
         self.encoding_detector.set_encoding(self.encoding);
     }
 

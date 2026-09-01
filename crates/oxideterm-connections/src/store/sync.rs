@@ -37,7 +37,6 @@ pub struct PreparedSavedConnectionsSync {
     checkpoint: ConnectionStoreCheckpoint,
     outcome: ApplySavedConnectionsSyncOutcome,
     pending_keychain_ids: Vec<String>,
-    pending_privilege_keychain_ids: Vec<String>,
 }
 
 impl PreparedSavedConnectionsSync {
@@ -53,10 +52,6 @@ impl fmt::Debug for PreparedSavedConnectionsSync {
             .field("store_path", &self.checkpoint.store_path)
             .field("outcome", &self.outcome)
             .field("pending_keychain_entries", &self.pending_keychain_ids.len())
-            .field(
-                "pending_privilege_keychain_entries",
-                &self.pending_privilege_keychain_ids.len(),
-            )
             .field("checkpoint", &"[redacted connection store checkpoint]")
             .finish()
     }
@@ -71,7 +66,6 @@ pub struct SavedConnectionsSyncCleanup {
     store_path: PathBuf,
     outcome: ApplySavedConnectionsSyncOutcome,
     pending_keychain_ids: Vec<String>,
-    pending_privilege_keychain_ids: Vec<String>,
 }
 
 impl SavedConnectionsSyncCleanup {
@@ -80,7 +74,7 @@ impl SavedConnectionsSyncCleanup {
     }
 
     pub fn pending_keychain_entries(&self) -> usize {
-        self.pending_keychain_ids.len() + self.pending_privilege_keychain_ids.len()
+        self.pending_keychain_ids.len()
     }
 }
 
@@ -91,10 +85,6 @@ impl fmt::Debug for SavedConnectionsSyncCleanup {
             .field("store_path", &self.store_path)
             .field("outcome", &self.outcome)
             .field("pending_keychain_entries", &self.pending_keychain_ids.len())
-            .field(
-                "pending_privilege_keychain_entries",
-                &self.pending_privilege_keychain_ids.len(),
-            )
             .finish()
     }
 }
@@ -130,8 +120,8 @@ impl ConnectionStore {
         }
 
         // This clone restores connections, groups, all profile types,
-        // tombstones, recent entries, managed-key metadata, and local privilege
-        // metadata as one in-memory state transition.
+        // tombstones, recent entries, and managed-key metadata as one
+        // in-memory state transition.
         self.data = checkpoint.original_data.clone();
         self.storage_format = checkpoint.original_storage_format;
         Ok(())
@@ -192,6 +182,36 @@ impl ConnectionStore {
         Ok(outcome)
     }
 
+    /// Counts how many locally stored connections this incoming snapshot would
+    /// delete, without mutating any state. Used by the sync conflict prompt so
+    /// the user can approve or reject a remote deletion before it is applied.
+    pub fn preview_saved_connections_snapshot_deletions(
+        &self,
+        snapshot: &SavedConnectionsSyncSnapshot,
+    ) -> Result<usize, anyhow::Error> {
+        let existing_by_id: HashMap<String, &SavedConnection> = self
+            .data
+            .connections
+            .iter()
+            .map(|connection| (connection.id.clone(), connection))
+            .collect();
+        let mut deletions = 0usize;
+        for record in &snapshot.records {
+            if !record.deleted {
+                continue;
+            }
+            let record_updated_at =
+                parse_connection_sync_timestamp(&record.updated_at, "saved connection sync updated_at")?;
+            let would_delete = existing_by_id
+                .get(&record.id)
+                .is_some_and(|existing| connection_sync_updated_at(existing) <= record_updated_at);
+            if would_delete {
+                deletions += 1;
+            }
+        }
+        Ok(deletions)
+    }
+
     pub fn prepare_saved_connections_snapshot(
         &mut self,
         snapshot: SavedConnectionsSyncSnapshot,
@@ -201,7 +221,6 @@ impl ConnectionStore {
         let mut result = ApplySavedConnectionsSyncSnapshotResult::default();
         let mut deleted_connection_ids = Vec::new();
         let mut keychain_ids_to_delete = Vec::new();
-        let mut privilege_keychain_ids_to_delete = Vec::new();
 
         let apply_result = (|| {
             let existing_by_id: HashMap<String, SavedConnection> = self
@@ -237,8 +256,6 @@ impl ConnectionStore {
                     {
                         deleted_connection_ids.push(removed.id.clone());
                         keychain_ids_to_delete.extend(collect_connection_keychain_ids(&removed));
-                        privilege_keychain_ids_to_delete
-                            .extend(collect_privilege_keychain_ids(&removed));
                         result.applied += 1;
                     } else if self.upsert_connection_tombstone(record.id.clone(), record_updated_at)
                     {
@@ -340,8 +357,6 @@ impl ConnectionStore {
 
         keychain_ids_to_delete.sort();
         keychain_ids_to_delete.dedup();
-        privilege_keychain_ids_to_delete.sort();
-        privilege_keychain_ids_to_delete.dedup();
 
         Ok(PreparedSavedConnectionsSync {
             checkpoint,
@@ -350,7 +365,6 @@ impl ConnectionStore {
                 deleted_connection_ids,
             },
             pending_keychain_ids: keychain_ids_to_delete,
-            pending_privilege_keychain_ids: privilege_keychain_ids_to_delete,
         })
     }
 
@@ -370,7 +384,6 @@ impl ConnectionStore {
             store_path: prepared.checkpoint.store_path,
             outcome: prepared.outcome,
             pending_keychain_ids: prepared.pending_keychain_ids,
-            pending_privilege_keychain_ids: prepared.pending_privilege_keychain_ids,
         })
     }
 
@@ -391,27 +404,11 @@ impl ConnectionStore {
             }
         }
 
-        let mut pending_privilege_keychain_ids =
-            std::mem::take(&mut cleanup.pending_privilege_keychain_ids);
-        pending_privilege_keychain_ids.append(&mut self.data.pending_privilege_keychain_cleanup);
-        pending_privilege_keychain_ids.sort();
-        pending_privilege_keychain_ids.dedup();
-        let mut failed_privilege_keychain_ids = Vec::new();
-        for keychain_id in pending_privilege_keychain_ids {
-            if self.privilege_keychain.delete(&keychain_id).is_err() {
-                failed_privilege_keychain_ids.push(keychain_id);
-            }
-        }
-
         self.data.pending_keychain_cleanup = failed_keychain_ids.clone();
-        self.data.pending_privilege_keychain_cleanup = failed_privilege_keychain_ids.clone();
         cleanup.pending_keychain_ids = failed_keychain_ids;
-        cleanup.pending_privilege_keychain_ids = failed_privilege_keychain_ids;
         self.save()
             .context("failed to persist connection keychain cleanup state")?;
-        if cleanup.pending_keychain_ids.is_empty()
-            && cleanup.pending_privilege_keychain_ids.is_empty()
-        {
+        if cleanup.pending_keychain_ids.is_empty() {
             Ok(())
         } else {
             bail!(
@@ -638,9 +635,6 @@ fn build_saved_connection_from_sync_payload(
         icon: payload.icon.clone(),
         tags: payload.tags.clone(),
         post_connect_command: None,
-        privilege_credentials: existing
-            .map(|connection| connection.privilege_credentials.clone())
-            .unwrap_or_default(),
     })
 }
 

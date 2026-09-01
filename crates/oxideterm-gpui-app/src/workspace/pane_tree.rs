@@ -8,6 +8,9 @@ const SPLIT_HANDLE_LINE_WIDTH: f32 = 1.0;
 const ACTIVE_PANE_BORDER_ALPHA: u32 = 0x66;
 const ACTIVE_PANE_SHADOW_ALPHA: u32 = 0x24;
 const ACTIVE_PANE_SHADOW_BLUR: f32 = 10.0;
+// Split group bounds probes share the anchor id space with text inputs; the
+// high base keeps every generated id out of the settings/manual ranges.
+const SPLIT_GROUP_PROBE_BASE: u64 = 900_000_000;
 
 #[derive(Clone)]
 pub(super) struct SplitDrag {
@@ -17,11 +20,14 @@ pub(super) struct SplitDrag {
     direction: SplitDirection,
     start_position: gpui::Point<Pixels>,
     start_sizes: Vec<f32>,
+    // Percentage sizes are relative to the split group container, so the drag
+    // divisor must be the container extent measured at drag start, never the
+    // window viewport.
+    container_extent: f32,
 }
 
 #[derive(Clone, Copy)]
 enum TerminalPaneInteraction {
-    PrivilegePromptSubmit,
     ContextAction,
 }
 
@@ -150,26 +156,17 @@ impl WorkspaceApp {
                     cx.notify();
                 }
             }
-            TerminalPaneEvent::PrivilegePromptStateChanged => {
-                if self.active_pane_id(cx) == Some(pane_id)
-                    && self.sync_active_privilege_prompt_inline_hint(cx)
-                {
-                    cx.notify();
-                }
-            }
-            TerminalPaneEvent::PrivilegePromptSubmitRequested => self
-                .deliver_terminal_pane_interaction(
-                    pane_id,
-                    window_handle,
-                    TerminalPaneInteraction::PrivilegePromptSubmit,
-                    cx,
-                ),
             TerminalPaneEvent::ContextActionRequested => self.deliver_terminal_pane_interaction(
                 pane_id,
                 window_handle,
                 TerminalPaneInteraction::ContextAction,
                 cx,
             ),
+            TerminalPaneEvent::FontSizeAdjustRequested { delta } => {
+                // The pane only reports zoom intent; the Workspace owns the
+                // persisted font-size setting the shortcuts also use.
+                self.adjust_terminal_font_size(delta, cx);
+            }
         }
     }
 
@@ -190,9 +187,6 @@ impl WorkspaceApp {
                             workspace.tab_host.read(cx).panes().get(&pane_id).cloned()
                         {
                             pane.update(cx, |pane, _cx| match interaction {
-                                TerminalPaneInteraction::PrivilegePromptSubmit => {
-                                    pane.take_privilege_prompt_submit_request();
-                                }
                                 TerminalPaneInteraction::ContextAction => {
                                     pane.take_context_action_request();
                                 }
@@ -202,9 +196,6 @@ impl WorkspaceApp {
                     }
 
                     let handled = match interaction {
-                        TerminalPaneInteraction::PrivilegePromptSubmit => {
-                            workspace.handle_active_privilege_prompt_submit_request(window, cx)
-                        }
                         TerminalPaneInteraction::ContextAction => workspace
                             .handle_terminal_context_action_request_for_pane(pane_id, window, cx),
                     };
@@ -350,6 +341,19 @@ impl WorkspaceApp {
         }
 
         if matches!(tab_kind, TabKind::SshTerminal) {
+            // The SSH pane runtime owns one shared node session per tab; a
+            // silent return here read as a broken button, so explain the
+            // refusal instead.
+            self.push_workspace_notice(
+                TerminalNotice {
+                    title: self.i18n.t("terminal.split.ssh_unsupported"),
+                    description: None,
+                    status_text: None,
+                    progress: None,
+                    variant: TerminalNoticeVariant::Warning,
+                },
+                cx,
+            );
             return;
         }
         if self.active_tab_has_serial_terminal(cx) {
@@ -487,8 +491,18 @@ impl WorkspaceApp {
         direction: SplitDirection,
         sizes: &[f32],
         event: &MouseDownEvent,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
+        let viewport = window.viewport_size();
+        let container_extent = self
+            .split_group_extents
+            .get(&group_id)
+            .copied()
+            .unwrap_or_else(|| match direction {
+                SplitDirection::Horizontal => f32::from(viewport.width),
+                SplitDirection::Vertical => f32::from(viewport.height),
+            });
         self.split_drag = Some(SplitDrag {
             tab_id,
             group_id,
@@ -496,6 +510,7 @@ impl WorkspaceApp {
             direction,
             start_position: event.position,
             start_sizes: sizes.to_vec(),
+            container_extent,
         });
         cx.notify();
     }
@@ -503,7 +518,7 @@ impl WorkspaceApp {
     pub(super) fn update_split_drag(
         &mut self,
         event: &MouseMoveEvent,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self.split_drag.clone() else {
@@ -511,19 +526,11 @@ impl WorkspaceApp {
         };
         // Splitters use root-level pointer capture. While dragging outside the
         // splitter element, the stored drag state owns motion until mouse-up.
-        let viewport = window.viewport_size();
-        let delta_fraction = match drag.direction {
-            SplitDirection::Horizontal => {
-                f32::from(event.position.x - drag.start_position.x)
-                    / f32::from(viewport.width).max(1.0)
-                    * 100.0
-            }
-            SplitDirection::Vertical => {
-                f32::from(event.position.y - drag.start_position.y)
-                    / f32::from(viewport.height).max(1.0)
-                    * 100.0
-            }
+        let delta_px = match drag.direction {
+            SplitDirection::Horizontal => f32::from(event.position.x - drag.start_position.x),
+            SplitDirection::Vertical => f32::from(event.position.y - drag.start_position.y),
         };
+        let delta_fraction = delta_px / drag.container_extent.max(1.0) * 100.0;
         let next_sizes = adjusted_split_sizes(&drag.start_sizes, drag.handle_index, delta_fraction);
         let updated = self.tab_host.update(cx, |tab_host, _| {
             tab_host.update_group_sizes(drag.tab_id, drag.group_id, &next_sizes)
@@ -739,7 +746,7 @@ impl WorkspaceApp {
                             })
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                     if event.click_count >= 2 {
                                         this.reset_split_group_sizes(tab_id, group_id, cx);
                                         return;
@@ -751,6 +758,7 @@ impl WorkspaceApp {
                                         direction,
                                         &start_sizes,
                                         event,
+                                        window,
                                         cx,
                                     );
                                 }),
@@ -770,7 +778,26 @@ impl WorkspaceApp {
                     }
                 }
 
-                group.into_any_element()
+                // Probe the container every paint so divider drags convert
+                // pixel deltas against this group's own extent instead of the
+                // whole window viewport.
+                let workspace = cx.entity();
+                let probe_group_id = *id;
+                let probe_direction = *direction;
+                text_input_anchor_probe(
+                    TextInputAnchorId(SPLIT_GROUP_PROBE_BASE + probe_group_id.0),
+                    group,
+                    move |anchor, _window, cx| {
+                        let extent = match probe_direction {
+                            SplitDirection::Horizontal => f32::from(anchor.bounds.size.width),
+                            SplitDirection::Vertical => f32::from(anchor.bounds.size.height),
+                        };
+                        let _ = workspace.update(cx, |this, _cx| {
+                            this.split_group_extents.insert(probe_group_id, extent);
+                        });
+                    },
+                )
+                .into_any_element()
             }
         }
     }

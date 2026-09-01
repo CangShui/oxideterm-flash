@@ -353,8 +353,6 @@ pub struct TerminalSettings {
     pub command_bar: TerminalCommandBarSettings,
     #[serde(default)]
     pub triggers: TerminalTriggerSettings,
-    #[serde(default)]
-    pub remote_shell_integration_mode: RemoteShellIntegrationMode,
     pub command_marks: TerminalCommandMarksSettings,
     pub background_enabled: bool,
     pub background_image: Option<String>,
@@ -469,7 +467,6 @@ impl Default for TerminalSettings {
             autosuggest: TerminalAutosuggestSettings::default(),
             command_bar: TerminalCommandBarSettings::default(),
             triggers: TerminalTriggerSettings::default(),
-            remote_shell_integration_mode: RemoteShellIntegrationMode::Ask,
             command_marks: TerminalCommandMarksSettings::default(),
             background_enabled: true,
             background_image: None,
@@ -701,22 +698,6 @@ mod tests {
 
         // Existing installations retain file path recognition until the user disables it.
         assert!(settings.detect_file_paths_as_links);
-    }
-
-    #[test]
-    fn terminal_settings_ask_before_remote_shell_integration_when_missing() {
-        let mut value = serde_json::to_value(TerminalSettings::default()).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("remoteShellIntegrationMode");
-
-        let settings: TerminalSettings = serde_json::from_value(value).unwrap();
-
-        assert_eq!(
-            settings.remote_shell_integration_mode,
-            RemoteShellIntegrationMode::Ask
-        );
     }
 
     #[test]

@@ -91,7 +91,9 @@ pub fn tauri_table_row(
         } else {
             rgba(0x00000000)
         })
-        .hover(move |row| row.bg(colors.row_hover_bg))
+        // Hover feedback only applies to unselected rows so pointing at a
+        // selected row never paints over the selection highlight.
+        .hover(move |row| if selected { row } else { row.bg(colors.row_hover_bg) })
 }
 
 pub fn tauri_table_checkbox_cell(width: f32, child: impl IntoElement) -> AnyElement {

@@ -1,11 +1,7 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{
-    collections::BTreeMap,
-    fmt,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -28,7 +24,6 @@ pub enum ReconnectPhase {
     AwaitTerminal,
     RestoreForwards,
     ResumeTransfers,
-    RestoreIde,
     Verify,
     Done,
     Failed,
@@ -67,36 +62,12 @@ pub struct ReconnectSnapshot {
     pub active_port_forward_ids: Vec<String>,
     pub inflight_sftp_transfer_ids: Vec<String>,
     pub incomplete_sftp_transfers_by_node: Vec<ReconnectNodeTransferSnapshot>,
-    pub ide_snapshot: Option<ReconnectIdeSnapshot>,
     /// Tauri keeps oldConnectionIds as a nodeId -> connectionId map. Native
     /// retains the legacy flat list below for diagnostics, but reconnect
     /// grace-period recovery uses this node-scoped map.
     pub old_connections_by_node: Vec<ReconnectNodeConnectionSnapshot>,
     pub old_connection_ids: Vec<String>,
     pub snapshot_at: Option<SystemTime>,
-}
-
-#[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconnectIdeSnapshot {
-    pub project_path: String,
-    pub tab_paths: Vec<String>,
-    /// Tauri stores nodeId in the ideSnapshot.connectionId slot during
-    /// reconnect; keep the field name for parity with its restore phase.
-    pub connection_id: String,
-    pub dirty_contents: BTreeMap<String, String>,
-}
-
-impl fmt::Debug for ReconnectIdeSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ReconnectIdeSnapshot")
-            .field("project_path", &"[redacted path]")
-            .field("tab_count", &self.tab_paths.len())
-            .field("connection_id", &self.connection_id)
-            .field("dirty_file_count", &self.dirty_contents.len())
-            .finish()
-    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -430,19 +401,6 @@ impl ReconnectOrchestratorStore {
             .unwrap_or_default()
     }
 
-    pub fn ide_snapshot(
-        &self,
-        node_id: &str,
-    ) -> Option<(ReconnectIdeSnapshot, Option<SystemTime>)> {
-        // The timestamp preserves the user-close guard without copying unrelated restore state.
-        self.jobs.get(node_id).and_then(|job| {
-            job.snapshot
-                .ide_snapshot
-                .clone()
-                .map(|snapshot| (snapshot, job.snapshot.snapshot_at))
-        })
-    }
-
     pub fn forward_restore_plan(&self, node_id: &str) -> Option<ReconnectForwardRestorePlan> {
         self.jobs
             .get(node_id)
@@ -595,10 +553,6 @@ mod tests {
                 node_id: "node-a".to_string(),
                 transfer_ids: vec!["transfer-a".to_string()],
             }],
-            ide_snapshot: Some(ReconnectIdeSnapshot {
-                connection_id: "node-a".to_string(),
-                ..ReconnectIdeSnapshot::default()
-            }),
             ..ReconnectSnapshot::default()
         };
         let job = store.schedule("node-a", "Node A", snapshot);
@@ -618,9 +572,6 @@ mod tests {
             vec!["terminal-a".to_string()]
         );
         assert_eq!(store.incomplete_sftp_transfers("node-a").len(), 1);
-        let (ide_snapshot, snapshot_at) = store.ide_snapshot("node-a").unwrap();
-        assert_eq!(ide_snapshot.connection_id, "node-a");
-        assert!(snapshot_at.is_some());
         assert_eq!(
             store
                 .forward_restore_plan("node-a")
@@ -692,31 +643,4 @@ mod tests {
         assert!(store.jobs().is_empty());
     }
 
-    #[test]
-    fn reconnect_snapshot_carries_ide_dirty_contents() {
-        let mut dirty_contents = BTreeMap::new();
-        dirty_contents.insert(
-            "/home/demo/main.rs".to_string(),
-            "representative-unsaved-content".to_string(),
-        );
-        let snapshot = ReconnectSnapshot {
-            ide_snapshot: Some(ReconnectIdeSnapshot {
-                project_path: "/home/demo".to_string(),
-                tab_paths: vec!["/home/demo/main.rs".to_string()],
-                connection_id: "node-a".to_string(),
-                dirty_contents,
-            }),
-            ..ReconnectSnapshot::default()
-        };
-        let debug_output = format!("{snapshot:?}");
-        assert!(!debug_output.contains("/home/demo"));
-        assert!(!debug_output.contains("representative-unsaved-content"));
-
-        let ide_snapshot = snapshot.ide_snapshot.expect("IDE snapshot should exist");
-        assert_eq!(ide_snapshot.connection_id, "node-a");
-        assert_eq!(
-            ide_snapshot.dirty_contents.get("/home/demo/main.rs"),
-            Some(&"representative-unsaved-content".to_string())
-        );
-    }
 }

@@ -483,6 +483,7 @@ impl HostToolsEntity {
         let service = host_package_service_label(&entry);
 
         div()
+            .id(("host-package-row", index))
             .w_full()
             .min_w_0()
             .border_b_1()

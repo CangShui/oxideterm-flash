@@ -1,11 +1,11 @@
 use std::ops::Range;
 
-use gpui::{Bounds, Pixels, point, px, rgba, size};
+use gpui::{Bounds, Hsla, Pixels, point, px, size};
 use oxideterm_terminal::{TerminalSearchMatch, TerminalSnapshot};
 use oxideterm_terminal_unicode::visual_line_for_row_if_bidi;
 
 use crate::terminal_ui::*;
-use crate::terminal_view::element::{TerminalRect, TerminalScrollbar};
+use crate::terminal_view::element::{TerminalRect, TerminalScrollbar, to_hsla};
 
 pub(crate) fn terminal_scrollbar_for_viewport_display_offset(
     snapshot: &TerminalSnapshot,
@@ -51,14 +51,16 @@ pub(crate) fn terminal_visible_rows_for_limit(
 pub(crate) fn search_match_rects(
     snapshot: &TerminalSnapshot,
     query: Option<&str>,
+    match_color: Hsla,
 ) -> Vec<TerminalRect> {
-    search_match_rects_for_rows(snapshot, query, 0..snapshot.lines.len())
+    search_match_rects_for_rows(snapshot, query, 0..snapshot.lines.len(), match_color)
 }
 
 pub(crate) fn search_match_rects_for_rows(
     snapshot: &TerminalSnapshot,
     query: Option<&str>,
     rows: Range<usize>,
+    match_color: Hsla,
 ) -> Vec<TerminalRect> {
     let Some(query) = query.filter(|query| !query.is_empty()) else {
         return Vec::new();
@@ -84,11 +86,26 @@ pub(crate) fn search_match_rects_for_rows(
                 row: row_index,
                 col: start_col,
                 cells,
-                color: rgba(0xffcc6644).into(),
+                color: match_color,
             });
         }
     }
     rects
+}
+
+// Search highlighting follows the theme's terminal palette instead of fixed
+// colors so it stays visible on light and dark backgrounds. The selected match
+// uses the same hue at higher opacity, mirroring the previous design.
+pub(crate) fn search_match_color(theme: &TerminalUiTheme) -> Hsla {
+    let mut color = to_hsla(terminal_color_from_hex(theme.tokens.terminal.yellow));
+    color.a = 0x44 as f32 / 255.0;
+    color
+}
+
+pub(crate) fn selected_search_match_color(theme: &TerminalUiTheme) -> Hsla {
+    let mut color = to_hsla(terminal_color_from_hex(theme.tokens.terminal.yellow));
+    color.a = 0x99 as f32 / 255.0;
+    color
 }
 
 pub(crate) fn visible_search_match_rects(
@@ -96,6 +113,8 @@ pub(crate) fn visible_search_match_rects(
     display_offset: usize,
     rows: Range<usize>,
     selected_match: Option<usize>,
+    match_color: Hsla,
+    selected_color: Hsla,
 ) -> Vec<TerminalRect> {
     matches
         .iter()
@@ -113,9 +132,9 @@ pub(crate) fn visible_search_match_rects(
                     col: range.start_col,
                     cells: range.end_col.saturating_sub(range.start_col),
                     color: if selected_match == Some(index) {
-                        rgba(0xffdd8899).into()
+                        selected_color
                     } else {
-                        rgba(0xffcc6644).into()
+                        match_color
                     },
                 })
             })

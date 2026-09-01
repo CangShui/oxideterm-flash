@@ -192,6 +192,10 @@ pub(super) fn remote_desktop_modifier_sync_requests(
     previous: RemoteDesktopModifierState,
     next: RemoteDesktopModifierState,
 ) -> Vec<RemoteDesktopHelperRequest> {
+    // GPUI `Modifiers` carry no left/right side information (the Windows
+    // platform folds VK_L*/VK_R* into one flag), so the helper protocol can
+    // only be fed the canonical Left scancodes. Sending a Right variant would
+    // require side-aware platform events that GPUI does not expose.
     let mut requests = Vec::new();
     push_remote_desktop_modifier_sync(&mut requests, "ShiftLeft", previous.shift, next.shift);
     push_remote_desktop_modifier_sync(&mut requests, "ControlLeft", previous.ctrl, next.ctrl);

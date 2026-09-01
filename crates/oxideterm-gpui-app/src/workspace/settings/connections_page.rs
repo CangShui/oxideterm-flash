@@ -184,6 +184,21 @@ impl SettingsWorkspaceEntity {
         cx.notify();
     }
 
+    pub(in crate::workspace) fn session_export_format(&self) -> SessionExportFormat {
+        self.session_export_format
+    }
+
+    pub(in crate::workspace) fn set_session_export_format(
+        &mut self,
+        format: SessionExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_export_format != format {
+            self.session_export_format = format;
+            cx.notify();
+        }
+    }
+
     pub(in crate::workspace) fn set_connection_import_duplicate_strategy(
         &mut self,
         strategy: ConnectionImportDuplicateStrategy,
@@ -620,8 +635,7 @@ impl WorkspaceApp {
                 vec![self.connection_idle_timeout_control(settings, cx)],
             ),
             3 => self.ssh_config_import_section(cx),
-            4 => self.connection_importers_section(cx),
-            5 => div().into_any_element(),
+            4 => div().into_any_element(),
             _ => div().into_any_element(),
         }
     }
@@ -800,7 +814,6 @@ impl WorkspaceApp {
                                     },
                                     cx,
                                 );
-                                this.refresh_session_manager_ssh_config_hosts(cx);
                                 if this.command_palette.read(cx).is_open() {
                                     this.load_command_palette_ssh_config_hosts(cx);
                                 }
@@ -1332,40 +1345,6 @@ impl WorkspaceApp {
             .text_color(rgb(self.tokens.ui.text_muted))
             .child(self.i18n.t("settings_view.connections.ssh_config.no_hosts"))
             .into_any_element()
-    }
-
-    pub(in crate::workspace) fn connection_importers_section(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut importer = self
-            .settings_workspace
-            .read(cx)
-            .connection_import_snapshot();
-        let mut rows = vec![self.connection_import_input_row(importer.source, &importer.paths, cx)];
-
-        if let Some(preview) = importer.preview.take() {
-            rows.push(self.connection_import_preview_toolbar(
-                &preview,
-                &importer.selected_draft_ids,
-                importer.duplicate_strategy,
-                cx,
-            ));
-            rows.push(self.connection_import_preview_list(
-                preview,
-                &importer.selected_draft_ids,
-                cx,
-            ));
-        }
-        if let Some(status) = importer.status {
-            rows.push(self.connection_status_row(status.to_string()));
-        }
-
-        self.connection_section(
-            "settings_view.connections.importers.title",
-            "settings_view.connections.importers.description",
-            rows,
-        )
     }
 
     pub(in crate::workspace) fn connection_import_input_row(
@@ -3070,6 +3049,20 @@ impl WorkspaceApp {
         });
     }
 
+    pub(in crate::workspace) fn session_export_format(&self, cx: &App) -> SessionExportFormat {
+        self.settings_workspace.read(cx).session_export_format()
+    }
+
+    pub(in crate::workspace) fn set_session_export_format(
+        &mut self,
+        format: SessionExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.set_session_export_format(format, cx);
+        });
+    }
+
     pub(in crate::workspace) fn pick_connection_import_paths(
         &mut self,
         directories: bool,
@@ -3287,6 +3280,26 @@ pub(in crate::workspace) fn connection_import_source_label(
 
 fn connection_import_supports_files(source: ConnectionImportSource) -> bool {
     source != ConnectionImportSource::FinalShell
+}
+
+pub(in crate::workspace) fn session_export_format_options() -> &'static [SessionExportFormat] {
+    &[
+        SessionExportFormat::OxideTermJson,
+        SessionExportFormat::SecureCrt,
+        SessionExportFormat::Xshell,
+        SessionExportFormat::Termius,
+        SessionExportFormat::MobaXterm,
+        SessionExportFormat::WindTerm,
+        SessionExportFormat::Electerm,
+        SessionExportFormat::FinalShell,
+    ]
+}
+
+pub(in crate::workspace) fn session_export_format_label(
+    format: SessionExportFormat,
+    i18n: &I18n,
+) -> String {
+    i18n.t(&format!("settings_view.sessionio.export_format_{}", format.tag()))
 }
 
 fn connection_import_supports_directory(source: ConnectionImportSource) -> bool {

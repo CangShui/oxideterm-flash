@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::{
@@ -67,6 +68,23 @@ pub fn segmented_control_motion(tokens: &ThemeTokens) -> Option<SegmentedControl
     })
 }
 
+thread_local! {
+    /// Last painted indicator offset per control id. This is presentation
+    /// bookkeeping only; it never influences layout outside its own control.
+    static LAST_INDICATOR_LEFT: std::cell::RefCell<HashMap<ElementId, f32>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn last_indicator_left(id: &ElementId) -> Option<f32> {
+    LAST_INDICATOR_LEFT.with(|registry| registry.borrow().get(id).copied())
+}
+
+fn note_indicator_left(id: &ElementId, left: f32) {
+    LAST_INDICATOR_LEFT.with(|registry| {
+        registry.borrow_mut().insert(id.clone(), left);
+    });
+}
+
 fn should_animate_selection(
     options: SegmentedControlOptions,
     active_index: usize,
@@ -92,7 +110,13 @@ pub fn segmented_control(
     let motion = should_animate_selection(options, active_index, previous_index)
         .then(|| segmented_control_motion(tokens))
         .flatten();
-    let animation_id = (id.into(), format!("{previous_index}-to-{active_index}"));
+    let element_id = id.into();
+    // An in-flight transition must continue from where the indicator actually
+    // is, not from the previous logical index, so rapid re-selection glides
+    // instead of jumping. The registry tracks the last painted offset per
+    // control; keyed by the same id the animation itself uses.
+    let from_left = last_indicator_left(&element_id).unwrap_or(previous_left);
+    let animation_id = (element_id.clone(), format!("{previous_index}-to-{active_index}"));
     // The outer control already supplies its inset. The moving highlight must
     // fill the option cell so its size matches the pre-animation selection.
     let indicator = div()
@@ -118,28 +142,35 @@ pub fn segmented_control(
             .shadow(theme_card_shadow(tokens)),
     };
     let indicator: AnyElement = match motion {
-        None => indicator.left(relative(active_left)).into_any_element(),
-        Some(motion) if !motion.spatial => indicator
-            .left(relative(active_left))
-            .with_animation(
-                animation_id,
-                Animation::new(motion.duration),
-                |indicator, progress| indicator.opacity(progress),
-            )
-            .into_any_element(),
-        Some(motion) => indicator
-            .with_animation(
-                animation_id,
-                Animation::new(motion.duration).with_easing(crate::motion::ease_in_out_cubic),
-                move |indicator, progress| {
-                    indicator.left(relative(crate::motion::lerp(
-                        previous_left,
-                        active_left,
-                        progress,
-                    )))
-                },
-            )
-            .into_any_element(),
+        None => {
+            note_indicator_left(&element_id, active_left);
+            indicator.left(relative(active_left)).into_any_element()
+        }
+        Some(motion) if !motion.spatial => {
+            note_indicator_left(&element_id, active_left);
+            indicator
+                .left(relative(active_left))
+                .with_animation(
+                    animation_id,
+                    Animation::new(motion.duration),
+                    |indicator, progress| indicator.opacity(progress),
+                )
+                .into_any_element()
+        }
+        Some(motion) => {
+            let track_left = element_id;
+            indicator
+                .with_animation(
+                    animation_id,
+                    Animation::new(motion.duration).with_easing(crate::motion::ease_in_out_cubic),
+                    move |indicator, progress| {
+                        let left = crate::motion::lerp(from_left, active_left, progress);
+                        note_indicator_left(&track_left, left);
+                        indicator.left(relative(left))
+                    },
+                )
+                .into_any_element()
+        }
     };
 
     let mut inner = div().relative().w_full().flex().flex_row().child(indicator);

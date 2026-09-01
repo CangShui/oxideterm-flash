@@ -233,16 +233,28 @@ pub(super) fn sync_virtual_list_state_by_signatures(
 
     let old_len = cache.signatures.len();
     let new_len = signatures.len();
-    let shared_len = old_len.min(new_len);
-    for (index, signature) in signatures.iter().take(shared_len).enumerate() {
-        if cache.signatures.get(index) != Some(signature) {
-            state.splice(index..index + 1, 1);
-        }
+    // Diff by shared prefix/suffix so one inserted or removed row produces one
+    // small splice at the change site. The previous per-index diff turned a
+    // head or middle insertion into a splice per row, which reset scroll
+    // anchoring and made the whole list visually jump.
+    let mut prefix = 0usize;
+    while prefix < old_len.min(new_len)
+        && cache.signatures[prefix] == signatures[prefix]
+    {
+        prefix += 1;
     }
-    if old_len < new_len {
-        state.splice(old_len..old_len, new_len - old_len);
-    } else if old_len > new_len {
-        state.splice(new_len..old_len, 0);
+    let mut suffix = 0usize;
+    while suffix < old_len.min(new_len) - prefix
+        && cache.signatures[old_len - 1 - suffix] == signatures[new_len - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let removed = old_len - prefix - suffix;
+    let inserted = new_len - prefix - suffix;
+    if removed != inserted
+        || cache.signatures[prefix..old_len - suffix] != signatures[prefix..new_len - suffix]
+    {
+        state.splice(prefix..prefix + removed, inserted);
     }
     cache.signatures = signatures.to_vec();
     false
@@ -372,6 +384,57 @@ mod tests {
             state.is_following_tail(),
             "stream updates must preserve the user's active tail-follow mode"
         );
+    }
+
+    #[test]
+    fn signature_sync_splices_once_at_the_change_site() {
+        let mut state = ListState::new(0, ListAlignment::Top, px(0.0));
+        let mut cache = VirtualListSignatureCache::default();
+        sync_virtual_list_state_by_signatures(
+            &mut state,
+            &mut cache,
+            "list",
+            &[10, 20, 30],
+            ListAlignment::Top,
+            px(32.0),
+        );
+
+        // A head insertion changes every shared index, but the splice must be
+        // one atomic insert at the front instead of per-row replacements.
+        sync_virtual_list_state_by_signatures(
+            &mut state,
+            &mut cache,
+            "list",
+            &[99, 10, 20, 30],
+            ListAlignment::Top,
+            px(32.0),
+        );
+        assert_eq!(state.item_count(), 4);
+        assert_eq!(cache.signatures, vec![99, 10, 20, 30]);
+
+        // A tail append stays one splice at the tail.
+        sync_virtual_list_state_by_signatures(
+            &mut state,
+            &mut cache,
+            "list",
+            &[99, 10, 20, 30, 40],
+            ListAlignment::Top,
+            px(32.0),
+        );
+        assert_eq!(state.item_count(), 5);
+        assert_eq!(cache.signatures, vec![99, 10, 20, 30, 40]);
+
+        // A middle removal collapses to one splice covering exactly the row.
+        sync_virtual_list_state_by_signatures(
+            &mut state,
+            &mut cache,
+            "list",
+            &[99, 10, 30, 40],
+            ListAlignment::Top,
+            px(32.0),
+        );
+        assert_eq!(state.item_count(), 4);
+        assert_eq!(cache.signatures, vec![99, 10, 30, 40]);
     }
 
     #[test]

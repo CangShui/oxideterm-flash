@@ -11,7 +11,7 @@ enum RemoteDesktopRestartPresentation {
 
 impl RemoteDesktopSessionEntity {
     pub(super) fn install_release_handler(&self, cx: &mut Context<Self>) {
-        cx.on_release(|session, _cx| {
+        cx.on_release(|session, cx| {
             // Entity destruction owns helper shutdown, but never shared SSH
             // nodes, SFTP sessions, or forwarding runtimes.
             if let Some(worker_wake) = session.worker_wake.take() {
@@ -21,6 +21,20 @@ impl RemoteDesktopSessionEntity {
             session.shutdown_worker();
             drop(session.ssh_tunnel.take());
             drop(session.password.take());
+            // Textures and sprite-atlas images live in the window's GPU
+            // registries and outlive the entity unless explicitly released;
+            // otherwise a destroyed session leaks them until window close.
+            // A closed window reports an error here and drops its own
+            // registry, so the failure can be ignored.
+            let window_handle = session.window_handle;
+            let textures = session.state.take_all_textures();
+            let images = session.state.take_all_images();
+            let _ = window_handle.update(cx, |_view, window, cx| {
+                Self::drop_textures(textures, window);
+                for image in images {
+                    cx.drop_image(image, Some(window));
+                }
+            });
         })
         .detach();
     }

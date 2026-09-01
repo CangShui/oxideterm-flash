@@ -9,10 +9,9 @@ pub(in crate::workspace) const ONBOARDING_ACCENT_BORDER_ALPHA: u32 = 0x33; // Ta
 pub(in crate::workspace) const ONBOARDING_CARD_ALPHA: u32 = 0xcc; // Browser panels sit over the dialog backdrop but stay readable.
 pub(in crate::workspace) const ONBOARDING_DISABLED_OPACITY: f32 = 0.45;
 
-pub(in crate::workspace) const ONBOARDING_LANGUAGES: [(Language, &str); 3] = [
+pub(in crate::workspace) const ONBOARDING_LANGUAGES: [(Language, &str); 2] = [
     (Language::En, "English"),
     (Language::ZhCn, "简体中文"),
-    (Language::ZhTw, "繁體中文"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

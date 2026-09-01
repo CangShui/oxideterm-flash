@@ -291,8 +291,10 @@ pub fn horizontal_reveal(
                 if spatial {
                     element.w(gpui::px(lerp(0.0, expanded_width, visibility)))
                 } else {
-                    // Reduced motion preserves layout and limits the transition to opacity.
-                    element.w(gpui::px(expanded_width))
+                    // Reduced motion skips the width tween but still collapses to
+                    // the same final width as vertical_reveal, so hidden content
+                    // cannot keep intercepting pointer events at opacity 0.
+                    element.w(gpui::px(final_width))
                 }
             },
         )
@@ -401,12 +403,14 @@ pub fn animated_chevron(
 }
 
 pub fn animated_spinner(tokens: &ThemeTokens, id: impl Into<ElementId>, icon: Svg) -> AnyElement {
-    if !tokens.motion.enabled {
+    if !tokens.motion.enabled || tokens.motion.spinner_period_ms == 0 {
         return icon.into_any_element();
     }
     icon.with_animation(
         id,
-        Animation::new(duration(tokens, MotionDuration::Overlay))
+        // A dedicated period keeps continuous rotation calm and independent of
+        // the transition-duration tiers it previously borrowed.
+        Animation::new(Duration::from_millis(tokens.motion.spinner_period_ms))
             .repeat()
             .with_easing(|progress| progress),
         |icon, progress| {

@@ -27,7 +27,7 @@ mod tmux;
 pub use action::{
     HostToolActionOutcome, host_tool_capture_failure_message, interpret_docker_action_output,
     interpret_process_action_output, interpret_scheduled_task_action_output,
-    interpret_service_action_output, interpret_tmux_action_output,
+    interpret_screen_action_output, interpret_service_action_output, interpret_tmux_action_output,
 };
 pub use docker::{
     DockerActionAvailability, DockerActionCommand, DockerActionKind, DockerCaptureCommand,
@@ -125,12 +125,17 @@ pub use summary::{
     rtt_level, top_process_list_rows,
 };
 pub use tmux::{
-    ResourceTmuxPane, ResourceTmuxSession, ResourceTmuxSnapshot, ResourceTmuxStatus,
-    ResourceTmuxWindow, TmuxActionCommand, TmuxActionKind, TmuxCaptureCommand,
-    TmuxCommandCapability, build_tmux_action_command, build_tmux_attach_command,
-    build_tmux_new_session_command, build_tmux_rename_session_command,
+    ResourceScreenSession, ResourceScreenSnapshot, ResourceScreenStatus, ResourceTmuxPane,
+    ResourceTmuxSession, ResourceTmuxSnapshot, ResourceTmuxStatus, ResourceTmuxWindow,
+    ScreenActionCommand, ScreenActionKind, ScreenCommandCapability, TmuxActionCommand,
+    TmuxActionKind, TmuxCaptureCommand, TmuxCommandCapability, VirtualTerminalEngine,
+    build_screen_action_command, build_screen_attach_command, build_screen_new_session_command,
+    build_screen_rename_session_command, build_screen_send_command, build_tmux_action_command,
+    build_tmux_attach_command, build_tmux_new_session_command, build_tmux_rename_session_command,
     build_tmux_rename_window_command, build_tmux_send_pane_command, build_tmux_snapshot_command,
-    parse_tmux_snapshot, tmux_action_failure_message, tmux_action_succeeded,
+    parse_screen_snapshot, parse_tmux_snapshot, screen_action_failure_message,
+    screen_action_succeeded, screen_action_success_message, screen_capture_snapshot,
+    screen_session_row_signature, tmux_action_failure_message, tmux_action_succeeded,
     tmux_action_success_message, tmux_capture_snapshot, tmux_session_row_signature,
-    visible_tmux_session_rows,
+    visible_screen_session_rows, visible_tmux_session_rows,
 };

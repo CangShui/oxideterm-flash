@@ -8,6 +8,15 @@ default:
 fmt:
     cargo fmt --all -- --check
 
+# Verify that every user-facing string goes through the locale catalogs: any
+# i18n key referenced from Rust but missing from all locale packs, any locale
+# file/key/placeholder drift, any deleted locale pack, or any dynamically
+# formatted family that lost all of its keys fails this step. The second
+# command is the same gate as a Rust test, so plain `cargo test` enforces it.
+quality-i18n:
+    {{ python }} scripts/quality/audit_i18n.py --show-all
+    cargo test --release -p oxideterm-i18n
+
 # Run OxideTerm with optional Cargo arguments.
 run *args:
     cargo run {{ args }}
@@ -19,10 +28,6 @@ notices:
 # Build and stage the CLI companion for an optional target triple.
 build-cli target="":
     bash scripts/build/build-cli.sh {{ target }}
-
-# Build and stage the bundled Linux remote agents.
-build-agent:
-    bash scripts/build/build-agent.sh
 
 # Run the terminal throughput benchmark in the active OxideTerm terminal.
 benchmark:

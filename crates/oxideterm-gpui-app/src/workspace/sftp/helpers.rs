@@ -692,6 +692,24 @@ pub(in crate::workspace::sftp) fn format_transfer_speed(bytes_per_second: u64) -
     format!("{}/s", format_file_size(bytes_per_second))
 }
 
+/// Formats a compact remaining-time estimate. Unit letters are language
+/// neutral, so the queue keeps a numeric-only format without locale keys.
+pub(in crate::workspace::sftp) fn format_transfer_eta(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m {:02}s", seconds % 60);
+    }
+    let hours = minutes / 60;
+    if hours > 99 {
+        // Long estimates carry no planning value beyond this bound.
+        return "99h+".to_string();
+    }
+    format!("{hours}h {:02}m", minutes % 60)
+}
+
 pub(in crate::workspace::sftp) fn format_modified(modified: Option<i64>) -> String {
     let Some(modified) = modified.filter(|modified| *modified > 0) else {
         return "-".to_string();
@@ -699,21 +717,20 @@ pub(in crate::workspace::sftp) fn format_modified(modified: Option<i64>) -> Stri
     let Some(datetime) = chrono::DateTime::from_timestamp(modified, 0) else {
         return "-".to_string();
     };
-    // Tauri renders `new Date(file.modified * 1000).toLocaleDateString()`;
-    // native keeps the same Unix-seconds -> local-date contract instead of
-    // showing UTC or a placeholder date.
+    // Format matches standard server file managers: "YYYY-MM-DD HH:MM".
     datetime
         .with_timezone(&chrono::Local)
-        .format("%Y/%-m/%-d")
+        .format("%Y-%m-%d %H:%M")
         .to_string()
 }
 
-pub(in crate::workspace::sftp) fn format_conflict_modified(modified: Option<i64>) -> String {
-    let Some(modified) = modified else {
-        return "Unknown".to_string();
-    };
-    let Some(datetime) = chrono::DateTime::from_timestamp(modified, 0) else {
-        return "Unknown".to_string();
+pub(in crate::workspace::sftp) fn format_conflict_modified(
+    modified: Option<i64>,
+    unknown_label: &str,
+) -> String {
+    let Some(datetime) = modified.and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+    else {
+        return unknown_label.to_string();
     };
     datetime
         .with_timezone(&chrono::Local)
@@ -834,9 +851,9 @@ pub(in crate::workspace::sftp) fn diff_cell(
         .border_color(rgb(border))
         .bg(if highlighted {
             if left {
-                rgba((0x7f1d1d << 8) | SFTP_DIFF_LINE_BG_ALPHA)
+                rgba((ui_palette::RED_900 << 8) | SFTP_DIFF_LINE_BG_ALPHA)
             } else {
-                rgba((0x14532d << 8) | SFTP_DIFF_LINE_BG_ALPHA)
+                rgba((ui_palette::GREEN_900 << 8) | SFTP_DIFF_LINE_BG_ALPHA)
             }
         } else {
             rgba(0x00000000)
@@ -851,7 +868,7 @@ pub(in crate::workspace::sftp) fn diff_cell(
                 .text_color(if highlighted {
                     if left { rgb(SFTP_RED) } else { rgb(SFTP_GREEN) }
                 } else {
-                    rgb(0xa1a1aa)
+                    rgb(ui_palette::ZINC_400)
                 })
                 .border_r_1()
                 .border_color(rgb(border))
@@ -865,6 +882,23 @@ pub(in crate::workspace::sftp) fn diff_cell(
                 .child(content.to_string()),
         )
         .into_any_element()
+}
+
+/// The pinned ".." row synthesizes this entry instead of reading one from the
+/// listing, so navigation never depends on the server exposing a parent link.
+pub(in crate::workspace::sftp) fn parent_directory_entry() -> crate::workspace::sftp::SftpFileEntry {
+    crate::workspace::sftp::SftpFileEntry {
+        name: "..".to_string(),
+        path: "..".to_string(),
+        file_type: crate::workspace::sftp::SftpFileType::Directory,
+        size: 0,
+        modified: None,
+        permissions: None,
+        owner: None,
+        group: None,
+        is_symlink: false,
+        symlink_target: None,
+    }
 }
 
 #[cfg(test)]
@@ -901,8 +935,8 @@ mod sftp_helper_tests {
 
         let rendered = format_modified(Some(1_700_000_000));
         assert_ne!(rendered, "-");
-        assert_ne!(rendered, "2026/5/7");
-        assert!(rendered.contains('/'));
+        assert!(rendered.contains('-'));
+        assert!(rendered.contains(':'));
     }
 
     #[test]
@@ -918,5 +952,26 @@ mod sftp_helper_tests {
         );
         assert_eq!(parent_path(r"D:\Projects\OxideTerm", false), r"D:\Projects");
         assert_eq!(parent_path(r"D:\", false), r"D:\");
+    }
+
+    #[test]
+    fn transfer_eta_stays_numeric_and_bounds_long_estimates() {
+        assert_eq!(format_transfer_eta(0), "0s");
+        assert_eq!(format_transfer_eta(42), "42s");
+        assert_eq!(format_transfer_eta(60), "1m 00s");
+        assert_eq!(format_transfer_eta(125), "2m 05s");
+        assert_eq!(format_transfer_eta(3600), "1h 00m");
+        // Estimates beyond the display bound stay honest without scrolling
+        // the queue row off its fixed column width.
+        assert_eq!(format_transfer_eta(100 * 3600), "99h+");
+    }
+
+    #[test]
+    fn pinned_parent_entry_is_a_double_dot_directory() {
+        let entry = parent_directory_entry();
+
+        assert_eq!(entry.name, "..");
+        assert_eq!(entry.file_type, SftpFileType::Directory);
+        assert!(!entry.is_symlink);
     }
 }

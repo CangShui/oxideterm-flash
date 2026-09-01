@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
-    env,
     hash::{Hash, Hasher},
     ops::Range,
     rc::Rc,
@@ -17,7 +16,7 @@ use chrono::Timelike;
 use futures::future::{Either, pending, select};
 use gpui::{
     App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, PathPromptOptions, Pixels,
-    Point, SharedString, Subscription, Timer, Window, px,
+    Point, SharedString, Subscription, Window, px,
 };
 use oxideterm_ssh::SshConnectionHandle;
 use oxideterm_terminal::{
@@ -41,10 +40,6 @@ use crate::command_facts::{
     CommandFactLedger, TerminalAiCommandRecord, TerminalAutosuggestCommandRecord,
     TerminalAutosuggestInputState, TerminalCommandFact,
 };
-use crate::privilege_prompt::{
-    PrivilegeInputObservation, PrivilegePromptMatch, PrivilegePromptSnapshot,
-    PrivilegePromptTracker,
-};
 use crate::terminal_ui::*;
 use crate::terminal_view::*;
 use oxideterm_terminal_recording::{
@@ -59,8 +54,8 @@ mod render;
 mod scrollbar;
 
 use crate::modem_worker::{
-    ModemPromptSelection, ModemWorkerEvent, ModemWorkerJob, ModemWorkerProgress,
-    format_modem_bytes, run_modem_worker_job,
+    ModemPromptSelection, ModemWorkerEvent, ModemWorkerFailure, ModemWorkerJob,
+    ModemWorkerProgress, format_modem_bytes, run_modem_worker_job,
 };
 use crate::trzsz_worker::{
     TrzszPromptRequest, TrzszPromptSelection, TrzszWorkerEvent, TrzszWorkerJob,
@@ -75,7 +70,6 @@ pub type SharedTerminalSession = Arc<Mutex<TerminalSession>>;
 pub type TerminalInputInterceptor =
     Arc<dyn Fn(&[u8]) -> TerminalInputInterceptorResult + Send + Sync>;
 pub type TerminalInputBroadcaster = Rc<dyn Fn(TerminalBroadcastInputKind, &[u8], &mut App)>;
-const PRIVILEGE_PROMPT_DEBUG_ENV: &str = "OXIDETERM_PRIVILEGE_DEBUG";
 const TERMINAL_ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
 const SMOOTH_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(125);
 const DRAIN_BOOST_POLL_INTERVAL: Duration = Duration::from_millis(8);
@@ -99,16 +93,14 @@ pub enum TerminalPaneEvent {
     CurrentDirectoryChanged,
     // Recording contents stay pane-owned; consumers only reschedule visible elapsed chrome.
     RecordingStatusChanged,
-    // Prompt text and credentials stay pane-owned; consumers only recompute the active hint.
-    PrivilegePromptStateChanged,
-    // The event carries intent only; Workspace resolves any credential in the active scope.
-    PrivilegePromptSubmitRequested,
     // The requested action remains pane-owned until the active Workspace consumes it.
     ContextActionRequested,
     // Match payloads remain pane-owned; Workspace drains them using the source pane identity.
     TriggerMatchesAvailable,
     // Search completion is asynchronous; Workspace reads the latest pane-owned status.
     SearchStatusChanged,
+    // The pane reports zoom intent only; Workspace owns font-size persistence.
+    FontSizeAdjustRequested { delta: i64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,19 +173,6 @@ fn initial_cwd_shell_integration_status(
         TerminalCwdIntegrationLaunchState::NotRequested => {
             TerminalCwdShellIntegrationStatus::NotAttempted
         }
-    }
-}
-
-fn log_privilege_prompt_terminal_pane(args: std::fmt::Arguments<'_>) {
-    if env::var_os(PRIVILEGE_PROMPT_DEBUG_ENV).is_some() {
-        eprintln!("[oxideterm:privilege] {args}");
-    }
-}
-
-fn privilege_input_observation_name(observation: PrivilegeInputObservation) -> &'static str {
-    match observation {
-        PrivilegeInputObservation::Normal => "normal",
-        PrivilegeInputObservation::SecretEntry => "secret-entry",
     }
 }
 
@@ -367,8 +346,6 @@ pub struct TerminalPane {
     test_accepts_input: bool,
     input_locked: bool,
     marked_text: Option<String>,
-    privilege_prompt_inline_hint: Option<String>,
-    privilege_prompt_submit_requested: bool,
     search_query: Option<String>,
     terminal_content_revision: u64,
     search_cache: Option<TerminalSearchCache>,
@@ -378,7 +355,9 @@ pub struct TerminalPane {
     hovered_link: Option<TerminalLinkRange>,
     hovered_command_mark_id: Option<String>,
     selecting: bool,
+    selection_trace_id: Option<u64>,
     free_type_drag: Option<FreeTypeDragState>,
+    pending_link_activation: Option<PendingLinkActivation>,
     last_mouse_report_point: Option<TerminalPoint>,
     title: SharedString,
     cwd: Option<String>,
@@ -395,9 +374,6 @@ pub struct TerminalPane {
     selected_command_mark_id: Option<String>,
     command_mark_id_aliases: HashMap<String, String>,
     input_tracker: TerminalInputTracker,
-    privilege_prompt_tracker: PrivilegePromptTracker,
-    privilege_prompt_expiry_generation: u64,
-    privilege_prompt_expiry_task: Option<gpui::Task<()>>,
     command_fact_ledger: CommandFactLedger,
     recorder: Option<TerminalRecorder>,
     bell_flash: bool,
@@ -467,6 +443,15 @@ pub(crate) struct FreeTypeDragState {
     pub source_selection: Option<TerminalSelection>,
     pub action: FreeTypeDragAction,
     pub active: bool,
+}
+
+/// A link press waiting for the matching release. Activation is deferred to
+/// mouse-up with a movement threshold so a selection drag that starts on a
+/// link never opens it.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingLinkActivation {
+    pub link: TerminalLinkRange,
+    pub position: Point<Pixels>,
 }
 
 /// Describes the remote editing intent chosen for a Free Type drag.
@@ -559,6 +544,7 @@ const COMMAND_MARK_DEDUP_WINDOW_MS: u64 = 2000;
 const COMMAND_MARK_DEDUP_LINE_DISTANCE: usize = 2;
 static NEXT_TRZSZ_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_COMMAND_MARK_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TERMINAL_SELECTION_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn command_mark_ui_available(enabled: bool, mode: TermMode) -> bool {
     // Command marks describe normal-screen scrollback. A full-screen application or terminal
@@ -566,9 +552,10 @@ fn command_mark_ui_available(enabled: bool, mode: TermMode) -> bool {
     enabled && !mode.contains(TermMode::ALT_SCREEN) && !mode.intersects(TermMode::MOUSE_MODE)
 }
 
-fn privilege_prompt_input_tracking_available(mode: TermMode) -> bool {
-    // Full-screen applications own input; their navigation is not shell history.
-    !mode.contains(TermMode::ALT_SCREEN)
+fn next_terminal_selection_trace_id() -> u64 {
+    NEXT_TERMINAL_SELECTION_TRACE_ID
+        .fetch_add(1, Ordering::Relaxed)
+        .max(1)
 }
 
 fn take_snapshot_line_id(next_line_id: &mut u64) -> u64 {
@@ -753,19 +740,32 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> Result<Self> {
         let reconnect_config = config.clone();
-        let terminal = Arc::new(Mutex::new(
+        let terminal = Self::open_serial_session_with_preferences(config, &preferences)?;
+        let pane = Self::from_session(terminal, preferences, window, cx)?;
+        Ok(pane.with_serial_reconnect_config(reconnect_config))
+    }
+
+    pub fn open_serial_session_with_preferences(
+        config: SerialSessionConfig,
+        preferences: &TerminalUiPreferences,
+    ) -> Result<SharedTerminalSession> {
+        // Opening the device is fallible and must happen before GPUI allocates
+        // a pane entity so callers can surface missing or busy ports.
+        Ok(Arc::new(Mutex::new(
             TerminalSession::serial_with_graphics_and_encoding(
                 config,
                 DEFAULT_COLS,
                 DEFAULT_ROWS,
-                graphics_options_from_preferences(&preferences),
+                graphics_options_from_preferences(preferences),
                 preferences.terminal_encoding,
                 preferences.scrollback_lines,
             )?,
-        ));
-        let mut pane = Self::from_session(terminal, preferences, window, cx)?;
-        pane.serial_reconnect_config = Some(reconnect_config);
-        Ok(pane)
+        )))
+    }
+
+    pub fn with_serial_reconnect_config(mut self, config: SerialSessionConfig) -> Self {
+        self.serial_reconnect_config = Some(config);
+        self
     }
 
     pub fn from_shared_session(
@@ -933,8 +933,6 @@ impl TerminalPane {
             test_accepts_input: false,
             input_locked: false,
             marked_text: None,
-            privilege_prompt_inline_hint: None,
-            privilege_prompt_submit_requested: false,
             search_query: None,
             terminal_content_revision: 1,
             search_cache: None,
@@ -944,6 +942,8 @@ impl TerminalPane {
             hovered_link: None,
             hovered_command_mark_id: None,
             selecting: false,
+            selection_trace_id: None,
+            pending_link_activation: None,
             free_type_drag: None,
             last_mouse_report_point: None,
             title: SharedString::from("oxideterm-flash"),
@@ -966,9 +966,6 @@ impl TerminalPane {
             selected_command_mark_id: None,
             command_mark_id_aliases: HashMap::new(),
             input_tracker: TerminalInputTracker::default(),
-            privilege_prompt_tracker: PrivilegePromptTracker::default(),
-            privilege_prompt_expiry_generation: 0,
-            privilege_prompt_expiry_task: None,
             command_fact_ledger: CommandFactLedger::default(),
             recorder: None,
             bell_flash: false,
@@ -1043,6 +1040,53 @@ impl TerminalPane {
             &self.snapshot,
             &mut self.next_snapshot_line_id,
         );
+        // Re-anchoring must see the line identities assigned above, otherwise a
+        // viewport-relative selection would drift onto different text after new
+        // output or scrolling.
+        let previous_selection = self.selection;
+        self.selection = reanchor_selection(&self.snapshot, &snapshot, previous_selection);
+        if self.selecting
+            && let Some(trace_id) = self.selection_trace_id
+            && let Some(previous_selection) = previous_selection
+        {
+            match self.selection {
+                Some(selection) if selection != previous_selection => tracing::debug!(
+                    target: "oxideterm_gpui_terminal::selection",
+                    trace_id,
+                    stage = "snapshot-reanchor",
+                    previous_anchor_line = previous_selection.anchor.line,
+                    previous_head_line = previous_selection.head.line,
+                    next_anchor_line = selection.anchor.line,
+                    next_head_line = selection.head.line,
+                    previous_display_offset = self.snapshot.display_offset,
+                    next_display_offset = snapshot.display_offset,
+                    next_scrollback_lines = snapshot.scrollback_lines,
+                    result = "continued",
+                    business_impact = "the active mouse selection remains attached to the same terminal text while live output moves rows",
+                    "terminal selection endpoints were re-anchored after a snapshot update"
+                ),
+                None => {
+                    tracing::warn!(
+                        target: "oxideterm_gpui_terminal::selection",
+                        trace_id,
+                        stage = "snapshot-reanchor",
+                        previous_anchor_line = previous_selection.anchor.line,
+                        previous_head_line = previous_selection.head.line,
+                        previous_display_offset = self.snapshot.display_offset,
+                        next_display_offset = snapshot.display_offset,
+                        next_scrollback_lines = snapshot.scrollback_lines,
+                        result = "aborted",
+                        reason = "the selected rows could not be mapped safely into the replacement snapshot or retained scrollback",
+                        business_impact = "the in-progress mouse selection was stopped to avoid highlighting unrelated text",
+                        "terminal selection could not survive a snapshot update"
+                    );
+                    self.selecting = false;
+                    self.selection_autoscroll_position = None;
+                    self.selection_trace_id = None;
+                }
+                _ => {}
+            }
+        }
         // Raw backend snapshots are stateless; the pane owns frame generation
         // so future render caches can invalidate without changing backends.
         snapshot.reuse_unchanged_rows_from(&self.snapshot);
@@ -1256,100 +1300,20 @@ impl TerminalPane {
             .autosuggest_ghost_text(&self.input_tracker.state())
     }
 
-    fn terminal_ghost_text(&self) -> Option<String> {
-        // Keep the terminal grid shell-owned; OxideTerm suggestions belong to the command bar.
-        self.privilege_prompt_inline_hint.clone()
-    }
-
-    pub fn privilege_prompt_snapshot(&self) -> Option<PrivilegePromptSnapshot> {
-        self.privilege_prompt_tracker.snapshot(Instant::now())
-    }
-
-    pub fn privilege_prompt_fallback_suppressed(&self) -> bool {
-        self.privilege_prompt_tracker
-            .suppresses_fallback_prompt_detection(Instant::now())
-    }
-
-    pub fn has_privilege_prompt_inline_hint(&self) -> bool {
-        self.privilege_prompt_inline_hint.is_some()
-    }
-
     pub(crate) fn sync_terminal_output_events_enabled(&mut self) {
         let recording_requires_output = self
             .recorder
             .as_ref()
             .is_some_and(|recorder| recorder.status().state == TerminalRecordingState::Recording);
-        // Privilege prompts use compact semantic events at the session output
-        // boundary. Full decoded output is duplicated only for recording.
+        // Recording duplicates full decoded output at the session output boundary;
+        // the pane itself only consumes compact semantic events.
         self.terminal
             .lock()
             .set_output_events_enabled(recording_requires_output);
     }
 
-    fn finish_privilege_prompt_tracker_update(
-        &mut self,
-        previous_state_generation: u64,
-        cx: &mut Context<Self>,
-    ) {
-        if self.privilege_prompt_tracker.state_generation() == previous_state_generation {
-            return;
-        }
-        self.schedule_privilege_prompt_expiry(cx);
-        cx.emit(TerminalPaneEvent::PrivilegePromptStateChanged);
-    }
-
-    fn schedule_privilege_prompt_expiry(&mut self, cx: &mut Context<Self>) {
-        self.privilege_prompt_expiry_generation =
-            self.privilege_prompt_expiry_generation.wrapping_add(1);
-        self.privilege_prompt_expiry_task = None;
-        let Some(deadline) = self.privilege_prompt_tracker.next_expiry_deadline() else {
-            return;
-        };
-        let generation = self.privilege_prompt_expiry_generation;
-        let delay = deadline.saturating_duration_since(Instant::now());
-        self.privilege_prompt_expiry_task = Some(cx.spawn(async move |pane, cx| {
-            Timer::after(delay).await;
-            let _ = pane.update(cx, |pane, cx| {
-                if pane.privilege_prompt_expiry_generation != generation {
-                    return;
-                }
-                if !pane.privilege_prompt_tracker.expire_at(Instant::now()) {
-                    pane.schedule_privilege_prompt_expiry(cx);
-                    return;
-                }
-                // Expiry carries no prompt payload. Workspace reads only the
-                // active pane and clears any now-stale inline hint.
-                cx.emit(TerminalPaneEvent::PrivilegePromptStateChanged);
-                cx.notify();
-            });
-        }));
-    }
-
-    pub fn take_privilege_prompt_submit_request(&mut self) -> bool {
-        let requested = self.privilege_prompt_submit_requested;
-        self.privilege_prompt_submit_requested = false;
-        requested
-    }
-
     pub fn take_context_action_request(&mut self) -> Option<TerminalContextAction> {
         self.context_action_requested.take()
-    }
-
-    pub fn set_privilege_prompt_inline_hint(
-        &mut self,
-        hint: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.privilege_prompt_inline_hint == hint {
-            return false;
-        }
-        self.privilege_prompt_inline_hint = hint;
-        cx.notify();
-        true
-    }
-
-    fn clear_privilege_prompt_inline_hint(&mut self) -> bool {
-        self.privilege_prompt_inline_hint.take().is_some()
     }
 
     pub fn set_preferences(&mut self, preferences: TerminalUiPreferences, cx: &mut Context<Self>) {
@@ -1699,12 +1663,11 @@ impl TerminalPane {
         self.input_locked = false;
         self.title = SharedString::from("oxideterm-flash");
         self.selection = None;
+        self.selection_trace_id = None;
         self.pending_paste = None;
         self.context_menu = None;
         self.context_action_requested = None;
         self.marked_text = None;
-        self.privilege_prompt_inline_hint = None;
-        self.privilege_prompt_submit_requested = false;
         self.search_query = None;
         self.search_cache = None;
         self.selected_search_match = None;
@@ -1717,12 +1680,7 @@ impl TerminalPane {
         self.selected_command_mark_id = None;
         self.command_mark_id_aliases.clear();
         self.input_tracker.reset();
-        self.privilege_prompt_tracker = PrivilegePromptTracker::default();
-        self.privilege_prompt_expiry_generation =
-            self.privilege_prompt_expiry_generation.wrapping_add(1);
-        self.privilege_prompt_expiry_task = None;
         self.sync_terminal_output_events_enabled();
-        cx.emit(TerminalPaneEvent::PrivilegePromptStateChanged);
         self.command_fact_ledger = CommandFactLedger::default();
         self.last_pty_resize = Some(resize);
         self.pending_pty_resize = None;
@@ -1998,11 +1956,6 @@ impl TerminalPane {
         let bytes = Zeroizing::new(bytes);
         let mode = self.terminal.lock().mode();
         self.delete_free_type_selection_if_active(mode, cx);
-        let now = Instant::now();
-        // Pasted terminal input can include the sudo command while the later
-        // prompt is a bare `Password:`. Feed it through the privilege tracker
-        // without recording the paste as command history or exposing content.
-        self.observe_privilege_input("paste", &bytes, now, cx);
         // Preserve bracketed paste encoding when hook output is still text;
         // binary hook output falls back to raw protocol bytes.
         let result = match std::str::from_utf8(&bytes) {
@@ -2026,7 +1979,6 @@ impl TerminalPane {
         }
         let mut input = command.replace("\r\n", "\r").replace('\n', "\r");
         input.push('\r');
-        self.observe_privilege_input("command-line", input.as_bytes(), Instant::now(), cx);
         self.observe_autosuggest_input_bytes(input.as_bytes(), cx);
         self.send_text(&input, cx);
     }
@@ -2142,8 +2094,7 @@ impl TerminalPane {
 
         // Scheduled input does not prove that the remote prompt accepted or
         // began a command. Keep it out of marks, AI facts, autosuggest, history,
-        // and asciicast input; only update the privilege prompt state safely.
-        self.observe_privilege_input("command-sender-text", &bytes, Instant::now(), cx);
+        // and asciicast input.
         self.last_terminal_input = Instant::now();
         self.reset_cursor_blink();
         self.restore_live_output_after_user_input();
@@ -2163,7 +2114,7 @@ impl TerminalPane {
         let mut input = command.replace("\r\n", "\r").replace('\n', "\r");
         input.push('\r');
         // Internal control commands are terminal-owned probes. They must not be
-        // learned as user history, autosuggest input, privilege commands, or AI
+        // learned as user history, autosuggest input, or AI
         // context, even though the shell may still echo the bytes visibly.
         if self.terminal.lock().write_text(&input).is_ok() {
             self.last_terminal_input = Instant::now();
@@ -2181,33 +2132,6 @@ impl TerminalPane {
         // AI input remains scoped to its selected pane even while the user has
         // interactive terminal broadcasting enabled.
         self.send_user_protocol_bytes_without_broadcast(bytes, cx);
-    }
-
-    pub fn send_privilege_secret_input_bytes(
-        &mut self,
-        bytes: &[u8],
-        confirmed_prompt: PrivilegePromptMatch,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if bytes.is_empty() || !self.terminal_accepts_input() {
-            return false;
-        }
-
-        // Privilege Prompt Helper writes an explicitly user-confirmed secret
-        // directly to the PTY. It must not pass through plugin interception,
-        // autosuggest/history observation, AI context, or terminal recording.
-        if self.terminal.lock().write_protocol_bytes(bytes).is_ok() {
-            let previous_state_generation = self.privilege_prompt_tracker.state_generation();
-            self.privilege_prompt_tracker
-                .mark_confirmed_secret_filled(confirmed_prompt, Instant::now());
-            self.finish_privilege_prompt_tracker_update(previous_state_generation, cx);
-            self.clear_privilege_prompt_inline_hint();
-            self.last_terminal_input = Instant::now();
-            self.reset_cursor_blink();
-            cx.notify();
-            return true;
-        }
-        false
     }
 
     pub fn ai_accepts_input(&self) -> bool {
@@ -2273,6 +2197,7 @@ impl TerminalPane {
         self.snapshot = self.stamp_snapshot(snapshot);
         self.mark_terminal_content_changed(cx);
         self.selection = None;
+        self.selection_trace_id = None;
         self.search_query = None;
         self.selected_search_match = None;
         self.reset_command_marks_for_terminal_reset();
@@ -2350,18 +2275,9 @@ impl TerminalPane {
         }
 
         let cleared_command_mark_selection = self.clear_command_mark_selection_for_tui_mode(mode);
-        let cleared_privilege_prompt_hint = if mode.contains(TermMode::ALT_SCREEN) {
-            // Full-screen applications own the alternate screen and Enter.
-            // Clear terminal-local ghost text even when no tracker event fires
-            // during the mode transition.
-            self.clear_privilege_prompt_inline_hint()
-        } else {
-            false
-        };
         let mut needs_notify = event_effect.needs_notify || report.changed;
         if (self.preferences.show_performance_overlay && render_stats_changed)
             || cleared_command_mark_selection
-            || cleared_privilege_prompt_hint
         {
             needs_notify = true;
         }
@@ -2692,13 +2608,6 @@ impl TerminalPane {
                 }
                 TerminalEventEffect::default()
             }
-            TerminalEvent::PrivilegePrompt(event) => {
-                let previous_state_generation = self.privilege_prompt_tracker.state_generation();
-                self.privilege_prompt_tracker
-                    .observe_terminal_prompt_event(event, Instant::now());
-                self.finish_privilege_prompt_tracker_update(previous_state_generation, cx);
-                TerminalEventEffect::default()
-            }
             TerminalEvent::TitleChanged(title) => {
                 self.title = title.into();
                 TerminalEventEffect::notify()
@@ -2860,20 +2769,6 @@ impl TerminalPane {
                                 self.command_marks.remove(index);
                                 self.command_mark_id_aliases
                                     .insert(shell_command_id, frontend_command_id);
-                            }
-                            if let Some(command) = mark.command.as_deref() {
-                                // Shell integration is the terminal-owned
-                                // submitted-command source. Feed it to the
-                                // privilege tracker so bare sudo prompts do not
-                                // depend on lossy key/IME reconstruction.
-                                let previous_state_generation =
-                                    self.privilege_prompt_tracker.state_generation();
-                                self.privilege_prompt_tracker
-                                    .observe_submitted_command(command, Instant::now());
-                                self.finish_privilege_prompt_tracker_update(
-                                    previous_state_generation,
-                                    cx,
-                                );
                             }
                             self.command_fact_ledger.create_from_mark(&mark);
                             self.command_marks.push(mark);
@@ -3065,13 +2960,7 @@ impl TerminalPane {
         }
     }
 
-    fn observe_user_input(&mut self, source: &'static str, bytes: &[u8], cx: &mut Context<Self>) {
-        let now = Instant::now();
-        if self.observe_privilege_input(source, bytes, now, cx)
-            == PrivilegeInputObservation::SecretEntry
-        {
-            return;
-        }
+    fn observe_user_input(&mut self, _source: &'static str, bytes: &[u8], cx: &mut Context<Self>) {
         let Some(command) = self.observe_autosuggest_input_bytes(bytes, cx) else {
             return;
         };
@@ -3086,36 +2975,6 @@ impl TerminalPane {
             TerminalCommandMarkDetectionSource::UserInputObserved,
             cx,
         );
-    }
-
-    fn observe_privilege_input(
-        &mut self,
-        source: &'static str,
-        bytes: &[u8],
-        now: Instant,
-        cx: &mut Context<Self>,
-    ) -> PrivilegeInputObservation {
-        if !privilege_prompt_input_tracking_available(self.terminal.lock().mode()) {
-            return PrivilegeInputObservation::Normal;
-        }
-        let previous_state_generation = self.privilege_prompt_tracker.state_generation();
-        let observation = self
-            .privilege_prompt_tracker
-            .observe_user_input_bytes(bytes, now);
-        self.finish_privilege_prompt_tracker_update(previous_state_generation, cx);
-        log_privilege_prompt_terminal_pane(format_args!(
-            "input observed: source={} has_cr={} has_lf={} observation={}",
-            source,
-            bytes.contains(&b'\r'),
-            bytes.contains(&b'\n'),
-            privilege_input_observation_name(observation)
-        ));
-        if observation == PrivilegeInputObservation::SecretEntry
-            && self.clear_privilege_prompt_inline_hint()
-        {
-            cx.notify();
-        }
-        observation
     }
 
     fn observe_autosuggest_input_bytes(
@@ -3216,6 +3075,7 @@ impl TerminalPane {
             self.cursor_blink_terminal_enabled,
             alt_screen,
             self.preferences.cursor_shape,
+            self.theme.reduced_motion(),
         )
     }
 
@@ -3575,6 +3435,39 @@ fn terminal_grid_span_for_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_serial_port_is_reported_before_pane_construction() {
+        const MISSING_SERIAL_PORT_PATH: &str = "oxideterm-test-missing-serial-port";
+        let config = SerialSessionConfig {
+            port_path: MISSING_SERIAL_PORT_PATH.to_string(),
+            baud_rate: 115_200,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: oxideterm_terminal::SerialParity::None,
+            flow_control: oxideterm_terminal::SerialFlowControl::None,
+        };
+
+        let result = TerminalPane::open_serial_session_with_preferences(
+            config,
+            &TerminalUiPreferences::default(),
+        );
+        let error = match result {
+            Ok(_) => panic!("missing serial port must not open"),
+            Err(error) => error,
+        };
+        let serial_error = error
+            .downcast_ref::<oxideterm_terminal::SerialError>()
+            .expect("serial backend error");
+        assert_eq!(
+            serial_error.code,
+            oxideterm_terminal::SerialErrorCode::PortNotFound
+        );
+        assert_eq!(
+            serial_error.port_path.as_deref(),
+            Some(MISSING_SERIAL_PORT_PATH)
+        );
+    }
     use std::{cell::Cell, collections::HashMap, sync::Arc};
 
     use gpui::{AppContext, IntoElement, Render, TestAppContext, div};
@@ -3623,14 +3516,6 @@ mod tests {
         assert!(!command_mark_ui_available(
             true,
             TermMode::MOUSE_REPORT_CLICK
-        ));
-    }
-
-    #[test]
-    fn privilege_prompt_input_tracking_ignores_full_screen_application_keys() {
-        assert!(privilege_prompt_input_tracking_available(TermMode::empty()));
-        assert!(!privilege_prompt_input_tracking_available(
-            TermMode::ALT_SCREEN
         ));
     }
 

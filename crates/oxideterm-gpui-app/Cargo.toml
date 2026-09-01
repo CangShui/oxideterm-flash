@@ -21,11 +21,11 @@ oxideterm-backend-classification = { path = "../oxideterm-backend-classification
 oxideterm-atomic-file = { path = "../oxideterm-atomic-file" }
 oxideterm-connection-monitor = { path = "../oxideterm-connection-monitor" }
 oxideterm-connections = { path = "../oxideterm-connections" }
+oxideterm-cloud-sync = { path = "../oxideterm-cloud-sync" }
 oxideterm-desktop-presence = { path = "../oxideterm-desktop-presence" }
 oxideterm-editor-core = { path = "../oxideterm-editor-core" }
 oxideterm-forwarding = { path = "../oxideterm-forwarding" }
 oxideterm-gpui-editor = { path = "../oxideterm-gpui-editor" }
-oxideterm-gpui-ide = { path = "../oxideterm-gpui-ide" }
 oxideterm-gpui-markdown = { path = "../oxideterm-gpui-markdown" }
 oxideterm-gpui-platform = { path = "../oxideterm-gpui-platform" }
 oxideterm-gpui-remote-desktop = { path = "../oxideterm-gpui-remote-desktop" }
@@ -35,13 +35,9 @@ oxideterm-gpui-ui = { path = "../oxideterm-gpui-ui" }
 oxideterm-editor-syntax = { path = "../oxideterm-editor-syntax" }
 oxideterm-environment = { path = "../oxideterm-environment" }
 oxideterm-i18n = { path = "../oxideterm-i18n" }
-oxideterm-ide-core = { path = "../oxideterm-ide-core" }
-oxideterm-ide-fs = { path = "../oxideterm-ide-fs" }
 oxideterm-launcher = { path = "../oxideterm-launcher" }
 oxideterm-local-files = { path = "../oxideterm-local-files" }
-oxideterm-notification-center = { path = "../oxideterm-notification-center" }
 oxideterm-network-proxy = { path = "../oxideterm-network-proxy" }
-oxideterm-portable-runtime = { path = "../oxideterm-portable-runtime" }
 oxideterm-preview = { path = "../oxideterm-preview" }
 oxideterm-quick-commands = { path = "../oxideterm-quick-commands" }
 oxideterm-remote-desktop = { path = "../oxideterm-remote-desktop" }
@@ -117,4 +113,4 @@ icon = [
 osx_minimum_system_version = "13.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_entitlements = "resources/OxideTerm.entitlements"
-resources = ["resources/agents", "resources/cli-bin", "resources/icons"]
+resources = ["resources/cli-bin", "resources/icons"]

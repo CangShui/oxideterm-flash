@@ -534,6 +534,7 @@ impl HostToolsEntity {
         let last = host_schedule_blank_dash(&entry.last_run);
 
         div()
+            .id(("host-schedule-row", index))
             .w_full()
             .min_w_0()
             .border_b_1()

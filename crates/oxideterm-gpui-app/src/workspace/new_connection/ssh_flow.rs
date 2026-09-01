@@ -30,7 +30,7 @@ use tokio::sync::oneshot;
 use super::{
     ConnectionFormState, NativeProxyConnectRun, ProxyConnectPreflightContext,
     form_state::{
-        NewConnectionField, NewConnectionForm, NewConnectionFormMode, NewConnectionProxyHop,
+        NewConnectionForm, NewConnectionFormMode, NewConnectionProxyHop,
         NewConnectionSubmitAction, NewConnectionTransport, NewConnectionUpstreamProxyAuth,
         NewConnectionUpstreamProxyPolicy, SavedConnectionPromptAction, SshAuthTab,
         StandaloneSftpSecondaryForm, connection_timeout_drafts_valid, identity_agent_from_form,
@@ -41,7 +41,7 @@ use super::{
 use crate::workspace::{
     WorkspaceApp, WorkspaceSshNode,
     delivery::ActiveDeliverySender,
-    session_manager::{
+    connection_workspace::{
         RuntimeSecretHandoff, duplicate_connection_template_name, form_from_saved_connection,
         restore_legacy_jump_host_in_form, save_request_from_form_with_existing_auth,
         save_request_from_form_with_proxy_hop_prefix, upstream_proxy_config_from_form,
@@ -141,11 +141,6 @@ pub(in crate::workspace) enum SshConnectionIntent {
     TestStandaloneSftp,
     Connect(SshTerminalConnectionOptions),
     ConnectSaved(String),
-    DrillDown {
-        parent_id: NodeId,
-        saved_connection_id: Option<String>,
-        terminal_options: SshTerminalConnectionOptions,
-    },
     StandaloneSftp {
         saved_profile_id: Option<String>,
         initial_remote_path: Option<String>,
@@ -439,117 +434,5 @@ impl WorkspaceApp {
                 form.field_focused = false;
             }
         });
-    }
-
-    pub(in crate::workspace) fn open_drill_down_form(
-        &mut self,
-        parent_node_id: NodeId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let parent_ready = self
-            .node_router
-            .node_metadata(&parent_node_id)
-            .is_some_and(|snapshot| snapshot.readiness == NodeReadiness::Ready);
-        if !parent_ready {
-            let message = format!(
-                "{}: {}",
-                self.i18n.t("sessions.tree.actions.drill_in"),
-                self.i18n.t("ssh.drill_down.parent_not_ready")
-            );
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(message), cx);
-            });
-            return;
-        }
-
-        self.prepare_modal_interaction_boundary(cx);
-        let mut form = NewConnectionForm::default();
-        form.auth_tab = SshAuthTab::Agent;
-        form.focused_field = super::form_state::NewConnectionField::Host;
-        form.save_connection = false;
-        form.group = self.i18n.t("ssh.form.ungrouped");
-        form.agent_available = detect_ssh_agent_available(&form.identity_agent);
-        form.username = String::new();
-        self.update_connection_form_state(cx, |state| {
-            state.replace_with_new_form(form);
-            state.drill_down_parent_node_id = Some(parent_node_id);
-        });
-        self.show_active_input_caret(cx);
-        self.needs_active_pane_focus = false;
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
-    }
-
-    pub(in crate::workspace) fn connect_saved_connection_as_next_hop(
-        &mut self,
-        parent_node_id: NodeId,
-        saved_connection_id: String,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let parent_ready = self
-            .node_router
-            .node_metadata(&parent_node_id)
-            .is_some_and(|snapshot| snapshot.readiness == NodeReadiness::Ready);
-        if !parent_ready {
-            self.report_saved_next_hop_error("sessions.saved_next_hop.parent_not_ready", cx);
-            return;
-        }
-
-        let Some(connection) = self.connection_store.get(&saved_connection_id).cloned() else {
-            self.report_saved_next_hop_error("sessions.saved_next_hop.not_found", cx);
-            return;
-        };
-        let Some(mut config) = ssh_config_from_saved_connection(
-            &self.connection_store,
-            self.settings_store.settings(),
-            &connection,
-        ) else {
-            self.report_saved_next_hop_error("sessions.saved_next_hop.missing_credentials", cx);
-            return;
-        };
-        if let Err(error) = prepare_tree_connect_config(&mut config) {
-            self.report_saved_next_hop_message(error, cx);
-            return;
-        }
-
-        // Saved next-hop reuse still belongs to the native SessionTree path:
-        // materialize the saved target under the live parent, then let
-        // NodeRouter connect through that ancestry.
-        let expansion = match self.expand_saved_connection_tree_under_parent(
-            parent_node_id,
-            &saved_connection_id,
-            config,
-            connection.name,
-        ) {
-            Ok(expansion) => expansion,
-            Err(error) => {
-                let message = format!(
-                    "{}: {error}",
-                    self.i18n.t("sessions.saved_next_hop.materialize_failed")
-                );
-                self.report_saved_next_hop_message(message, cx);
-                return;
-            }
-        };
-
-        let target_node_id = expansion.target_node_id;
-        if let Some(node) = self.ssh_nodes.get_mut(&target_node_id) {
-            node.readiness = NodeReadiness::Connecting;
-        }
-        self.active_ssh_node_id = Some(target_node_id.clone());
-        self.connection_flow.update(cx, |connection_flow, cx| {
-            connection_flow.clear_host_key_challenge(cx);
-        });
-        self.update_connection_form_state(cx, ConnectionFormState::clear);
-        let message = self.i18n.t("ssh.drill_down.connecting");
-        self.session_manager.update(cx, |session_manager, cx| {
-            session_manager.set_status(Some(message), cx);
-        });
-        self.ensure_node_connection_started(&target_node_id, cx);
-        let _ = self.connection_store.mark_used(&saved_connection_id);
-        self.persist_session_tree_snapshot();
-        cx.notify();
     }
 }

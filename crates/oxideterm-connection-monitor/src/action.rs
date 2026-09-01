@@ -1,6 +1,7 @@
 use crate::{
     docker_action_failure_message, docker_action_succeeded, docker_action_success_message,
     process_action_failure_message, process_action_succeeded, process_action_success_message,
+    screen_action_failure_message, screen_action_succeeded, screen_action_success_message,
     service_action_failure_message, service_action_succeeded, service_action_success_message,
     tmux_action_failure_message, tmux_action_succeeded, tmux_action_success_message,
 };
@@ -71,6 +72,22 @@ pub fn interpret_tmux_action_output(
     } else {
         HostToolActionOutcome::Failed {
             message: tmux_action_failure_message(stdout, stderr, exit_code),
+        }
+    }
+}
+
+pub fn interpret_screen_action_output(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> HostToolActionOutcome {
+    if screen_action_succeeded(exit_code) {
+        HostToolActionOutcome::Succeeded {
+            message: screen_action_success_message(stdout, stderr),
+        }
+    } else {
+        HostToolActionOutcome::Failed {
+            message: screen_action_failure_message(stdout, stderr, exit_code),
         }
     }
 }

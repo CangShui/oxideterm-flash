@@ -7,22 +7,16 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.tokens.ui;
-        let mut top_items_before_plugins = vec![(SidebarSection::Sessions, LucideIcon::Link2)];
-        top_items_before_plugins.extend([
-            (SidebarSection::Connections, LucideIcon::LayoutList),
-            (SidebarSection::Runtime, LucideIcon::Gauge),
-        ]);
+        // The new local terminal leads the activity bar because it is the most
+        // frequent startup action in every workspace.
+        let mut top_items_before_plugins = vec![(SidebarSection::Workspace, LucideIcon::Square)];
+        top_items_before_plugins.extend([(SidebarSection::Sessions, LucideIcon::Link2)]);
         let top_items_after_plugins = [(SidebarSection::HostTools, LucideIcon::Wrench)];
-        let mut bottom_items = vec![
-            (SidebarSection::Workspace, LucideIcon::Square),
-            (SidebarSection::Files, LucideIcon::FolderOpen),
-            (SidebarSection::Notifications, LucideIcon::Bell),
-            (SidebarSection::Settings, LucideIcon::Settings),
-        ];
+        let mut bottom_items = vec![(SidebarSection::Settings, LucideIcon::Settings)];
         if !cfg!(target_os = "windows") {
-            // Keep the Windows activity bar at four items while other builds
-            // expose the monitor tool between Files and Notifications.
-            bottom_items.insert(2, (SidebarSection::Monitor, LucideIcon::Monitor));
+            // Keep the monitor tool directly above Settings on non-Windows
+            // builds.
+            bottom_items.insert(0, (SidebarSection::Monitor, LucideIcon::Monitor));
         }
         let mut bar = div()
             .w(px(self.tokens.metrics.activity_bar_width))
@@ -152,25 +146,9 @@ impl WorkspaceApp {
     ) -> AnyElement {
         let theme = self.tokens.ui;
         let active = match section {
-            SidebarSection::Terminal => false,
-            SidebarSection::Runtime => self
-                .active_tab(cx)
-                .is_some_and(|tab| tab.kind == TabKind::Runtime),
-            SidebarSection::Network => {
-                self.active_tab(cx)
-                    .is_some_and(|tab| tab.kind == TabKind::Runtime)
-                    && self.host_tools.read(cx).active_runtime_section
-                        == ConnectionRuntimeSection::Topology
-            }
-            SidebarSection::Files => self
-                .active_tab(cx)
-                .is_some_and(|tab| tab.kind == TabKind::FileManager),
             SidebarSection::Monitor if cfg!(target_os = "macos") => self
                 .active_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::Launcher),
-            SidebarSection::Notifications => self
-                .active_tab(cx)
-                .is_some_and(|tab| tab.kind == TabKind::NotificationCenter),
             SidebarSection::Settings => self
                 .active_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::Settings),
@@ -183,36 +161,10 @@ impl WorkspaceApp {
         let tooltip = self.activity_icon_tooltip(section);
         let tooltip_id = format!("activity-icon-{}", section.as_settings_key());
         let tooltip_id_for_move = tooltip_id.clone();
-        let badge_count = if section == SidebarSection::Notifications {
-            let notification_count = if self.notification_center.notifications.dnd_enabled {
-                0
-            } else {
-                self.notification_center.notifications.unread_count
-            };
-            let event_count = if self.notification_center.event_log.dnd_enabled {
-                0
-            } else {
-                self.notification_center.event_log.unread_count
-            };
-            notification_count.saturating_add(event_count)
-        } else {
-            0
-        };
-        let badge_is_error = section == SidebarSection::Notifications
-            && ((!self.notification_center.notifications.dnd_enabled
-                && self.notification_center.notifications.unread_critical_count > 0)
-                || (!self.notification_center.event_log.dnd_enabled
-                    && self.notification_center.event_log.unread_errors > 0));
-        let badge_color = if badge_is_error {
-            theme.error
-        } else {
-            theme.accent
-        };
-        let badge_text_color = if badge_color == theme.accent {
-            theme.accent_text
-        } else {
-            theme.bg
-        };
+        let badge_count = 0u32;
+        let badge_is_error = false;
+        let badge_color = theme.accent;
+        let badge_text_color = theme.accent_text;
 
         // Activity entries use the same static selected-card treatment as the
         // settings navigation while retaining the shared icon-button states.
@@ -294,30 +246,10 @@ impl WorkspaceApp {
                 cx.listener(move |this, _event, window, cx| {
                     if section == SidebarSection::Settings {
                         this.open_settings(window, cx);
-                    } else if section == SidebarSection::Connections {
-                        this.open_session_manager_tab(window, cx);
-                    } else if section == SidebarSection::Terminal {
-                        this.open_connection_runtime_tab(
-                            ConnectionRuntimeSection::Overview,
-                            window,
-                            cx,
-                        );
-                    } else if section == SidebarSection::Runtime {
-                        this.open_connection_runtime_tab(
-                            ConnectionRuntimeSection::Overview,
-                            window,
-                            cx,
-                        );
-                    } else if section == SidebarSection::Network {
-                        this.open_topology_tab(window, cx);
                     } else if section == SidebarSection::Workspace {
                         this.open_new_connection_form(window, cx);
-                    } else if section == SidebarSection::Files {
-                        this.open_file_manager_tab(window, cx);
                     } else if section == SidebarSection::Monitor && cfg!(target_os = "macos") {
                         this.open_launcher_tab(window, cx);
-                    } else if section == SidebarSection::Notifications {
-                        this.open_notification_center_tab(window, cx);
                     } else if section == SidebarSection::HostTools {
                         let _ =
                             this.toggle_context_sidebar_panel(ContextSidebarPanel::HostTools, cx);
@@ -334,19 +266,13 @@ impl WorkspaceApp {
         match section {
             SidebarSection::Sessions => self.i18n.t("sidebar.panels.sessions"),
             SidebarSection::Connections => self.i18n.t("sidebar.panels.open_session_manager"),
-            SidebarSection::Forwards => self.i18n.t("forwards.table.title"),
-            SidebarSection::Terminal => self.i18n.t("sidebar.panels.runtime_overview"),
-            SidebarSection::Runtime => self.i18n.t("sidebar.panels.runtime"),
-            SidebarSection::Network => self.i18n.t("sidebar.panels.connection_matrix"),
             SidebarSection::HostTools => self.i18n.t("sidebar.panels.host_tools"),
             SidebarSection::Automation => self.i18n.t("sidebar.panels.activity"),
             SidebarSection::Workspace => self.i18n.t("sidebar.actions.new_local_terminal"),
-            SidebarSection::Files => self.i18n.t("sidebar.panels.files"),
             SidebarSection::Monitor if cfg!(target_os = "macos") => {
                 self.i18n.t("launcher.tabTitle")
             }
             SidebarSection::Monitor => self.i18n.t("sidebar.panels.connection_monitor"),
-            SidebarSection::Notifications => self.i18n.t("sidebar.panels.notifications"),
             SidebarSection::Settings => self.i18n.t("sidebar.tooltips.settings"),
         }
     }

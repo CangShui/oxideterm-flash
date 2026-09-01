@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+use oxideterm_gpui_terminal::TerminalNoticeVariant;
 
 impl WorkspaceApp {
     pub(in crate::workspace) fn ssh_worker_sender(
@@ -264,9 +265,12 @@ impl WorkspaceApp {
                                     connection_flow.set_form_success_feedback(form_message, cx)
                                 });
                             if !reported_to_form {
-                                self.session_manager.update(cx, |session_manager, cx| {
-                                    session_manager.set_status(Some(session_message), cx);
-                                });
+                                self.push_command_palette_toast(
+                                    session_message,
+                                    None,
+                                    TerminalNoticeVariant::Success,
+                                    cx,
+                                );
                             }
                         }
                         Err(error) => {
@@ -279,9 +283,12 @@ impl WorkspaceApp {
                                     connection_flow.set_form_feedback(Some(false), Some(error), cx)
                                 });
                             if !reported_to_form {
-                                self.session_manager.update(cx, |session_manager, cx| {
-                                    session_manager.set_status(Some(session_message), cx);
-                                });
+                                self.push_command_palette_toast(
+                                    session_message,
+                                    None,
+                                    TerminalNoticeVariant::Error,
+                                    cx,
+                                );
                             }
                         }
                     }
@@ -311,9 +318,6 @@ impl WorkspaceApp {
                                 .connection_store
                                 .mark_standalone_sftp_profile_used(&profile_id);
                         }
-                        self.session_manager.update(cx, |session_manager, cx| {
-                            session_manager.set_status(None, cx);
-                        });
                         self.update_connection_form_state(cx, ConnectionFormState::clear);
                         self.close_new_connection_select(cx);
                         self.open_standalone_sftp_tab_surface(
@@ -333,9 +337,12 @@ impl WorkspaceApp {
                                 )
                             });
                         if !reported_to_form {
-                            self.session_manager.update(cx, |session_manager, cx| {
-                                session_manager.set_status(Some(error), cx);
-                            });
+                            self.push_command_palette_toast(
+                                error,
+                                None,
+                                TerminalNoticeVariant::Error,
+                                cx,
+                            );
                         }
                     }
                 },
@@ -372,9 +379,6 @@ impl WorkspaceApp {
                         let _ = self
                             .connection_store
                             .mark_standalone_sftp_profile_used(&saved_profile_id);
-                        self.session_manager.update(cx, |session_manager, cx| {
-                            session_manager.set_status(None, cx);
-                        });
                         self.update_connection_form_state(cx, ConnectionFormState::clear);
                         self.close_new_connection_select(cx);
                         self.open_standalone_sftp_pair_tab_surface(
@@ -396,9 +400,12 @@ impl WorkspaceApp {
                                 )
                             });
                         if !reported_to_form {
-                            self.session_manager.update(cx, |session_manager, cx| {
-                                session_manager.set_status(Some(error), cx);
-                            });
+                            self.push_command_palette_toast(
+                                error,
+                                None,
+                                TerminalNoticeVariant::Error,
+                                cx,
+                            );
                         }
                     }
                 },
@@ -460,9 +467,12 @@ impl WorkspaceApp {
                     connection_flow.set_form_feedback(None, Some(message.clone()), cx)
                 });
                 if !reported_to_form {
-                    self.session_manager.update(cx, |session_manager, cx| {
-                        session_manager.set_status(Some(message), cx);
-                    });
+                    self.push_command_palette_toast(
+                        message,
+                        None,
+                        TerminalNoticeVariant::Error,
+                        cx,
+                    );
                 }
                 cx.notify();
             }
@@ -733,9 +743,12 @@ impl WorkspaceApp {
             connection_flow.set_form_feedback(Some(true), Some(message.clone()), cx)
         });
         if !reported_to_form {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(message), cx);
-            });
+            self.push_command_palette_toast(
+                message,
+                None,
+                TerminalNoticeVariant::Default,
+                cx,
+            );
         }
         let tx = self.ssh_worker_sender(cx);
         let router = self.node_router.clone();
@@ -910,9 +923,6 @@ impl WorkspaceApp {
                 if self.connection_form_state(cx).form.is_some() {
                     self.update_connection_form_state(cx, ConnectionFormState::clear);
                 }
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(None, cx);
-                });
                 let post_connect_command = target_config.post_connect_command.clone();
                 let _ = self.queue_ssh_terminal_tab_for_node_with_mark_used(
                     target_node_id,
@@ -928,7 +938,6 @@ impl WorkspaceApp {
             }
             SshConnectionIntent::Test
             | SshConnectionIntent::TestStandaloneSftp
-            | SshConnectionIntent::DrillDown { .. }
             | SshConnectionIntent::StandaloneSftp { .. }
             | SshConnectionIntent::StandaloneSftpSecondary { .. } => {}
         }
@@ -1102,9 +1111,12 @@ impl WorkspaceApp {
             connection_flow.set_form_feedback(Some(false), Some(error.clone()), cx)
         });
         if !reported_to_form {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(error), cx);
-            });
+            self.push_command_palette_toast(
+                error,
+                None,
+                TerminalNoticeVariant::Error,
+                cx,
+            );
         }
         cx.notify();
     }
@@ -1130,9 +1142,12 @@ impl WorkspaceApp {
             connection_flow.set_form_feedback(Some(true), Some(message.clone()), cx)
         });
         if !reported_to_form {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(message), cx);
-            });
+            self.push_command_palette_toast(
+                message,
+                None,
+                TerminalNoticeVariant::Default,
+                cx,
+            );
         }
         self.start_ssh_preflight(config, title, SshConnectionIntent::Test, cx);
         cx.notify();
@@ -1188,9 +1203,12 @@ impl WorkspaceApp {
                         }
                         Err(error) => {
                             let message = error.to_string();
-                            self.session_manager.update(cx, |session_manager, cx| {
-                                session_manager.set_status(Some(message), cx);
-                            });
+                            self.push_command_palette_toast(
+                                message,
+                                None,
+                                TerminalNoticeVariant::Error,
+                                cx,
+                            );
                         }
                     }
                     return;
@@ -1221,9 +1239,6 @@ impl WorkspaceApp {
                 if self.connection_form_state(cx).form.is_some() {
                     self.update_connection_form_state(cx, ConnectionFormState::clear);
                 }
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(None, cx);
-                });
                 let _ = self.open_or_create_saved_ssh_terminal_tab(id, config, title, window, cx);
             }
             SshConnectionIntent::StandaloneSftp {
@@ -1444,64 +1459,6 @@ impl WorkspaceApp {
                     }
                 });
             }
-            SshConnectionIntent::DrillDown {
-                parent_id,
-                saved_connection_id,
-                terminal_options,
-            } => {
-                self.connection_flow.update(cx, |connection_flow, cx| {
-                    connection_flow.clear_host_key_challenge(cx);
-                });
-                let child_id = match self
-                    .node_router
-                    .drill_down_node(parent_id.clone(), config.clone())
-                {
-                    Ok(child_id) => child_id,
-                    Err(error) => {
-                        let message = error.to_string();
-                        let reported_to_form =
-                            self.connection_flow.update(cx, |connection_flow, cx| {
-                                connection_flow.set_form_feedback(
-                                    Some(false),
-                                    Some(message.clone()),
-                                    cx,
-                                )
-                            });
-                        if !reported_to_form {
-                            self.session_manager.update(cx, |session_manager, cx| {
-                                session_manager.set_status(Some(message), cx);
-                            });
-                        }
-                        cx.notify();
-                        return;
-                    }
-                };
-                let mut child_node = crate::workspace::WorkspaceSshNode::new(
-                    saved_connection_id.clone(),
-                    &config,
-                    title,
-                    Vec::new(),
-                    NodeReadiness::Connecting,
-                );
-                child_node.terminal_options = terminal_options.terminal;
-                child_node.dedicated_new_terminal_connection =
-                    terminal_options.dedicated_new_terminal_connection;
-                self.ssh_nodes.insert(child_id.clone(), child_node);
-                if let Some(saved_connection_id) = saved_connection_id {
-                    self.saved_ssh_nodes
-                        .insert(saved_connection_id, child_id.clone());
-                }
-                self.expanded_ssh_nodes.insert(parent_id);
-                self.expanded_ssh_nodes.insert(child_id.clone());
-                self.active_ssh_node_id = Some(child_id.clone());
-                self.update_connection_form_state(cx, ConnectionFormState::clear);
-                let message = self.i18n.t("ssh.drill_down.connecting");
-                self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.set_status(Some(message), cx);
-                });
-                self.ensure_node_connection_started(&child_id, cx);
-                self.persist_session_tree_snapshot();
-            }
             SshConnectionIntent::Test => self.start_ssh_test(config, cx),
             SshConnectionIntent::TestStandaloneSftp => self.start_standalone_sftp_test(config, cx),
         }
@@ -1552,9 +1509,12 @@ impl WorkspaceApp {
             connection_flow.set_form_feedback(Some(true), Some(message.clone()), cx)
         });
         if !reported_to_form {
-            self.session_manager.update(cx, |session_manager, cx| {
-                session_manager.set_status(Some(message), cx);
-            });
+            self.push_command_palette_toast(
+                message,
+                None,
+                TerminalNoticeVariant::Default,
+                cx,
+            );
         }
         let tx = self.ssh_worker_sender(cx);
         let managed_key_resolver = managed_key_resolver_from_store(&self.connection_store);

@@ -311,6 +311,98 @@ impl WorkspaceApp {
                     }
                 }
             }
+            SftpDialog::NewFile { pane } => {
+                let name = self
+                    .sftp_view
+                    .read(cx)
+                    .input_value(SftpInput::DialogValue)
+                    .trim()
+                    .to_string();
+                if pane == SftpPane::Local
+                    && self.sftp_pair_primary_remote_id(cx).is_some()
+                    && !name.is_empty()
+                {
+                    let path = join_sftp_path(&self.sftp_view.read(cx).local_path, &name);
+                    let toast = SftpMutationToast {
+                        success_title: self.i18n.t("sftp.toast.file_created"),
+                        success_description: Some(name),
+                        error_title: self.i18n.t("sftp.toast.create_file_failed"),
+                    };
+                    self.spawn_sftp_pane_remote_mutation(
+                        pane,
+                        move |sftp| {
+                            Box::pin(async move {
+                                sftp.write_content(&path, b"")
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|error| error.to_string())
+                            })
+                        },
+                        Some(toast),
+                        cx,
+                    );
+                    self.close_sftp_dialog(cx);
+                    return;
+                }
+                if !name.is_empty() {
+                    match pane {
+                        SftpPane::Local => {
+                            let local_path = self.sftp_view.read(cx).local_path.clone();
+                            let path = join_local_path(&local_path, &name);
+                            match std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&path)
+                                .map(|_| ())
+                            {
+                                Ok(()) => {
+                                    if let Ok(files) = list_local_files(&local_path) {
+                                        self.sftp_view.update(cx, |sftp, cx| {
+                                            sftp.local_files = files;
+                                            cx.notify();
+                                        });
+                                    }
+                                    self.push_sftp_toast(
+                                        self.i18n.t("sftp.toast.file_created"),
+                                        Some(name),
+                                        TerminalNoticeVariant::Success,
+                                        cx,
+                                    );
+                                }
+                                Err(error) => {
+                                    self.push_sftp_toast(
+                                        self.i18n.t("sftp.toast.create_file_failed"),
+                                        Some(error.to_string()),
+                                        TerminalNoticeVariant::Error,
+                                        cx,
+                                    );
+                                }
+                            }
+                        }
+                        SftpPane::Remote => {
+                            let remote_path = self.sftp_view.read(cx).remote_path.clone();
+                            let path = join_sftp_path(&remote_path, &name);
+                            let toast = SftpMutationToast {
+                                success_title: self.i18n.t("sftp.toast.file_created"),
+                                success_description: Some(name),
+                                error_title: self.i18n.t("sftp.toast.create_file_failed"),
+                            };
+                            self.spawn_remote_sftp_mutation(
+                                move |sftp| {
+                                    Box::pin(async move {
+                                        sftp.write_content(&path, b"")
+                                            .await
+                                            .map(|_| ())
+                                            .map_err(|error| error.to_string())
+                                    })
+                                },
+                                Some(toast),
+                                cx,
+                            );
+                        }
+                    }
+                }
+            }
             SftpDialog::Delete { pane, files } => {
                 if pane == SftpPane::Local && self.sftp_pair_primary_remote_id(cx).is_some() {
                     let local_files = self.sftp_view.read(cx).local_files.clone();

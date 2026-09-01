@@ -14,7 +14,7 @@ impl TerminalPane {
         };
         let Some(transfer) = self.terminal.lock().start_modem_transfer(request.clone()) else {
             self.emit_trzsz_notice(
-                self.preferences.trzsz_labels.failed_title.clone(),
+                self.preferences.modem_labels.failed_title.clone(),
                 None,
                 TerminalNoticeVariant::Error,
             );
@@ -46,7 +46,7 @@ impl TerminalPane {
                 multiple: request.protocol != oxideterm_modem_transfer::DetectedModemProtocol::Xmodem,
                 prompt: Some(SharedString::from(
                     self.preferences
-                        .trzsz_labels
+                        .modem_labels
                         .select_upload_files_title
                         .clone(),
                 )),
@@ -57,7 +57,7 @@ impl TerminalPane {
                 multiple: false,
                 prompt: Some(SharedString::from(
                     self.preferences
-                        .trzsz_labels
+                        .modem_labels
                         .select_download_directory_title
                         .clone(),
                 )),
@@ -174,7 +174,7 @@ impl TerminalPane {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         transfer_status.stop();
                         pending_completion = Some(ModemWorkerEvent::Failed(
-                            "The modem worker stopped unexpectedly".to_string(),
+                            ModemWorkerFailure::WorkerStopped,
                         ));
                     }
                 }
@@ -196,7 +196,7 @@ impl TerminalPane {
             ModemWorkerEvent::Completed => {
                 if !self.modem_connection_lost {
                     self.emit_trzsz_notice(
-                        self.preferences.trzsz_labels.completed_title.clone(),
+                        self.preferences.modem_labels.completed_title.clone(),
                         None,
                         TerminalNoticeVariant::Success,
                     );
@@ -206,23 +206,39 @@ impl TerminalPane {
             ModemWorkerEvent::Cancelled => {
                 if !self.modem_connection_lost {
                     self.emit_trzsz_notice(
-                        self.preferences.trzsz_labels.cancelled_title.clone(),
+                        self.preferences.modem_labels.cancelled_title.clone(),
                         None,
                         TerminalNoticeVariant::Warning,
                     );
                 }
                 true
             }
-            ModemWorkerEvent::Failed(_message) => {
+            ModemWorkerEvent::Failed(failure) => {
                 if !self.modem_connection_lost {
                     self.emit_trzsz_notice(
-                        self.preferences.trzsz_labels.failed_title.clone(),
-                        None,
+                        self.preferences.modem_labels.failed_title.clone(),
+                        self.modem_failure_description(&failure),
                         TerminalNoticeVariant::Error,
                     );
                 }
                 true
             }
+        }
+    }
+
+    // Maps a worker failure kind to localized copy. Protocol and IO failures
+    // stay title-only because their detail text is diagnostic, not UI copy.
+    fn modem_failure_description(
+        &self,
+        failure: &ModemWorkerFailure,
+    ) -> Option<String> {
+        let labels = &self.preferences.modem_labels;
+        match failure {
+            ModemWorkerFailure::InvalidSelection => Some(labels.invalid_selection.clone()),
+            ModemWorkerFailure::InvalidFileName => Some(labels.invalid_file_name.clone()),
+            ModemWorkerFailure::WrongDirection => Some(labels.wrong_direction.clone()),
+            ModemWorkerFailure::WorkerStopped => Some(labels.worker_stopped.clone()),
+            ModemWorkerFailure::Transfer(_) => None,
         }
     }
 
@@ -263,7 +279,7 @@ impl TerminalPane {
         self.terminal.lock().interrupt_modem_transfer();
         self.modem_progress = None;
         self.emit_trzsz_notice(
-            self.preferences.trzsz_labels.connection_lost_title.clone(),
+            self.preferences.modem_labels.connection_lost_title.clone(),
             None,
             TerminalNoticeVariant::Warning,
         );

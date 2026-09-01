@@ -1,5 +1,6 @@
 use std::{
     env,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -9,16 +10,16 @@ use gpui::{
 };
 use oxideterm_terminal::{
     TermMode, TerminalEditorApplication, TerminalEditorClipboardOperation, TerminalRow,
-    TerminalSearchMatch, TerminalSnapshot,
+    TerminalSearchMatch, TerminalSessionKind, TerminalSnapshot,
 };
 use oxideterm_terminal_unicode::visual_line_for_row;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    FreeTypeDragAction, FreeTypeDragState, PendingTerminalEditorClipboard, ScrollbarDrag,
-    ScrollbarGeometry, SmoothScrollAnimation, TerminalContextMenu, TerminalPane, TerminalPaneEvent,
-    command_mark_ui_available,
+    FreeTypeDragAction, FreeTypeDragState, PendingLinkActivation, PendingTerminalEditorClipboard,
+    ScrollbarDrag, ScrollbarGeometry, SmoothScrollAnimation, TerminalContextMenu, TerminalPane,
+    TerminalPaneEvent, command_mark_ui_available, next_terminal_selection_trace_id,
 };
 use crate::command_facts::TerminalAutosuggestInputState;
 use crate::terminal_ui::*;
@@ -28,14 +29,10 @@ const TERMINAL_SELECTION_AUTOSCROLL_INTERVAL_MS: u64 = 16;
 const TERMINAL_SELECTION_AUTOSCROLL_MAX_ROWS: i32 = 4;
 const TERMINAL_FREE_TYPE_MAX_CURSOR_STEPS: usize = 4096;
 const TERMINAL_FREE_TYPE_DRAG_THRESHOLD_PX: f32 = 5.0;
-const PRIVILEGE_PROMPT_DEBUG_ENV: &str = "OXIDETERM_PRIVILEGE_DEBUG";
+// Pointer slop tolerated between link press and release before the gesture
+// counts as a drag instead of an activation.
+const TERMINAL_LINK_ACTIVATION_MAX_MOVEMENT_PX: f32 = 5.0;
 const FREE_TYPE_DEBUG_ENV: &str = "OXIDETERM_FREE_TYPE_DEBUG";
-
-fn log_privilege_prompt_terminal(args: std::fmt::Arguments<'_>) {
-    if env::var_os(PRIVILEGE_PROMPT_DEBUG_ENV).is_some() {
-        eprintln!("[oxideterm:privilege] {args}");
-    }
-}
 
 fn log_free_type_terminal(args: std::fmt::Arguments<'_>) {
     if env::var_os(FREE_TYPE_DEBUG_ENV).is_some() {
@@ -74,29 +71,6 @@ impl TerminalPane {
                 }
                 _ => {}
             }
-        }
-
-        let has_privilege_prompt_inline_hint = self.privilege_prompt_inline_hint.is_some();
-        let privilege_prompt_submit = privilege_prompt_enter_requests_submit(
-            key,
-            modifiers,
-            has_privilege_prompt_inline_hint,
-        );
-        if key == "enter" && !modifiers.platform && !modifiers.control && !modifiers.alt {
-            log_privilege_prompt_terminal(format_args!(
-                "pane enter: shift={} has_inline_hint={} submit_request={}",
-                modifiers.shift, has_privilege_prompt_inline_hint, privilege_prompt_submit
-            ));
-        }
-        if privilege_prompt_submit {
-            // The workspace owns secret lookup and PTY writes. The terminal
-            // captures Enter before it becomes a normal newline, but only
-            // after Workspace confirms the active scope has one fillable
-            // credential and mirrors that as the visible inline hint.
-            self.privilege_prompt_submit_requested = true;
-            cx.emit(TerminalPaneEvent::PrivilegePromptSubmitRequested);
-            cx.notify();
-            return true;
         }
 
         if modifiers.platform && modifiers.shift && key.eq_ignore_ascii_case("k") {
@@ -256,6 +230,21 @@ impl TerminalPane {
     }
 
     pub(crate) fn handle_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        // Ctrl+Wheel zooms the terminal font instead of scrolling. The raw
+        // wheel direction decides the step so smooth-scroll accumulator state
+        // is never touched by zoom gestures.
+        if event.modifiers.control && !event.modifiers.alt && !event.modifiers.platform {
+            let wheel_rows = match event.delta {
+                gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                gpui::ScrollDelta::Lines(delta) => delta.y,
+            };
+            if wheel_rows != 0.0 {
+                cx.emit(TerminalPaneEvent::FontSizeAdjustRequested {
+                    delta: wheel_rows.signum() as i64,
+                });
+            }
+            return;
+        }
         // Terminal menu payloads include row-local command marks and target
         // points; any scroll makes that semantic snapshot stale.
         if self.context_menu.take().is_some() {
@@ -448,10 +437,6 @@ impl TerminalPane {
         self.snapshot_text()
     }
 
-    pub fn privilege_prompt_text_snapshot(&self) -> String {
-        privilege_prompt_text_from_snapshot(&self.snapshot)
-    }
-
     pub fn ai_buffer_snapshot(&self) -> String {
         // Match Tauri's terminal registry buffer getter for AI tools: this
         // includes recent scrollback instead of only the visible viewport.
@@ -461,7 +446,7 @@ impl TerminalPane {
     pub fn screen_is_alternate_buffer(&self) -> bool {
         // Full-screen TUI applications own the keyboard and may display
         // arbitrary password-like text, so alternate-buffer state gates
-        // privilege prompts and other shell-screen-only flows.
+        // shell-screen-only flows such as prompt detection.
         self.terminal.lock().mode().contains(TermMode::ALT_SCREEN)
     }
 
@@ -471,13 +456,42 @@ impl TerminalPane {
             .unwrap_or_else(|| self.snapshot_text())
     }
 
+    fn notify_copied(&self) {
+        // Copy feedback reuses the workspace overlay notice channel that
+        // trzsz/serial progress already use; there is no dedicated toast here.
+        if let Some(sink) = &self.preferences.notice_sink {
+            sink(TerminalNotice {
+                title: self
+                    .preferences
+                    .command_selection_labels
+                    .copied_confirmation
+                    .clone(),
+                description: None,
+                status_text: None,
+                progress: None,
+                variant: TerminalNoticeVariant::Success,
+            });
+        }
+    }
+
     pub(super) fn copy_current_selection_or_snapshot(&mut self, cx: &mut Context<Self>) {
         let had_selection = self
             .selection
             .is_some_and(|selection| !selection.is_empty());
-        cx.write_to_clipboard(ClipboardItem::new_string(self.copy_text()));
+        let text = self.copy_text();
+        if had_selection {
+            log_terminal_selection_copy(
+                self.selection_trace_id,
+                "terminal-copy-shortcut",
+                &text,
+                self.settings.keep_selection_on_copy,
+            );
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.notify_copied();
         if had_selection && !self.settings.keep_selection_on_copy {
             self.selection = None;
+            self.selection_trace_id = None;
             cx.notify();
         }
     }
@@ -632,9 +646,16 @@ impl TerminalPane {
             return false;
         };
 
+        log_terminal_selection_copy(
+            self.selection_trace_id,
+            "free-type-copy",
+            &text,
+            self.settings.keep_selection_on_copy,
+        );
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         if !self.settings.keep_selection_on_copy {
             self.selection = None;
+            self.selection_trace_id = None;
             cx.notify();
         }
         true
@@ -673,6 +694,7 @@ impl TerminalPane {
         // remote line editor remains responsible for applying the deletion.
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.selection = None;
+        self.selection_trace_id = None;
         self.selecting = false;
         self.selection_autoscroll_position = None;
         self.send_user_protocol_bytes(&bytes, cx);
@@ -722,9 +744,16 @@ impl TerminalPane {
                 else {
                     return;
                 };
+                log_terminal_selection_copy(
+                    this.selection_trace_id,
+                    "copy-on-select",
+                    &current_text,
+                    this.settings.keep_selection_on_copy,
+                );
                 cx.write_to_clipboard(ClipboardItem::new_string(current_text));
                 if !this.settings.keep_selection_on_copy {
                     this.selection = None;
+                    this.selection_trace_id = None;
                     cx.notify();
                 }
             });
@@ -758,9 +787,17 @@ impl TerminalPane {
         let Some(text) = self.selected_text().filter(|text| !text.is_empty()) else {
             return false;
         };
+        log_terminal_selection_copy(
+            self.selection_trace_id,
+            "terminal-copy-selection",
+            &text,
+            self.settings.keep_selection_on_copy,
+        );
         cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.notify_copied();
         if !self.settings.keep_selection_on_copy {
             self.selection = None;
+            self.selection_trace_id = None;
             cx.notify();
         }
         true
@@ -823,6 +860,33 @@ impl TerminalPane {
                 && point.col < link.end_col
                 && (cell.hyperlink.is_some() || is_link_stylable_cell(cell))
         })
+    }
+
+    fn open_link(&mut self, link: &TerminalLinkRange, cx: &mut Context<Self>) {
+        match link.kind {
+            TerminalLinkKind::Url => cx.open_url(&link.target),
+            TerminalLinkKind::Path => {
+                let Some(base_dir) = self.link_base_directory() else {
+                    return;
+                };
+                if let Some(url) = path_link_to_file_url(&link.target, &base_dir) {
+                    cx.open_url(&url);
+                }
+            }
+        }
+    }
+
+    fn link_base_directory(&self) -> Option<PathBuf> {
+        // Relative path targets must resolve against the terminal session's own
+        // working directory; the UI process CWD is only a meaningful base for
+        // local sessions. Remote sessions without tracked CWD stay unresolved
+        // rather than opening a wrong path.
+        if let Some(cwd) = self.current_working_directory() {
+            return Some(PathBuf::from(cwd));
+        }
+        (self.session_kind == TerminalSessionKind::LocalPty)
+            .then(|| env::current_dir().ok())
+            .flatten()
     }
 
     fn scrollbar_geometry(&self) -> Option<ScrollbarGeometry> {
@@ -890,6 +954,7 @@ impl TerminalPane {
             mode,
         });
         self.selecting = true;
+        self.begin_selection_audit(point, mode);
         self.selection_autoscroll_position = Some(position);
         self.schedule_selection_autoscroll(cx);
         cx.notify();
@@ -899,7 +964,12 @@ impl TerminalPane {
         let point = self.terminal_point_for_position(position);
         if let Some(selection) = word_selection_at_point(&self.snapshot, point) {
             self.selection = Some(selection);
-            self.selecting = false;
+            // The double-click gesture stays active so the following drag
+            // extends the word selection instead of ending it.
+            self.selecting = true;
+            self.begin_selection_audit(selection.anchor, selection.mode);
+            self.selection_autoscroll_position = Some(position);
+            self.schedule_selection_autoscroll(cx);
             cx.notify();
         } else {
             self.start_selection(position, TerminalSelectionMode::Simple, cx);
@@ -926,7 +996,12 @@ impl TerminalPane {
         let point = self.terminal_point_for_position(position);
         if let Some(selection) = line_selection_at_point(&self.snapshot, point) {
             self.selection = Some(selection);
-            self.selecting = false;
+            // The triple-click gesture stays active so the following drag
+            // extends the line selection instead of ending it.
+            self.selecting = true;
+            self.begin_selection_audit(selection.anchor, selection.mode);
+            self.selection_autoscroll_position = Some(position);
+            self.schedule_selection_autoscroll(cx);
             cx.notify();
         } else {
             self.start_selection(position, TerminalSelectionMode::Simple, cx);
@@ -940,9 +1015,40 @@ impl TerminalPane {
 
         let point = self.terminal_point_for_position(position);
         if let Some(selection) = &mut self.selection {
-            if let Some(point) = grid_point_for_viewport_point(&self.snapshot, point) {
-                selection.head = point;
-            }
+            let Some(head) = grid_point_for_viewport_point(&self.snapshot, point) else {
+                return;
+            };
+            // Multi-click gestures keep extending along their selection unit
+            // while the pointer moves, matching conventional terminal
+            // behavior: double-click drags span whole words and triple-click
+            // drags whole lines.
+            selection.head = match selection.mode {
+                TerminalSelectionMode::Semantic => {
+                    let anchor = selection.anchor;
+                    word_selection_at_point(&self.snapshot, point)
+                        .map(|word| {
+                            if (anchor.line, anchor.col) <= (head.line, head.col) {
+                                word.head
+                            } else {
+                                word.anchor
+                            }
+                        })
+                        .unwrap_or(head)
+                }
+                TerminalSelectionMode::Lines => {
+                    let anchor = selection.anchor;
+                    line_selection_at_point(&self.snapshot, point)
+                        .map(|line| {
+                            if (anchor.line, anchor.col) <= (head.line, head.col) {
+                                line.head
+                            } else {
+                                line.anchor
+                            }
+                        })
+                        .unwrap_or(head)
+                }
+                _ => head,
+            };
         }
         cx.notify();
     }
@@ -951,7 +1057,50 @@ impl TerminalPane {
         self.update_selection(position, cx);
         self.selecting = false;
         self.selection_autoscroll_position = None;
+        if let Some(trace_id) = self.selection_trace_id {
+            let selection = self.selection;
+            tracing::info!(
+                target: "oxideterm_gpui_terminal::selection",
+                trace_id,
+                stage = "mouse-release",
+                anchor_line = ?selection.map(|selection| selection.anchor.line),
+                anchor_col = ?selection.map(|selection| selection.anchor.col),
+                head_line = ?selection.map(|selection| selection.head.line),
+                head_col = ?selection.map(|selection| selection.head.col),
+                selected_line_count = selection.map(selection_line_count).unwrap_or_default(),
+                result = if selection.is_some_and(|selection| !selection.is_empty()) {
+                    "completed"
+                } else {
+                    "empty"
+                },
+                business_impact = "the terminal finished the mouse selection gesture and made the final range available to copy",
+                "terminal selection gesture finished"
+            );
+        }
         self.copy_selection_after_select_if_configured(cx);
+    }
+
+    fn begin_selection_audit(
+        &mut self,
+        anchor: TerminalGridPoint,
+        mode: TerminalSelectionMode,
+    ) {
+        let trace_id = next_terminal_selection_trace_id();
+        self.selection_trace_id = Some(trace_id);
+        tracing::info!(
+            target: "oxideterm_gpui_terminal::selection",
+            trace_id,
+            stage = "mouse-press",
+            anchor_line = anchor.line,
+            anchor_col = anchor.col,
+            ?mode,
+            display_offset = self.snapshot.display_offset,
+            scrollback_lines = self.snapshot.scrollback_lines,
+            validation = "selection input accepted",
+            result = "started",
+            business_impact = "the terminal began extending a text selection while the left mouse button remains pressed",
+            "terminal selection gesture started"
+        );
     }
 
     fn update_selection_with_autoscroll(
@@ -1103,6 +1252,8 @@ impl TerminalPane {
         if self.context_menu.is_some() {
             self.dismiss_terminal_context_menu(cx);
         }
+        // A new press always ends the previous press-release gesture.
+        self.pending_link_activation = None;
 
         if event.button == MouseButton::Left
             && terminal_link_activation_allowed(
@@ -1111,16 +1262,13 @@ impl TerminalPane {
             )
             && let Some(link) = self.link_at_position(event.position)
         {
-            match link.kind {
-                TerminalLinkKind::Url => cx.open_url(&link.target),
-                TerminalLinkKind::Path => {
-                    if let Ok(base_dir) = env::current_dir()
-                        && let Some(url) = path_link_to_file_url(&link.target, &base_dir)
-                    {
-                        cx.open_url(&url);
-                    }
-                }
-            }
+            // Activation is deferred to mouse-up with a small movement
+            // threshold so a selection gesture starting on a link never opens
+            // it.
+            self.pending_link_activation = Some(PendingLinkActivation {
+                link,
+                position: event.position,
+            });
             return;
         }
 
@@ -1191,6 +1339,7 @@ impl TerminalPane {
             self.selecting = false;
             self.selection_autoscroll_position = None;
             self.selection = None;
+            self.selection_trace_id = None;
         }
     }
 
@@ -1294,6 +1443,21 @@ impl TerminalPane {
     }
 
     pub(crate) fn handle_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if let Some(activation) = self.pending_link_activation.take() {
+            if event.button == MouseButton::Left
+                && !link_activation_drag_exceeded(activation.position, event.position)
+                && terminal_link_activation_allowed(
+                    event.modifiers,
+                    self.settings.open_links_with_modifier,
+                )
+            {
+                self.open_link(&activation.link, cx);
+            }
+            // A link press never starts a selection, so the release must not
+            // fall through to selection finishing either.
+            return;
+        }
+
         if self.scrollbar_drag.take().is_some() {
             cx.notify();
             return;
@@ -1486,6 +1650,7 @@ impl TerminalPane {
         // The remote line editor applies the move. An empty payload means that
         // the drop stayed inside the source selection and is already complete.
         self.selection = None;
+        self.selection_trace_id = None;
         self.selecting = false;
         self.selection_autoscroll_position = None;
         if bytes.is_empty() {
@@ -1539,6 +1704,7 @@ impl TerminalPane {
         // keys so readline, zsh, and other line editors can apply their own
         // boundaries instead of letting the client mutate terminal state.
         self.selection = None;
+        self.selection_trace_id = None;
         self.selecting = false;
         self.selection_autoscroll_position = None;
         log_free_type_terminal(format_args!(
@@ -1586,6 +1752,7 @@ impl TerminalPane {
         };
 
         self.selection = None;
+        self.selection_trace_id = None;
         self.selecting = false;
         self.selection_autoscroll_position = None;
         log_free_type_terminal(format_args!(
@@ -1667,6 +1834,7 @@ impl TerminalPane {
         // This is a terminal editing intent, not a local buffer mutation. Clear
         // the visual selection and let the remote shell echo the final command.
         self.selection = None;
+        self.selection_trace_id = None;
         self.selecting = false;
         self.selection_autoscroll_position = None;
         self.send_user_protocol_bytes(&bytes, cx);
@@ -1819,18 +1987,6 @@ fn smart_copy_selection_is_owned_by_terminal_ui(mode: TermMode) -> bool {
     !mode.contains(TermMode::ALT_SCREEN) && !mouse_tracking_active(mode)
 }
 
-fn privilege_prompt_enter_requests_submit(
-    key: &str,
-    modifiers: Modifiers,
-    has_inline_hint: bool,
-) -> bool {
-    if key != "enter" || modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift
-    {
-        return false;
-    }
-    has_inline_hint
-}
-
 fn free_type_mode_allows_command_edit(enabled: bool, mode: TermMode, modifiers: Modifiers) -> bool {
     free_type_mode_command_edit_rejection_reason(enabled, mode, modifiers).is_none()
 }
@@ -1981,6 +2137,15 @@ fn free_type_drag_distance_exceeded(
     let dx = f32::from(current.x - start.x);
     let dy = f32::from(current.y - start.y);
     dx.hypot(dy) >= TERMINAL_FREE_TYPE_DRAG_THRESHOLD_PX
+}
+
+fn link_activation_drag_exceeded(
+    start: gpui::Point<Pixels>,
+    current: gpui::Point<Pixels>,
+) -> bool {
+    let dx = f32::from(current.x - start.x);
+    let dy = f32::from(current.y - start.y);
+    dx.hypot(dy) >= TERMINAL_LINK_ACTIVATION_MAX_MOVEMENT_PX
 }
 
 fn selection_contains_grid_point(selection: TerminalSelection, point: TerminalGridPoint) -> bool {
@@ -2225,6 +2390,34 @@ fn active_command_visible_range(
 
 fn terminal_text_display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
+}
+
+fn selection_line_count(selection: TerminalSelection) -> usize {
+    usize::try_from(selection.anchor.line.abs_diff(selection.head.line))
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+}
+
+fn log_terminal_selection_copy(
+    trace_id: Option<u64>,
+    source: &'static str,
+    text: &str,
+    keep_selection: bool,
+) {
+    let Some(trace_id) = trace_id else {
+        return;
+    };
+    tracing::info!(
+        target: "oxideterm_gpui_terminal::selection",
+        trace_id,
+        stage = "clipboard-response",
+        source,
+        selected_char_count = text.chars().count(),
+        keep_selection,
+        result = "copied",
+        business_impact = "the selected terminal range was written to the platform clipboard without logging its contents",
+        "terminal selection copy completed"
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2626,41 +2819,6 @@ fn snapshot_text_from_rows(rows: &[TerminalRow]) -> String {
         .join("\n")
 }
 
-fn privilege_prompt_text_from_snapshot(snapshot: &TerminalSnapshot) -> String {
-    let Some(cursor_row) = snapshot.lines.get(snapshot.cursor_row) else {
-        return snapshot_text_from_rows(&snapshot.lines);
-    };
-
-    if !cursor_row.active_input {
-        return cursor_row.text().trim_end().to_string();
-    }
-
-    let mut start = snapshot.cursor_row;
-    while start > 0
-        && snapshot
-            .lines
-            .get(start - 1)
-            .is_some_and(|row| row.active_input)
-    {
-        start -= 1;
-    }
-
-    let mut end = snapshot.cursor_row;
-    while end + 1 < snapshot.lines.len()
-        && snapshot
-            .lines
-            .get(end + 1)
-            .is_some_and(|row| row.active_input)
-    {
-        end += 1;
-    }
-
-    // Privilege prompts should be detected from the live input area, not the
-    // whole viewport. Full-screen scans can either miss SSH prompts when chrome
-    // rows trail the cursor or, worse, match stale sudo prompts in scrollback.
-    snapshot_text_from_rows(&snapshot.lines[start..=end])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2734,10 +2892,6 @@ mod tests {
         };
         row.refresh_signature();
         row
-    }
-
-    fn test_snapshot(lines: Vec<TerminalRow>, cursor_row: usize) -> TerminalSnapshot {
-        test_snapshot_with_cursor(lines, cursor_row, 0, 120)
     }
 
     fn test_snapshot_with_cursor(
@@ -3391,27 +3545,6 @@ mod tests {
     }
 
     #[test]
-    fn privilege_prompt_enter_submit_rules_preserve_confirmation_boundaries() {
-        for (modifiers, has_inline_hint, expected) in [
-            (Modifiers::default(), false, false),
-            (Modifiers::default(), true, true),
-            (
-                Modifiers {
-                    shift: true,
-                    ..Modifiers::default()
-                },
-                true,
-                false,
-            ),
-        ] {
-            assert_eq!(
-                privilege_prompt_enter_requests_submit("enter", modifiers, has_inline_hint),
-                expected
-            );
-        }
-    }
-
-    #[test]
     fn free_type_mode_respects_command_edit_conflict_guards() {
         assert!(free_type_mode_allows_command_edit(
             true,
@@ -3964,34 +4097,5 @@ mod tests {
             .as_deref(),
             Some(b"\x08\x08\x08".as_slice())
         );
-    }
-
-    #[test]
-    fn privilege_prompt_snapshot_uses_only_the_current_cursor_input_block() {
-        let snapshot = test_snapshot(
-            vec![
-                test_row("old sudo command", false),
-                test_row("[sudo] old 的密码:", false),
-                test_row("❯ sudo yazi", false),
-                test_row("[sudo] lipsc 的密码:", true),
-                test_row("status text after cursor", false),
-            ],
-            3,
-        );
-
-        assert_eq!(
-            privilege_prompt_text_from_snapshot(&snapshot),
-            "[sudo] lipsc 的密码:"
-        );
-        let snapshot = test_snapshot(
-            vec![
-                test_row("❯ sudo yazi", false),
-                test_row("[sudo] lipsc 的密码:", false),
-                test_row("", true),
-            ],
-            2,
-        );
-
-        assert_eq!(privilege_prompt_text_from_snapshot(&snapshot), "");
     }
 }

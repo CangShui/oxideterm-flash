@@ -47,6 +47,10 @@ pub struct TextInputViewport {
 struct TextInputViewportState {
     scroll_x: Pixels,
     layout: Option<TextLayout>,
+    // Display text the stored layout was shaped from. Hit-testing may run while
+    // the input is unfocused (first click caret placement), so the layout can
+    // only be served while the rendered text still matches it.
+    display: Option<String>,
 }
 
 impl TextInputViewport {
@@ -71,20 +75,28 @@ impl TextInputViewport {
             .position_for_index(index)
     }
 
-    fn update_layout(&self, layout: TextLayout, scroll_x: Pixels) {
+    fn update_layout(&self, layout: TextLayout, scroll_x: Pixels, display: String) {
         let mut state = self.state.borrow_mut();
         state.layout = Some(layout);
         state.scroll_x = scroll_x;
+        state.display = Some(display);
     }
 
     fn scroll_x(&self) -> Pixels {
         self.state.borrow().scroll_x
     }
 
-    fn reset(&self) {
+    /// Drops the cached layout only when the rendered text changed underneath
+    /// it. Clearing unconditionally would leave the first click on an unfocused
+    /// input without a layout, so the caret could not be placed at the clicked
+    /// position and would jump to the start or end instead.
+    fn reset_if_stale(&self, display: &str) {
         let mut state = self.state.borrow_mut();
-        state.scroll_x = px(0.0);
-        state.layout = None;
+        if state.display.as_deref() != Some(display) {
+            state.scroll_x = px(0.0);
+            state.layout = None;
+            state.display = None;
+        }
     }
 }
 
@@ -222,11 +234,6 @@ fn text_input_with_content_align_and_viewport(
     viewport: Option<&TextInputViewport>,
     active_offset: Option<usize>,
 ) -> Div {
-    if !view.focused
-        && let Some(viewport) = viewport
-    {
-        viewport.reset();
-    }
     let theme = tokens.ui;
     let empty = view.value.is_empty();
     let marked = view.marked_text.unwrap_or_default();
@@ -239,6 +246,11 @@ fn text_input_with_content_align_and_viewport(
     } else {
         view.value.to_string()
     };
+    if !view.focused
+        && let Some(viewport) = viewport
+    {
+        viewport.reset_if_stale(&display);
+    }
     let marked_display = if view.secret {
         text_input_secret_mask(marked)
     } else {
@@ -416,7 +428,7 @@ fn text_input_value_segments_with_viewport(
     let caret_offset = caret_offset.map(|offset| offset.min(len));
     if selection_range.is_none() && caret_offset.is_none() {
         if let Some(viewport) = viewport.as_ref() {
-            viewport.reset();
+            viewport.reset_if_stale(display);
         }
         return base.child(display.to_string());
     }
@@ -747,7 +759,7 @@ impl Element for TextInputOverlayValue {
             );
         }
         if let Some(viewport) = self.viewport.as_ref() {
-            viewport.update_layout(self.text.layout().clone(), horizontal_offset);
+            viewport.update_layout(self.text.layout().clone(), horizontal_offset, self.display.clone());
         }
     }
 

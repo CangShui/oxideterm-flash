@@ -231,9 +231,12 @@ impl WorkspaceApp {
         let preferences =
             self.prepare_terminal_preferences_for_tab_kind(&TabKind::Serial, cx);
         let pane_config = config.clone();
+        let serial_session =
+            TerminalPane::open_serial_session_with_preferences(config.clone(), &preferences)?;
         let pane = cx.new(|cx| {
-            TerminalPane::new_serial_with_preferences(pane_config, preferences, window, cx)
+            TerminalPane::from_shared_session(serial_session, preferences, window, cx)
                 .expect("failed to initialize Serial terminal pane")
+                .with_serial_reconnect_config(pane_config)
         });
 
         // Serial mirrors Tauri local-terminal transport semantics: it is not
@@ -289,6 +292,7 @@ impl WorkspaceApp {
                 })
         }) {
             self.associate_existing_node_with_saved_connection(&node_id, &saved_connection_id);
+            self.bind_sftp_files_to_connecting_node(node_id.clone(), cx);
             if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
                 node.terminal_options = saved_terminal_options.clone();
                 node.dedicated_new_terminal_connection = saved_dedicated_new_terminal_connection;
@@ -332,10 +336,13 @@ impl WorkspaceApp {
                 return Ok(());
             }
         }
-        if indexed_node_id.is_some() {
+        if let Some(stale_node_id) = indexed_node_id {
             // Keep an already-running historical node alive for its existing
-            // consumers, but never let a stale saved-profile index route a new tab.
+            // consumers, but never let a stale saved-profile index route a new
+            // tab. An inactive stale node would otherwise linger as a sibling
+            // of the freshly materialized node for the same saved identity.
             self.saved_ssh_nodes.remove(&saved_connection_id);
+            self.remove_inactive_session_tree_node(&stale_node_id, window, cx);
         }
 
         if config
@@ -354,6 +361,7 @@ impl WorkspaceApp {
                 .map(|snapshot| snapshot.config)
                 .ok_or_else(|| anyhow::anyhow!("target node was not materialized"))?;
             let target_node_id = expansion.target_node_id;
+            self.bind_sftp_files_to_connecting_node(target_node_id.clone(), cx);
             if let Some(node) = self.ssh_nodes.get_mut(&target_node_id) {
                 node.terminal_options = saved_terminal_options;
                 node.dedicated_new_terminal_connection = saved_dedicated_new_terminal_connection;
@@ -379,6 +387,7 @@ impl WorkspaceApp {
                     &existing_node_id,
                     &saved_connection_id,
                 );
+                self.bind_sftp_files_to_connecting_node(existing_node_id.clone(), cx);
                 if let Some(node) = self.ssh_nodes.get_mut(&existing_node_id) {
                     node.terminal_options = saved_terminal_options.clone();
                     node.dedicated_new_terminal_connection =
@@ -436,6 +445,7 @@ impl WorkspaceApp {
                 title.clone(),
                 Some(saved_connection_id.clone()),
             );
+            self.bind_sftp_files_to_connecting_node(node_id.clone(), cx);
             if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
                 node.terminal_options = saved_terminal_options.clone();
                 node.dedicated_new_terminal_connection = saved_dedicated_new_terminal_connection;
@@ -497,8 +507,8 @@ impl WorkspaceApp {
                 });
         if attached || runtime_origin_needs_owner {
             // This is an explicit saved-connection open that reaches an
-            // existing node. Promote runtime origin so persisted node ownership
-            // and SSH privilege scope agree after restart.
+            // existing node. Promote runtime origin so persisted node
+            // ownership and the saved connection agree after restart.
             let _ = self.node_router.update_node_origin(
                 node_id,
                 NodeOrigin::Restored {
@@ -531,6 +541,62 @@ impl WorkspaceApp {
         self.node_router
             .upsert_node_with_origin(node_id.clone(), config, runtime_snapshot.origin);
         Some(action_config)
+    }
+
+    /// Sidebar double-click contract: every activation opens one new terminal
+    /// backed by a brand-new root node, so each double click yields a fully
+    /// independent SSH connection with its own Host Tools context. Reusing the
+    /// existing node would multiplex channels and share connection state.
+    pub(in crate::workspace) fn open_new_terminal_for_existing_saved_node(
+        &mut self,
+        saved_connection_id: &str,
+        connection: &oxideterm_connections::SavedConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(node_id) = self.ssh_nodes.iter().find_map(|(node_id, _node)| {
+            let matching_root = self
+                .node_router
+                .node_metadata(node_id)
+                .is_some_and(|snapshot| {
+                    snapshot.depth == 0
+                        && snapshot.host == connection.host
+                        && snapshot.port == connection.port
+                        && snapshot.username == connection.username
+                });
+            let runtime_ready = self
+                .node_router
+                .node_state(node_id)
+                .is_ok_and(|snapshot| snapshot.state.readiness == NodeReadiness::Ready);
+            matching_root.then(|| node_id.clone()).filter(|_| runtime_ready)
+        }) else {
+            return false;
+        };
+        let _ = saved_connection_id;
+        self.duplicate_ssh_node_connection(&node_id, window, cx).is_ok()
+    }
+
+    /// Opens one new terminal tab on a fresh root node cloned from this node's
+    /// runtime configuration. The new node owns its own physical SSH transport,
+    /// so terminal, Host Tools, and snapshot freezes stay independent from the
+    /// originating session.
+    pub(in crate::workspace) fn duplicate_ssh_node_connection(
+        &mut self,
+        node_id: &NodeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let Some(snapshot) = self.node_router.node_runtime_snapshot(node_id) else {
+            anyhow::bail!("SSH node {} has no runtime config", node_id.0);
+        };
+        let config = snapshot.config;
+        let title = self
+            .ssh_nodes
+            .get(node_id)
+            .map(|node| node.title.clone())
+            .unwrap_or_else(|| config.host.clone());
+        let new_node_id = self.materialize_ssh_root_node(config.clone(), title.clone(), None);
+        self.queue_ssh_terminal_tab_for_node(new_node_id, config, title, None, window, cx)
     }
 
     pub(in crate::workspace) fn try_reuse_active_saved_connection_terminal(
@@ -945,7 +1011,7 @@ impl WorkspaceApp {
         )
     }
 
-    fn create_initial_ssh_terminal_tab_for_existing_node(
+    pub(in crate::workspace) fn create_initial_ssh_terminal_tab_for_existing_node(
         &mut self,
         node_id: &NodeId,
         post_connect_command: Option<String>,
@@ -993,6 +1059,11 @@ impl WorkspaceApp {
         );
         self.bind_terminal_location(tab_id, pane_id, session_id, cx);
         self.set_main_window_active_tab(Some(tab_id), cx);
+        // First-tab creation must run the same activation edge as tab
+        // switching: without this sync the embedded SFTP sidebar is never
+        // bound to the node, so a single-session workspace shows a phantom
+        // empty remote file panel until the user switches tabs.
+        self.sync_active_tab_surface(cx);
         self.active_surface = ActiveSurface::Terminal;
         if self.sidebar_collapsed {
             self.set_sidebar_collapsed_with_motion(false, cx);
@@ -1001,9 +1072,6 @@ impl WorkspaceApp {
         self.focus_active_pane(window, cx);
         self.reveal_active_tab(window, cx);
         self.persist_session_tree_snapshot();
-        // The node remains the route owner even when the new tab has a
-        // dedicated physical connection.
-        self.start_remote_shell_integration_terminal_gate(node_id.clone(), false, cx);
         cx.notify();
         Ok(session_id)
     }

@@ -1,3 +1,4 @@
+use super::helpers::format_transfer_eta;
 use super::*;
 
 fn sftp_transfer_queue_row_signature(transfer: &SftpTransferItem) -> u64 {
@@ -78,7 +79,21 @@ impl SftpTransferRowRenderer {
     fn status_text(&self, transfer: &SftpTransferItem) -> String {
         match transfer.state {
             SftpTransferState::Pending => self.labels.waiting.clone(),
-            SftpTransferState::Active => format_transfer_speed(transfer.speed),
+            SftpTransferState::Active => {
+                // The smoothed rate is the displayed value; the raw sample only
+                // feeds the average. Remaining time derives from the same rate.
+                let speed_text = format_transfer_speed(transfer.smoothed_speed);
+                let remaining = transfer.size.saturating_sub(transfer.transferred);
+                if transfer.smoothed_speed > 0 && remaining > 0 {
+                    format!(
+                        "{} · {}",
+                        speed_text,
+                        format_transfer_eta(remaining.div_ceil(transfer.smoothed_speed))
+                    )
+                } else {
+                    speed_text
+                }
+            }
             SftpTransferState::Paused => self.labels.paused.clone(),
             SftpTransferState::Completed => self.labels.completed.clone(),
             SftpTransferState::Cancelled => self.labels.cancelled.clone(),
@@ -693,7 +708,7 @@ impl WorkspaceApp {
                 cancel_tooltip: self.i18n.t("sftp.queue.cancel_tooltip"),
                 remove_tooltip: self.i18n.t("sftp.queue.remove_tooltip"),
                 discard_tooltip: self.i18n.t("sftp.queue.discard_tooltip"),
-                reveal_tooltip: self.i18n.t("fileManager.revealInFileManager"),
+                reveal_tooltip: self.i18n.t("sftp.queue.reveal_tooltip"),
                 loading: self.i18n.t("sftp.queue.loading"),
             },
         }

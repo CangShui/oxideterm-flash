@@ -9,6 +9,9 @@
 //! while identifier and display-name helpers stay available for callers that
 //! classify stored theme ids.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use oxideterm_settings::PersistedSettings;
 use oxideterm_theme::{AppUiColors, TerminalTheme, ThemeTokens, theme_by_id};
 
@@ -50,7 +53,7 @@ pub fn terminal_theme_from_value(value: &serde_json::Value) -> Option<TerminalTh
         background: color_value(value, "background")?,
         foreground: color_value(value, "foreground")?,
         cursor: color_value(value, "cursor")?,
-        selection_background: leak_static_hex(color_string_value(value, "selectionBackground")?),
+        selection_background: intern_static_hex(color_string_value(value, "selectionBackground")?),
         black: color_value(value, "black")?,
         red: color_value(value, "red")?,
         green: color_value(value, "green")?,
@@ -159,8 +162,19 @@ fn color_string_value(value: &serde_json::Value, key: &str) -> Option<String> {
         .map(format_hex_color)
 }
 
-fn leak_static_hex(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
+/// Interns theme color strings so custom themes can be decoded repeatedly
+/// without growing process memory; the set is bounded by the distinct values
+/// a settings file can hold, not by how often decoding runs.
+fn intern_static_hex(value: String) -> &'static str {
+    static INTERNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let interned = INTERNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut interned = interned.lock().expect("custom theme color intern lock");
+    if let Some(existing) = interned.get(value.as_str()) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(value.clone().into_boxed_str());
+    interned.insert(leaked);
+    leaked
 }
 
 pub fn theme_display_name(id: &str) -> String {

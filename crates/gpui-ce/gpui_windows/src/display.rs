@@ -22,7 +22,7 @@ use gpui::{Bounds, DevicePixels, DisplayId, Pixels, PlatformDisplay, point, size
 pub(crate) struct WindowsDisplay {
     pub handle: HMONITOR,
     pub display_id: DisplayId,
-    scale_factor: f32,
+    pub(crate) scale_factor: f32,
     bounds: Bounds<Pixels>,
     visible_bounds: Bounds<Pixels>,
     physical_bounds: Bounds<DevicePixels>,

@@ -34,7 +34,9 @@ use crate::workspace::WorkspaceApp;
 use crate::workspace::{
     browser_behavior,
     ime::{WorkspaceImeTarget, keystroke_uses_text_edit_modifier},
-    session_icons::{SESSION_ICON_CHOICES, session_icon_from_id},
+    session_icons::{
+        SESSION_ICON_CHOICES, default_connection_transport_icon, session_icon_from_id,
+    },
 };
 use gpui::Div;
 use oxideterm_connections::{
@@ -89,7 +91,6 @@ const SECRET_VISIBILITY_BUTTON_SIZE: f32 = 28.0;
 const SECRET_VISIBILITY_BUTTON_OFFSET: f32 = 4.0;
 const SECRET_VISIBILITY_ICON_SIZE: f32 = 16.0;
 const TAURI_JUMP_MODAL_WIDTH: f32 = 425.0; // Tauri sm:max-w-[425px]
-const TAURI_DRILL_DOWN_MODAL_WIDTH: f32 = 480.0; // Tauri DrillDownDialog sm:max-w-[480px]
 const TAURI_PROXY_CHAIN_MAX_HEIGHT: f32 = 250.0; // Tauri max-h-[250px]
 const TAURI_PROXY_CHAIN_SECTION_PADDING: f32 = 16.0; // Tauri p-4
 const TAURI_PROXY_CHAIN_HEADER_MARGIN: f32 = 16.0; // Tauri mb-4

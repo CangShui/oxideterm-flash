@@ -15,7 +15,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const MANAGED_SSH_KEYCHAIN_SERVICE: &str = "com.oxideterm.managed-ssh-keys";
-const PRIVILEGE_CREDENTIAL_KEYCHAIN_SERVICE: &str = "com.oxideterm.privilege-credentials";
 
 // Store internals remain included at the crate-root store module so saved
 // connection serialization and keychain helper visibility stay unchanged.

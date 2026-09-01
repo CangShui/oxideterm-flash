@@ -1851,7 +1851,6 @@ fn imported_draft_to_saved_connection(
         icon: None,
         tags: draft.tags.clone(),
         post_connect_command: None,
-        privilege_credentials: Vec::new(),
     }
 }
 
@@ -2303,6 +2302,55 @@ mod tests {
         assert_eq!(draft.username, "deploy");
         assert_eq!(draft.group.as_deref(), Some("Imported/Production/GPU"));
         assert_eq!(draft.unsupported_fields, vec!["ImgNum".to_string()]);
+    }
+
+    #[test]
+    fn previews_mobaxterm_multi_group_export_with_full_session_rows() {
+        // Real MobaXterm exports repeat `ImgNum` per sub-repository and pad
+        // each SSH bookmark with the full MobaFont session row. The reader
+        // must skip both header keys and still extract host/port/user from the
+        // padded `#109#0%...` entries, mirroring user `.mxtsessions` files.
+        let path = fixture_path("mobaxterm/multi_group.mxtsessions");
+        let preview = preview_connection_import(
+            ConnectionImportSource::MobaXterm,
+            &[path.display().to_string()],
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(preview.total, 3);
+        assert_eq!(preview.importable, 3);
+
+        let east = preview
+            .drafts
+            .iter()
+            .find(|draft| draft.name == "east-1")
+            .expect("east-1 bookmark parsed");
+        assert_eq!(east.host, "192.0.2.10");
+        assert_eq!(east.port, 44443);
+        assert_eq!(east.username, "root");
+        assert_eq!(east.group.as_deref(), Some("Imported/Public Cloud"));
+
+        let west = preview
+            .drafts
+            .iter()
+            .find(|draft| draft.name == "west-1")
+            .expect("west-1 bookmark parsed");
+        assert_eq!(west.port, 22);
+        assert_eq!(west.username, "admin");
+        assert_eq!(west.group.as_deref(), Some("Imported/Public Cloud"));
+
+        let nas = preview
+            .drafts
+            .iter()
+            .find(|draft| draft.name == "nas-1")
+            .expect("nas-1 bookmark parsed");
+        assert_eq!(nas.host, "10.0.0.5");
+        assert_eq!(nas.port, 22);
+        assert_eq!(nas.group.as_deref(), Some("Imported/Private Cloud"));
+
+        // Header keys never leak into drafts as connection names.
+        assert!(preview.drafts.iter().all(|draft| draft.host != "ImgNum"));
     }
 
     #[test]

@@ -88,12 +88,6 @@ fn ensure_versioned_snapshot(
     }
     let mut ignored_runtime_paths =
         crate::single_instance::single_instance_runtime_paths_for_data_dir(data_dir).to_vec();
-    if let Some(portable_lock_path) = oxideterm_portable_runtime::portable_instance_lock_path()
-        .ok()
-        .flatten()
-    {
-        ignored_runtime_paths.push(portable_lock_path);
-    }
     if !directory_contains_migration_source_data(data_dir, &ignored_runtime_paths)? {
         write_completion_marker(&paths.marker)?;
         return Ok(MigrationSnapshotOutcome::NoSourceData);

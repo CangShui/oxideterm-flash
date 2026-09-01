@@ -12,7 +12,7 @@ impl WorkspaceApp {
         &mut self,
         tab_id: TabId,
         tab_kind: &TabKind,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut modals = Vec::new();
@@ -21,34 +21,8 @@ impl WorkspaceApp {
                 if let Some(modal) = self.render_settings_navigation_editor(cx) {
                     modals.push(modal);
                 }
-                if self
-                    .settings_workspace
-                    .read(cx)
-                    .keybinding_reset_confirm_snapshot()
-                    .is_some()
-                {
-                    modals.push(self.render_keybinding_reset_all_confirm_dialog(cx));
-                }
                 if let Some(modal) = self.render_settings_managed_key_dialog(cx) {
                     modals.push(modal);
-                }
-                if let Some(modal) = self.render_portable_password_change_dialog(cx) {
-                    modals.push(modal);
-                }
-            }
-            TabKind::SessionManager => {
-                let (show_group_manager, show_delete_confirm) = {
-                    let session_manager = self.session_manager.read(cx);
-                    (
-                        session_manager.show_group_manager,
-                        session_manager.delete_confirm.is_some(),
-                    )
-                };
-                if show_group_manager {
-                    modals.push(self.render_group_manager_dialog(cx));
-                }
-                if show_delete_confirm {
-                    modals.push(self.render_session_manager_delete_confirm(cx));
                 }
             }
             TabKind::Forwards => {
@@ -75,14 +49,6 @@ impl WorkspaceApp {
                 if let Some(dialog) = self.sftp_view.read(cx).dialog() {
                     let has_background = self.terminal_background_preferences("sftp").is_some();
                     modals.push(self.render_sftp_dialog(dialog, has_background, cx));
-                }
-            }
-            TabKind::FileManager => {
-                if self.file_manager.read(cx).dialog.is_some() {
-                    let has_background = self
-                        .terminal_background_preferences("file_manager")
-                        .is_some();
-                    modals.push(self.render_file_manager_dialog(window, has_background, cx));
                 }
             }
             _ => {}
@@ -135,18 +101,7 @@ impl WorkspaceApp {
         set_tauri_backdrop_blur_allowed(self.render_policy.allow_background_blur);
         if self.needs_active_pane_focus
             && active_tab_projection.as_ref().is_some_and(|(_, kind, _)| {
-                !matches!(
-                    kind,
-                    TabKind::Settings
-                        | TabKind::SessionManager
-                        | TabKind::FileManager
-                        | TabKind::Launcher
-                        | TabKind::Runtime
-                        | TabKind::ConnectionPool
-                        | TabKind::Topology
-                        | TabKind::NotificationCenter
-                        | TabKind::RemoteDesktop
-                )
+                !matches!(kind, TabKind::Settings | TabKind::Launcher | TabKind::RemoteDesktop)
             })
             && !self.search.visible
             && self.connection_form_state(cx).form.is_none()
@@ -161,23 +116,9 @@ impl WorkspaceApp {
         let content = if let Some((tab_id, tab_kind, root_pane)) = &active_tab_projection {
             match (tab_kind, root_pane) {
                 (TabKind::Settings, _) => self.render_settings_surface(cx),
-                (TabKind::FileManager, _) => self.render_file_manager_surface(window, cx),
                 (TabKind::Launcher, _) => self.render_launcher_surface(window, cx),
-                (TabKind::Runtime, _) => self.render_connection_runtime_surface(cx),
-                (TabKind::ConnectionPool, _) => {
-                    // Old workspaces may restore the retired connection-pool tab.
-                    // Keep it readable by showing the runtime overview instead.
-                    self.host_tools.update(cx, |host_tools, _cx| {
-                        host_tools.reset_runtime_section();
-                    });
-                    self.render_connection_runtime_surface(cx)
-                }
-                (TabKind::Topology, _) => self.render_topology_surface(cx),
-                (TabKind::NotificationCenter, _) => self.render_notification_center_surface(cx),
                 (TabKind::Sftp, _) => self.render_sftp_surface(window, cx),
-                (TabKind::Ide, _) => self.render_ide_surface(cx),
                 (TabKind::Forwards, _) => self.render_forwards_surface(window, cx),
-                (TabKind::SessionManager, _) => self.render_session_manager_surface(window, cx),
                 (TabKind::RemoteDesktop, _) => {
                     self.render_remote_desktop_surface(*tab_id, window, cx)
                 }
@@ -232,10 +173,10 @@ impl WorkspaceApp {
         let effective_titlebar_height = self.window_titlebar_height(window);
         let resize_hotzone_visible =
             !zen_mode && (!self.sidebar_collapsed || self.context_sidebar_visible());
-        let sidebar_resize_cursor_active =
-            (resize_hotzone_visible && self.sidebar_resize_hotzone_hovered)
-                || self.sidebar_resizing;
-        let embedded_sftp_resize_cursor_active = self.embedded_sftp_sidebar_resizing;
+        let sidebar_resize_cursor_active = (resize_hotzone_visible
+            && self.sidebar_resize_hotzone_hovered)
+            || self.sidebar_resizing
+            || self.context_sidebar_resizing;
         self.update_main_window_tabbar_drop_bounds(window, titlebar_visible, zen_mode, cx);
 
         div()
@@ -255,9 +196,6 @@ impl WorkspaceApp {
             ))
             .when(sidebar_resize_cursor_active, |root| {
                 root.cursor(CursorStyle::ResizeColumn)
-            })
-            .when(embedded_sftp_resize_cursor_active, |root| {
-                root.cursor(CursorStyle::ResizeRow)
             })
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
@@ -346,33 +284,6 @@ impl WorkspaceApp {
                 } else if this.handle_host_package_search_key(event, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if !this.command_palette.read(cx).is_open()
-                    && this
-                        .settings_workspace
-                        .read(cx)
-                        .keybinding_recording_action_id()
-                        .is_none()
-                    && crate::keybindings::keystroke_matches_action(
-                        &event.keystroke,
-                        "app.commandPalette",
-                        &this.settings_store.settings().keybindings.overrides,
-                    )
-                {
-                    this.open_command_palette(cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                } else if this
-                    .settings_workspace
-                    .read(cx)
-                    .keybinding_recording_action_id()
-                    .is_some()
-                    && this.active_surface == ActiveSurface::Settings
-                    && this.settings_workspace.read(cx).route_snapshot().active_tab
-                        == SettingsTab::Keybindings
-                {
-                    this.handle_keybinding_recording_key(event, window, cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
                 } else if {
                     let quick_commands = &this.terminal.read(cx).quick_commands;
                     quick_commands.is_open() && quick_commands.focused_input().is_some()
@@ -396,9 +307,6 @@ impl WorkspaceApp {
                 } else if this.handle_transient_workspace_overlay_escape(event, window, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.handle_privilege_prompt_helper_key(event, window, cx) {
-                    window.prevent_default();
-                    cx.stop_propagation();
                 } else if this.handle_compact_terminal_command_sender_key(event, window, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -408,14 +316,11 @@ impl WorkspaceApp {
                 } else if this.forward_remote_desktop_key_from_capture(event, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.dispatch_registered_keybinding(event, window, cx) {
-                    window.prevent_default();
-                    cx.stop_propagation();
                 } else if this.forward_terminal_tab_from_capture(event, window, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this.active_session_manager_input(cx).is_some() {
-                    let _ = this.handle_session_manager_key(event, cx);
+                    let _ = this.handle_oxide_dialog_footer_key(event, cx);
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this
@@ -441,13 +346,6 @@ impl WorkspaceApp {
                 {
                     // Embedded SFTP inputs keep their keyboard model while a terminal tab is active.
                     let _ = this.handle_sftp_key(event, window, cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                } else if this
-                    .active_tab(cx)
-                    .is_some_and(|tab| tab.kind == TabKind::FileManager)
-                {
-                    let _ = this.handle_file_manager_key(event, cx);
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this.focused_settings_input.is_some()
@@ -477,7 +375,7 @@ impl WorkspaceApp {
             ))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.update_sidebar_resize(event, window, cx);
-                this.update_embedded_sftp_sidebar_resize(event, window, cx);
+                this.update_context_sidebar_resize(event, window, cx);
                 this.update_sftp_pane_resize(event, window, cx);
                 this.update_sftp_queue_resize(event, window, cx);
                 this.update_terminal_command_sender_resize(event, window, cx);
@@ -546,9 +444,19 @@ impl WorkspaceApp {
                 this.open_new_connection_form(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; destructive actions
+                    // must not reach the terminal layer underneath it.
+                    return;
+                }
                 this.request_close_active_tab(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseOtherTabs, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; destructive actions
+                    // must not reach the terminal layer underneath it.
+                    return;
+                }
                 this.request_close_other_tabs_or_active_pane(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
@@ -570,36 +478,56 @@ impl WorkspaceApp {
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    return;
+                }
                 this.next_tab(true, window, cx);
                 // GPUI dispatches the action before the raw key event. Stop here so the
-                // workspace keybinding capture does not advance the tab a second time.
+                // Stop here so the raw key event does not also reach the terminal.
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    return;
+                }
                 this.next_tab(false, window, cx);
                 // Keep previous-tab navigation on the same single-dispatch path.
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|this, _: &SplitHorizontal, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    return;
+                }
                 this.split_active_pane(SplitDirection::Horizontal, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitVertical, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    return;
+                }
                 this.split_active_pane(SplitDirection::Vertical, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; destructive actions
+                    // must not reach the terminal layer underneath it.
+                    return;
+                }
                 this.close_active_pane(window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitNavLeft, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    return;
+                }
                 this.focus_adjacent_pane(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitNavRight, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    return;
+                }
                 this.focus_adjacent_pane(true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &Copy, _window, cx| {
                 if this.copy_active_text_input(cx) {
-                    return;
-                }
-                if this.copy_active_ide_selection(cx) {
                     return;
                 }
                 if this.connection_form_state(cx).form.is_none() {
@@ -610,18 +538,12 @@ impl WorkspaceApp {
                 if this.cut_active_text_input(cx) {
                     return;
                 }
-                if this.cut_active_ide_selection(cx) {
-                    return;
-                }
                 if this.connection_form_state(cx).form.is_none() {
                     let _ = this.cut(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Paste, _window, cx| {
                 if this.paste_active_text_input(cx) {
-                    return;
-                }
-                if this.paste_into_active_ide_editor(cx) {
                     return;
                 }
                 if this.connection_form_state(cx).form.is_some() {
@@ -631,21 +553,12 @@ impl WorkspaceApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &Find, window, cx| {
-                if this.open_active_ide_search(cx) {
-                    return;
-                }
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FindNext, _window, cx| {
-                if this.select_next_active_ide_search_match(cx) {
-                    return;
-                }
                 this.search_next(true, cx);
             }))
             .on_action(cx.listener(|this, _: &FindPrev, _window, cx| {
-                if this.select_previous_active_ide_search_match(cx) {
-                    return;
-                }
                 this.search_next(false, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
@@ -663,9 +576,6 @@ impl WorkspaceApp {
             .on_action(cx.listener(|this, _: &FontReset, _window, cx| {
                 this.reset_terminal_font_size(cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowShortcuts, _window, cx| {
-                this.open_shortcuts_modal(cx);
-            }))
             .on_action(cx.listener(|this, _: &TerminalClearScreen, _window, cx| {
                 this.clear_active_terminal_screen(cx);
             }))
@@ -674,9 +584,6 @@ impl WorkspaceApp {
             }))
             .on_action(cx.listener(|this, _: &TerminalFreeTypeMode, _window, cx| {
                 this.toggle_free_type_mode(cx);
-            }))
-            .on_action(cx.listener(|this, _: &PaletteEventLog, window, cx| {
-                this.open_notification_center_tab(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PaletteBroadcast, _window, cx| {
                 this.toggle_terminal_broadcast(cx);
@@ -704,36 +611,76 @@ impl WorkspaceApp {
             .on_action(cx.listener(|this, _: &SwitchLocaleChinese, window, cx| {
                 this.switch_locale(Locale::ZhCn, window, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &SwitchLocaleTraditionalChinese, window, cx| {
-                    this.switch_locale(Locale::ZhTw, window, cx);
-                }),
-            )
             .on_action(cx.listener(|this, _: &GoToTab1, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(0, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab2, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(1, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab3, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(2, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab4, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(3, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab5, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(4, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab6, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(5, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab7, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(6, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab8, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(7, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoToTab9, window, cx| {
+                if this.active_window_modal_owner(cx).is_some() {
+                    // A blocking modal owns the window; tab navigation must not
+                    // act on the terminal layer underneath it.
+                    return;
+                }
                 this.go_to_tab(8, window, cx);
             }))
             .when_some(window_background_layer, |root, background| {
@@ -791,7 +738,7 @@ impl WorkspaceApp {
                         // Keep the right sidebar as one root child. Splitting
                         // the gutter and content here makes resize hit-testing
                         // easy to regress on scroll-heavy Host Tools pages.
-                        layout.child(self.render_animated_context_sidebar_frame(cx))
+                        layout.child(self.render_animated_context_sidebar_frame(window, cx))
                     }),
             )
             .when(!zen_mode && !self.sidebar_collapsed, |root| {
@@ -805,19 +752,6 @@ impl WorkspaceApp {
                             // A window-level override keeps the resize cursor active above
                             // blocking terminal and virtual-list hitboxes.
                             window.set_window_cursor_style(CursorStyle::ResizeColumn);
-                        },
-                    )
-                    .absolute(),
-                )
-            })
-            .when(embedded_sftp_resize_cursor_active, |root| {
-                root.child(
-                    canvas(
-                        |_, _, _| (),
-                        |_, _, window, _| {
-                            // Keep the row-resize cursor stable while the
-                            // pointer crosses either virtualized sidebar list.
-                            window.set_window_cursor_style(CursorStyle::ResizeRow);
                         },
                     )
                     .absolute(),
@@ -863,10 +797,6 @@ impl WorkspaceApp {
             )
             .when_some(
                 self.render_settings_data_directory_confirm_dialog(cx),
-                |root, dialog| root.child(dialog),
-            )
-            .when_some(
-                self.render_remote_shell_integration_confirm(cx),
                 |root, dialog| root.child(dialog),
             )
             .when_some(
@@ -946,6 +876,23 @@ impl WorkspaceApp {
             .when_some(self.render_tab_context_menu(window, cx), |root, menu| {
                 root.child(menu)
             })
+            .when_some(
+                self.render_active_session_context_menu(window, cx),
+                |root, menu| root.child(menu),
+            )
+            .when_some(
+                self.render_active_session_folder_context_menu(window, cx),
+                |root, menu| root.child(menu),
+            )
+            .when_some(self.render_delete_session_folder_dialog(cx), |root, dialog| {
+                root.child(dialog)
+            })
+            .when_some(self.render_new_session_folder_dialog(cx), |root, dialog| {
+                root.child(dialog)
+            })
+            .when_some(self.render_move_session_folder_dialog(cx), |root, dialog| {
+                root.child(dialog)
+            })
             .when_some(self.render_terminal_cast_player(cx), |root, player| {
                 root.child(player)
             })
@@ -963,7 +910,7 @@ impl WorkspaceApp {
                 root.child(self.render_terminal_command_specs_editor_modal(cx))
             })
             .when(
-                self.session_manager.read(cx).oxide_import_dialog.is_some(),
+                self.connection_workspace.read(cx).oxide_import_dialog.is_some(),
                 |root| {
                     // .oxide dialogs are application-level import flows. Portal
                     // them beside the command palette so their backdrop covers
@@ -972,7 +919,7 @@ impl WorkspaceApp {
                 },
             )
             .when(
-                self.session_manager.read(cx).oxide_export_dialog.is_some(),
+                self.connection_workspace.read(cx).oxide_export_dialog.is_some(),
                 |root| {
                     // Export uses the same workspace-wide modal ownership as import.
                     root.child(self.render_oxide_export_dialog(cx))
@@ -1003,9 +950,6 @@ impl WorkspaceApp {
                 }),
                 |root| root.child(self.render_native_update_release_notes_dialog(cx)),
             )
-            .when(self.shortcuts_modal.open, |root| {
-                root.child(self.render_shortcuts_modal(cx))
-            })
             .when(self.mermaid_zoom.is_some(), |root| {
                 root.child(self.render_mermaid_zoom_modal(window, cx))
             })
@@ -1048,7 +992,7 @@ impl WorkspaceApp {
             .bg(rgba(0x00000000))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.update_sidebar_resize(event, window, cx);
-                this.update_embedded_sftp_sidebar_resize(event, window, cx);
+                this.update_context_sidebar_resize(event, window, cx);
                 this.update_sftp_pane_resize(event, window, cx);
                 this.update_sftp_queue_resize(event, window, cx);
                 this.update_terminal_command_sender_resize(event, window, cx);
@@ -1074,7 +1018,7 @@ impl WorkspaceApp {
         let capture_owner = self.browser_pointer_capture_owner(cx);
         let was_read_only_dragging = self.read_only_selection_drag_active();
         self.finish_sidebar_resize(cx);
-        self.finish_embedded_sftp_sidebar_resize(cx);
+        self.finish_context_sidebar_resize(cx);
         self.finish_sftp_pane_resize(cx);
         self.finish_sftp_queue_resize(cx);
         self.finish_terminal_command_sender_resize(cx);

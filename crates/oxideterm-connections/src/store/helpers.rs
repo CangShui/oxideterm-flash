@@ -329,38 +329,6 @@ fn collect_standalone_sftp_keychain_ids(profile: &StandaloneSftpProfile) -> Vec<
     ids
 }
 
-fn collect_privilege_keychain_ids(connection: &SavedConnection) -> Vec<String> {
-    connection
-        .privilege_credentials
-        .iter()
-        .filter_map(|credential| credential.keychain_id.clone())
-        .collect()
-}
-
-fn collect_imported_privilege_keychain_ids(
-    connections: &[SavedConnection],
-) -> HashSet<String> {
-    // Only imported plaintext values can overwrite the protected store. Existing
-    // metadata without a secret leaves the local keychain entry unchanged.
-    connections
-        .iter()
-        .flat_map(|connection| {
-            connection
-                .privilege_credentials
-                .iter()
-                .filter(|credential| credential.plaintext_secret.is_some())
-                .map(|credential| {
-                    let connection_id = if credential.connection_id.trim().is_empty() {
-                        connection.id.as_str()
-                    } else {
-                        credential.connection_id.as_str()
-                    };
-                    privilege_keychain_id(connection_id, &credential.id)
-                })
-        })
-        .collect()
-}
-
 fn collect_keychain_ids_for_parts(
     auth: &SavedAuth,
     proxy_chain: &[SavedProxyHop],
@@ -581,72 +549,6 @@ fn new_upstream_proxy_password_keychain_id() -> String {
 
 fn new_proxy_command_keychain_id() -> String {
     format!("oxide_conn_proxy_command_{}", Uuid::new_v4())
-}
-
-fn privilege_keychain_id(connection_id: &str, credential_id: &str) -> String {
-    format!("privilege:v1:{connection_id}:{credential_id}")
-}
-
-fn default_privilege_prompt_patterns(kind: PrivilegeCredentialKind) -> Vec<String> {
-    match kind {
-        PrivilegeCredentialKind::SudoPassword => vec![
-            "[sudo]".to_string(),
-            "password for".to_string(),
-            "的密码".to_string(),
-            "sudo password".to_string(),
-        ],
-        PrivilegeCredentialKind::SuPassword => {
-            vec![
-                "su: password".to_string(),
-                "password:".to_string(),
-                "密码：".to_string(),
-            ]
-        }
-        PrivilegeCredentialKind::CustomPrompt => Vec::new(),
-    }
-}
-
-fn legacy_privilege_prompt_patterns(kind: PrivilegeCredentialKind) -> Vec<String> {
-    match kind {
-        PrivilegeCredentialKind::SudoPassword => vec![
-            "[sudo] password for".to_string(),
-            "sudo password".to_string(),
-        ],
-        PrivilegeCredentialKind::SuPassword => {
-            vec!["Password:".to_string(), "su: Password:".to_string()]
-        }
-        PrivilegeCredentialKind::CustomPrompt => Vec::new(),
-    }
-}
-
-fn normalize_privilege_prompt_patterns(
-    kind: PrivilegeCredentialKind,
-    patterns: Vec<String>,
-) -> Vec<String> {
-    let patterns = patterns
-        .into_iter()
-        .map(|pattern| pattern.trim().to_string())
-        .filter(|pattern| !pattern.is_empty())
-        .collect::<Vec<_>>();
-    if patterns.is_empty() {
-        return default_privilege_prompt_patterns(kind);
-    }
-    // Older builds stored narrow English-only defaults. Treat only that exact
-    // generated shape as migratable so real custom prompt fragments survive.
-    if kind != PrivilegeCredentialKind::CustomPrompt
-        && patterns == legacy_privilege_prompt_patterns(kind)
-    {
-        return default_privilege_prompt_patterns(kind);
-    }
-    patterns
-}
-
-fn normalize_saved_privilege_credential_for_display(
-    mut credential: SavedPrivilegeCredential,
-) -> SavedPrivilegeCredential {
-    credential.prompt_patterns =
-        normalize_privilege_prompt_patterns(credential.kind, credential.prompt_patterns);
-    credential
 }
 
 fn matching_key_passphrase_id(auth: Option<&SavedAuth>, key_path: &str) -> Option<String> {

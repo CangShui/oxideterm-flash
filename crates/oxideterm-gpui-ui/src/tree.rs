@@ -31,6 +31,11 @@ pub fn tree_child(
 ) -> AnyElement {
     let line_color: Rgba = rgba((tokens.ui.text_muted << 8) | metrics.line_alpha);
     let left = (depth.saturating_sub(1) as f32) * metrics.indent_size + metrics.branch_left;
+    // Root rows have no ancestor edge to connect to, so they carry no branch
+    // chrome even though the indent math would still place lines.
+    if depth == 0 {
+        return div().relative().w_full().child(child).into_any_element();
+    }
     let branch = div()
         .absolute()
         .left(px(left))

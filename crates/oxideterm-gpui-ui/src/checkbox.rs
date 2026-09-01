@@ -63,10 +63,10 @@ pub fn checkbox_with_state(
     let theme = tokens.ui;
     let has_label = !label.is_empty();
     let selected = state != CheckboxState::Unchecked;
-    let mark_animation_id = (
-        gpui::SharedString::from(format!("checkbox-mark-{label}")),
-        state as usize,
-    );
+    // The id is identity-only: the checked/unchecked target state is appended
+    // by `animated_checkmark`, so a state change animates the same mounted mark
+    // instead of remounting a differently-keyed element mid-transition.
+    let mark_animation_id = gpui::SharedString::from(format!("checkbox-mark-{label}"));
     let mark = match state {
         CheckboxState::Indeterminate => div()
             .w(px(CHECKBOX_INDETERMINATE_MARK_WIDTH))

@@ -762,9 +762,54 @@ pub(super) fn serial_profile_group_from_form(
 }
 
 pub(super) fn asset_icon_from_form(icon: &str) -> Option<String> {
-    // Empty means the asset should use its transport-specific fallback icon.
     let icon = icon.trim();
     (!icon.is_empty()).then(|| icon.to_string())
+}
+
+pub(super) fn asset_icon_from_form_or_transport(
+    icon: &str,
+    transport: oxideterm_connections::ConnectionTransport,
+) -> Option<String> {
+    asset_icon_from_form(icon).or_else(|| {
+        Some(
+            crate::workspace::session_icons::default_connection_transport_icon_id(transport)
+                .to_string(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::asset_icon_from_form_or_transport;
+    use oxideterm_connections::ConnectionTransport;
+
+    #[test]
+    fn empty_icon_uses_the_protocol_default_and_custom_icon_wins() {
+        assert_eq!(
+            asset_icon_from_form_or_transport("", ConnectionTransport::Ssh).as_deref(),
+            Some("server")
+        );
+        assert_eq!(
+            asset_icon_from_form_or_transport("", ConnectionTransport::Telnet).as_deref(),
+            Some("network")
+        );
+        assert_eq!(
+            asset_icon_from_form_or_transport("", ConnectionTransport::Serial).as_deref(),
+            Some("radio")
+        );
+        assert_eq!(
+            asset_icon_from_form_or_transport("", ConnectionTransport::Rdp).as_deref(),
+            Some("monitor")
+        );
+        assert_eq!(
+            asset_icon_from_form_or_transport("", ConnectionTransport::Vnc).as_deref(),
+            Some("monitor")
+        );
+        assert_eq!(
+            asset_icon_from_form_or_transport("cloud", ConnectionTransport::Vnc).as_deref(),
+            Some("cloud")
+        );
+    }
 }
 
 pub(super) fn asset_color_from_form(color: &str) -> Option<String> {

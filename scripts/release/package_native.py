@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import plistlib
@@ -45,9 +44,6 @@ CONNECTION_URI_SCHEMES = ("ssh", "telnet", "mosh", "rdp", "vnc")
 HELPER_BINS = ("oxideterm-rdp-helper", "oxideterm-vnc-helper")
 UPDATE_HELPER_PACKAGE = "oxideterm-update"
 UPDATE_HELPER_BIN = "oxideterm-update-helper"
-AGENT_RESOURCE_DIR = "agents"
-AGENT_BINARY_PREFIX = "oxideterm-agent-"
-ENCODED_AGENT_SUFFIX = ".b64"
 HELPER_RESOURCE_DIR = "helpers"
 UPDATE_HELPER_DIR = "tools"
 WINDOWS_UPDATE_STAGING_DIR = "install"
@@ -90,10 +86,6 @@ RELEASE_DOCUMENTS = (
     (ROOT_DIR / "NOTICE", "NOTICE"),
     (ROOT_DIR / "README.md", "README.md"),
     (ROOT_DIR / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
-    (
-        ROOT_DIR / "agent" / "THIRD_PARTY_NOTICES.md",
-        "AGENT_THIRD_PARTY_NOTICES.md",
-    ),
 )
 
 
@@ -378,30 +370,10 @@ def write_package_version(dst: Path, version: str) -> None:
     (dst / PACKAGE_VERSION_FILENAME).write_text(f"{version}\n", encoding="utf-8")
 
 
-def copy_agent_resources(dst: Path, *, encode_binaries: bool) -> None:
-    source_dir = RESOURCE_DIR / AGENT_RESOURCE_DIR
-    if dst.exists():
-        shutil.rmtree(dst)
-    dst.mkdir(parents=True)
-    for source in sorted(source_dir.iterdir()):
-        if source.is_dir():
-            copy_tree(source, dst / source.name)
-            continue
-        if encode_binaries and source.name.startswith(AGENT_BINARY_PREFIX):
-            # AppImage tooling scans nested ELF files by architecture; encode
-            # remote-agent payloads as data so both Linux agent targets remain bundled.
-            encoded = base64.b64encode(source.read_bytes()).decode("ascii")
-            (dst / f"{source.name}{ENCODED_AGENT_SUFFIX}").write_text(encoded, encoding="ascii")
-        else:
-            shutil.copy2(source, dst / source.name)
-
-
-def copy_runtime_resources(dst: Path, target: str, *, encode_agent_binaries: bool = False) -> None:
+def copy_runtime_resources(dst: Path, target: str) -> None:
     dst.mkdir(parents=True, exist_ok=True)
-    # Keep the app bundle layout aligned with Tauri's resource contract: agents
-    # the target-specific CLI, and protocol helpers live under resources instead
-    # of relying on PATH.
-    copy_agent_resources(dst / AGENT_RESOURCE_DIR, encode_binaries=encode_agent_binaries)
+    # Runtime icons, the target-specific CLI, and protocol helpers live under
+    # resources instead of relying on PATH.
     copy_tree(RESOURCE_DIR / "icons", dst / "icons")
 
     # Do not copy stale CLI binaries for other platforms. The app resolves the
@@ -1508,7 +1480,7 @@ def create_linux_appimage(
     shutil.copy2(binary, app_binary)
     make_executable(app_binary)
     copy_linux_appimage_kerberos_libraries(app_binary, appdir)
-    copy_runtime_resources(usr_bin / "resources", target, encode_agent_binaries=True)
+    copy_runtime_resources(usr_bin / "resources", target)
     document_root = appdir / "usr" / "share" / "doc" / identity.linux_package_name
     copy_release_documents(document_root)
     write_package_version(document_root, version)
@@ -1623,7 +1595,7 @@ def create_linux_rpm(
     make_executable(app_binary)
     # Encode the two remote-agent ELFs so RPM dependency discovery only scans
     # executables built for the package's own architecture.
-    copy_runtime_resources(app_root / "resources", target, encode_agent_binaries=True)
+    copy_runtime_resources(app_root / "resources", target)
     copy_release_documents(app_root)
     write_package_version(app_root, version)
     (app_root / LINUX_PACKAGE_KIND_FILENAME).write_text("rpm\n", encoding="utf-8")

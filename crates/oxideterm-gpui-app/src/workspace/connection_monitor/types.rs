@@ -1,9 +1,8 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use gpui::{Rgba, rgb, rgba};
 use oxideterm_gpui_ui::motion::ExitPresence;
 use oxideterm_ssh::SshCommandOutput;
-use oxideterm_topology::TopologyViewStatus;
 use zeroize::Zeroize;
 
 use super::*;
@@ -126,7 +125,6 @@ pub(super) const HOST_PACKAGE_CONTEXT_COLUMNS_MIN_WIDTH: f32 = 720.0;
 pub(super) const HOST_PACKAGE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(18);
 pub(super) const HOST_PACKAGE_SNAPSHOT_MAX_OUTPUT_SIZE: usize = 512 * 1024;
 
-pub(super) const MONITOR_POOL_REFRESH_INTERVAL: Duration = Duration::from_millis(2000);
 // The compact sidebar must stay on GPUI List scrolling; ordinary Div overflow
 // repaints too much of the Host Tools panel during trackpad scrolling.
 pub(super) const COMPACT_MONITOR_LIST_ESTIMATED_ROW_HEIGHT: f32 = 34.0;
@@ -150,26 +148,6 @@ pub(super) const MONITOR_EMERALD_DARK: u32 = 0x10b981;
 pub(super) const MONITOR_AMBER: u32 = 0xf59e0b;
 pub(super) const MONITOR_RED: u32 = 0xef4444;
 pub(super) const MONITOR_BLUE: u32 = 0x3b82f6;
-pub(super) const TOPOLOGY_BG_GRID_STEP: f32 = 40.0;
-pub(super) const TOPOLOGY_BG_GRID_ALPHA: u32 = 0x1a;
-pub(super) const TOPOLOGY_PANEL_BG_ALPHA_20: u32 = 0x33;
-pub(super) const TOPOLOGY_PANEL_BORDER_ALPHA_50: u32 = 0x80;
-pub(super) const TOPOLOGY_MUTED_TEXT_ALPHA_70: u32 = 0xb3;
-pub(super) const TOPOLOGY_INSTRUCTION_ALPHA_60: u32 = 0x99;
-pub(super) const TOPOLOGY_LINE_INACTIVE_ALPHA: u32 = 0x66;
-pub(super) const TOPOLOGY_LINE_GLOW_ALPHA: u32 = 0x26;
-pub(super) const TOPOLOGY_CONNECTED: u32 = 0x22c55e;
-pub(super) const TOPOLOGY_CONNECTING: u32 = 0xeab308;
-pub(super) const TOPOLOGY_FAILED: u32 = 0xef4444;
-pub(super) const TOPOLOGY_DISCONNECTED: u32 = 0x71717a;
-pub(super) const TOPOLOGY_PENDING: u32 = 0xf59e0b;
-pub(super) const TOPOLOGY_ZOOM_INITIAL: f32 = 0.9;
-pub(super) const TOPOLOGY_ZOOM_MIN: f32 = 0.3;
-pub(super) const TOPOLOGY_ZOOM_MAX: f32 = 3.0;
-pub(super) const TOPOLOGY_PAN_INITIAL_X: f32 = 0.0;
-pub(super) const TOPOLOGY_PAN_INITIAL_Y: f32 = 50.0;
-pub(super) const TOPOLOGY_MENU_WIDTH: f32 = 180.0;
-pub(super) const TOPOLOGY_MENU_MAX_HEIGHT: f32 = 250.0;
 
 pub(super) fn connection_monitor_surface_bg(theme_bg: u32, has_background: bool) -> Rgba {
     if has_background {
@@ -180,41 +158,8 @@ pub(super) fn connection_monitor_surface_bg(theme_bg: u32, has_background: bool)
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct TopologyTransform {
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) k: f32,
-}
-
-impl Default for TopologyTransform {
-    fn default() -> Self {
-        Self {
-            x: TOPOLOGY_PAN_INITIAL_X,
-            y: TOPOLOGY_PAN_INITIAL_Y,
-            k: TOPOLOGY_ZOOM_INITIAL,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct TopologyDragState {
-    pub(super) last_x: f32,
-    pub(super) last_y: f32,
-}
-
-#[derive(Clone, Copy)]
 pub(super) struct HostToolsTabScrollbarDragState {
     pub(super) grab_offset_x: f32,
-}
-
-#[derive(Clone)]
-pub(super) struct TopologyNodeMenuState {
-    pub(super) node_id: Option<NodeId>,
-    pub(super) name: String,
-    pub(super) host: String,
-    pub(super) view_status: TopologyViewStatus,
-    pub(super) x: f32,
-    pub(super) y: f32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,15 +179,6 @@ impl MonitorConnectionOption {
             host: connection.host,
             port: connection.port,
             username: connection.username,
-        }
-    }
-
-    pub(super) fn from_pool_summary(summary: &ConnectionPoolEntrySummary) -> Self {
-        Self {
-            connection_id: summary.id.clone(),
-            host: summary.host.clone(),
-            port: summary.port,
-            username: summary.username.clone(),
         }
     }
 }
@@ -446,12 +382,20 @@ pub(super) struct HostLogSnapshotRequest {
     pub(super) preset: LogPreset,
     pub(super) limit: usize,
     pub(super) feedback: HostSnapshotFeedback,
-    pub(super) failure_fallback: String,
+}
+
+/// Transport-level failure classes for host tool capture commands. The raw
+/// transport error can embed connection details, so only these fixed classes
+/// cross the delivery boundary and reach the UI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HostCaptureFailure {
+    Timeout,
+    Connection,
 }
 
 pub(super) struct HostLogSnapshotDelivery {
     pub(super) request: HostLogSnapshotRequest,
-    pub(super) result: Result<SshCommandOutput, ()>,
+    pub(super) result: Result<SshCommandOutput, HostCaptureFailure>,
 }
 
 pub(super) fn zeroize_host_snapshot_output(output: &mut SshCommandOutput) {
@@ -486,10 +430,12 @@ mod snapshot_output_zeroize_tests {
 pub(super) struct HostLogsState {
     pub(super) expanded_index: Option<usize>,
     pub(super) preset: LogPreset,
-    pub(super) snapshot_connection_id: Option<String>,
-    pub(super) snapshot: Option<ResourceLogSnapshot>,
-    pub(super) running: Option<HostLogSnapshotRequest>,
-    pub(super) snapshot_in_flight: bool,
+    // Keep the last parsed result per host so inactive host tabs stay frozen
+    // without retaining raw SSH output beyond the delivery boundary.
+    pub(super) snapshots: HashMap<String, ResourceLogSnapshot>,
+    // One bounded capture may run per host; switching hosts must not block the
+    // newly selected host from starting its own capture.
+    pub(super) running: HashMap<String, HostLogSnapshotRequest>,
     pub(super) list_state: ListState,
     pub(super) list_cache: RefCell<VirtualListSignatureCache>,
 }
@@ -499,10 +445,8 @@ impl HostLogsState {
         Self {
             expanded_index: None,
             preset: LogPreset::All,
-            snapshot_connection_id: None,
-            snapshot: None,
-            running: None,
-            snapshot_in_flight: false,
+            snapshots: HashMap::new(),
+            running: HashMap::new(),
             list_state: tauri_virtual_list_state(
                 0,
                 ListAlignment::Top,
@@ -532,6 +476,7 @@ pub(super) enum HostTmuxDestructiveAction {
     KillSession { target: String },
     KillWindow { target: String },
     KillPane { target: String },
+    KillScreenSession { target: String },
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -778,6 +723,8 @@ pub(in crate::workspace) enum HostTmuxInputDialogKind {
     RenameSession { target: String },
     RenameWindow { target: String },
     SendPaneCommand { target: String },
+    RenameScreenSession { target: String },
+    SendScreenCommand { target: String },
 }
 
 pub(in crate::workspace) struct HostTmuxInputDialog {
@@ -807,8 +754,11 @@ pub(in crate::workspace) enum HostToolsTextInput {
 }
 
 pub(super) struct HostTmuxState {
-    pub(super) snapshot_connection_id: Option<String>,
-    pub(super) snapshot: Option<ResourceTmuxSnapshot>,
+    // Each host retains its last complete capture while another host is active.
+    // Captured inventories can contain terminal text, so this cache stays wholly
+    // inside the Host Tools entity and is discarded when that entity is released.
+    pub(super) snapshots: HashMap<String, ResourceTmuxSnapshot>,
+    pub(super) screen_snapshots: HashMap<String, ResourceScreenSnapshot>,
     pub(super) snapshot_running: Option<HostTmuxSnapshotRequest>,
     pub(super) snapshot_in_flight: bool,
     pub(super) last_error: Option<String>,
@@ -819,8 +769,8 @@ pub(super) struct HostTmuxState {
 impl HostTmuxState {
     pub(super) fn new() -> Self {
         Self {
-            snapshot_connection_id: None,
-            snapshot: None,
+            snapshots: HashMap::new(),
+            screen_snapshots: HashMap::new(),
             snapshot_running: None,
             snapshot_in_flight: false,
             last_error: None,
@@ -831,46 +781,22 @@ impl HostTmuxState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::workspace) enum ConnectionRuntimeSection {
-    Overview,
-    Topology,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum HostToolsVisibility {
     Hidden,
-    VisibleMainTab,
     VisibleSidebar,
-    VisibleDetachedWindow,
-    VisibleMultiple {
-        main_tab: bool,
-        sidebar: bool,
-        detached_window: bool,
-    },
     Dropped,
 }
 
 impl HostToolsVisibility {
     pub(in crate::workspace) fn from_mounts(
-        main_tab: bool,
+        _main_tab: bool,
         sidebar: bool,
-        detached_window: bool,
+        _detached_window: bool,
     ) -> Self {
-        match (
-            usize::from(main_tab) + usize::from(sidebar) + usize::from(detached_window),
-            main_tab,
-            sidebar,
-            detached_window,
-        ) {
-            (0, _, _, _) => Self::Hidden,
-            (1, true, _, _) => Self::VisibleMainTab,
-            (1, _, true, _) => Self::VisibleSidebar,
-            (1, _, _, true) => Self::VisibleDetachedWindow,
-            _ => Self::VisibleMultiple {
-                main_tab,
-                sidebar,
-                detached_window,
-            },
+        if sidebar {
+            Self::VisibleSidebar
+        } else {
+            Self::Hidden
         }
     }
 
@@ -879,20 +805,11 @@ impl HostToolsVisibility {
     }
 
     pub(in crate::workspace) fn sidebar_is_visible(self) -> bool {
-        matches!(
-            self,
-            Self::VisibleSidebar | Self::VisibleMultiple { sidebar: true, .. }
-        )
+        self == Self::VisibleSidebar
     }
 
     pub(in crate::workspace) fn main_window_is_visible(self) -> bool {
-        matches!(
-            self,
-            Self::VisibleMainTab
-                | Self::VisibleSidebar
-                | Self::VisibleMultiple { main_tab: true, .. }
-                | Self::VisibleMultiple { sidebar: true, .. }
-        )
+        self.sidebar_is_visible()
     }
 }
 
@@ -900,7 +817,13 @@ impl HostToolsVisibility {
 pub(in crate::workspace) struct HostToolsMessages {
     pub(super) service_connection_missing: String,
     pub(super) service_action_failed: String,
-    pub(super) log_unknown_error: String,
+    pub(super) log_failure_permission_denied: String,
+    pub(super) log_failure_journal_unavailable: String,
+    pub(super) log_failure_tool_missing: String,
+    pub(super) log_failure_tool_error: String,
+    pub(super) log_failure_exit_code: String,
+    pub(super) log_failure_timeout: String,
+    pub(super) log_failure_connection: String,
     pub(super) port_unknown_error: String,
     pub(super) filesystem_unknown_error: String,
     pub(super) package_unknown_error: String,
@@ -914,7 +837,15 @@ impl HostToolsMessages {
         Self {
             service_connection_missing: i18n.t("sidebar.host_services.toast.connection_missing"),
             service_action_failed: i18n.t("sidebar.host_services.toast.action_failed"),
-            log_unknown_error: i18n.t("sidebar.host_logs.toast.unknown_error"),
+            log_failure_permission_denied: i18n
+                .t("sidebar.host_logs.failure.permission_denied"),
+            log_failure_journal_unavailable: i18n
+                .t("sidebar.host_logs.failure.journal_unavailable"),
+            log_failure_tool_missing: i18n.t("sidebar.host_logs.failure.tool_missing"),
+            log_failure_tool_error: i18n.t("sidebar.host_logs.failure.tool_error"),
+            log_failure_exit_code: i18n.t("sidebar.host_logs.failure.exit_code"),
+            log_failure_timeout: i18n.t("sidebar.host_logs.failure.timeout"),
+            log_failure_connection: i18n.t("sidebar.host_logs.failure.connection"),
             port_unknown_error: i18n.t("sidebar.host_ports.toast.unknown_error"),
             filesystem_unknown_error: i18n.t("sidebar.host_filesystems.toast.unknown_error"),
             package_unknown_error: i18n.t("sidebar.host_packages.toast.unknown_error"),
@@ -940,8 +871,9 @@ pub(super) struct HostToolConfirmState<T> {
 pub(super) struct HostGpuViewState {
     pub(super) update_tx: tokio::sync::mpsc::UnboundedSender<GpuUpdate>,
     pub(super) sampling_task: Option<GpuSamplingTask>,
-    pub(super) snapshot_connection_id: Option<String>,
-    pub(super) snapshot: Option<GpuSnapshot>,
+    // Keep the last sample per host so switching back to a host shows its
+    // frozen state instead of flashing an empty page while sampling restarts.
+    pub(super) snapshots: HashMap<String, GpuSnapshot>,
     pub(super) expanded_uuid: Option<String>,
     pub(super) list_state: ListState,
     pub(super) list_cache: RefCell<VirtualListSignatureCache>,
@@ -952,8 +884,7 @@ impl HostGpuViewState {
         Self {
             update_tx,
             sampling_task: None,
-            snapshot_connection_id: None,
-            snapshot: None,
+            snapshots: HashMap::new(),
             expanded_uuid: None,
             list_state: tauri_virtual_list_state(
                 0,
@@ -1005,11 +936,15 @@ pub(in crate::workspace) struct HostToolsUiState {
     pub(super) host_service_list_cache: RefCell<VirtualListSignatureCache>,
     pub(in crate::workspace) host_log_search_query: String,
     pub(in crate::workspace) host_tmux_search_query: String,
+    pub(in crate::workspace) host_virtual_terminal_engine: std::collections::HashMap<String, VirtualTerminalEngine>,
+    pub(in crate::workspace) host_virtual_terminal_user_selected: std::collections::HashMap<String, bool>,
     pub(in crate::workspace) host_tmux_expanded_session_id: Option<String>,
     pub(in crate::workspace) host_tmux_expanded_window_id: Option<String>,
     pub(in crate::workspace) host_tmux_input_dialog: Option<HostTmuxInputDialog>,
     pub(super) host_tmux_list_state: ListState,
     pub(super) host_tmux_list_cache: RefCell<VirtualListSignatureCache>,
+    pub(super) host_screen_list_state: ListState,
+    pub(super) host_screen_list_cache: RefCell<VirtualListSignatureCache>,
     pub(in crate::workspace) host_port_search_query: String,
     pub(in crate::workspace) host_schedule_search_query: String,
     pub(in crate::workspace) host_filesystem_search_query: String,
@@ -1050,6 +985,8 @@ impl HostToolsUiState {
             host_service_list_cache: RefCell::new(VirtualListSignatureCache::default()),
             host_log_search_query: String::new(),
             host_tmux_search_query: String::new(),
+            host_virtual_terminal_engine: std::collections::HashMap::new(),
+            host_virtual_terminal_user_selected: std::collections::HashMap::new(),
             host_tmux_expanded_session_id: None,
             host_tmux_expanded_window_id: None,
             host_tmux_input_dialog: None,
@@ -1059,6 +996,12 @@ impl HostToolsUiState {
                 TauriVirtualListSpec::new(px(HOST_TMUX_LIST_ESTIMATED_ROW_HEIGHT), 8),
             ),
             host_tmux_list_cache: RefCell::new(VirtualListSignatureCache::default()),
+            host_screen_list_state: tauri_virtual_list_state(
+                0,
+                ListAlignment::Top,
+                TauriVirtualListSpec::new(px(HOST_TMUX_LIST_ESTIMATED_ROW_HEIGHT), 8),
+            ),
+            host_screen_list_cache: RefCell::new(VirtualListSignatureCache::default()),
             host_port_search_query: String::new(),
             host_schedule_search_query: String::new(),
             host_filesystem_search_query: String::new(),

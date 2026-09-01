@@ -328,13 +328,10 @@ impl WorkspaceApp {
                 self.i18n.t("sidebar.host_logs.toast.unavailable"),
                 TerminalNoticeVariant::Warning,
             ),
-            HostToolsNotice::LogSnapshotFailed => (
+            HostToolsNotice::LogSnapshotFailed { reason } => (
                 self.i18n_replace(
                     "sidebar.host_logs.toast.snapshot_failed",
-                    &[(
-                        "reason",
-                        self.i18n.t("sidebar.host_logs.toast.unknown_error"),
-                    )],
+                    &[("reason", reason)],
                 ),
                 TerminalNoticeVariant::Error,
             ),

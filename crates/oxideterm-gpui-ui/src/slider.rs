@@ -11,10 +11,17 @@ pub struct SliderView {
 
 impl SliderView {
     pub fn percent(self) -> f32 {
-        if (self.max - self.min).abs() <= f32::EPSILON {
-            0.0
+        // The result feeds Taffy relative lengths, which cannot absorb NaN:
+        // non-finite spans or values collapse to the empty-track fallback.
+        let span = self.max - self.min;
+        if !span.is_finite() || span.abs() <= f32::EPSILON {
+            return 0.0;
+        }
+        let percent = (self.value - self.min) / span;
+        if percent.is_finite() {
+            percent.clamp(0.0, 1.0)
         } else {
-            ((self.value - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
+            0.0
         }
     }
 }

@@ -221,10 +221,7 @@ impl WorkspaceTabHostEntity {
         let Some(tab) = self.tab_mut_by_id(tab_id) else {
             return false;
         };
-        if !matches!(
-            tab.kind,
-            TabKind::SshTerminal
-        ) {
+        if !is_terminal_tab_kind(&tab.kind) {
             return false;
         }
         tab.title.clear();
@@ -1613,7 +1610,7 @@ mod tests {
             );
         });
         first_pane.update(cx, |_pane, cx| {
-            cx.emit(TerminalPaneEvent::PrivilegePromptStateChanged);
+            cx.emit(TerminalPaneEvent::RecordingStatusChanged);
         });
         cx.run_until_parked();
 
@@ -1680,7 +1677,7 @@ mod tests {
                     pane_id: first_pane_id,
                     session_id: first_session_id,
                     window_handle: main_window_handle,
-                    event: TerminalPaneEvent::PrivilegePromptStateChanged,
+                    event: TerminalPaneEvent::RecordingStatusChanged,
                 },
                 WorkspaceTabHostEvent::TerminalPaneDelivery {
                     pane_id: replacement_pane_id,

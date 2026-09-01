@@ -50,16 +50,6 @@ pub fn persisted_settings_input_value(
         SettingsInput::TerminalFontSize => settings.terminal.font_size.to_string(),
         SettingsInput::TerminalScrollback => settings.terminal.scrollback.to_string(),
         SettingsInput::TerminalLineHeight => compact_decimal(settings.terminal.line_height),
-        SettingsInput::IdeFontSize => settings
-            .ide
-            .font_size
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        SettingsInput::IdeLineHeight => settings
-            .ide
-            .line_height
-            .map(compact_decimal)
-            .unwrap_or_default(),
         SettingsInput::AppearanceUiFont => settings.appearance.ui_font_family.clone(),
         SettingsInput::LocalDefaultCwd => settings
             .local_terminal
@@ -77,6 +67,8 @@ pub fn persisted_settings_input_value(
             .clone()
             .unwrap_or_default(),
         SettingsInput::ExternalEditorPath => settings.general.external_editor.clone(),
+        SettingsInput::CloudSyncServerUrl => settings.cloud_sync.server_url.clone(),
+        SettingsInput::CloudSyncRoom => settings.cloud_sync.room.clone(),
         SettingsInput::ConnectionDefaultUsername => settings.connection_defaults.username.clone(),
         SettingsInput::ConnectionDefaultPort => settings.connection_defaults.port.to_string(),
         SettingsInput::ConnectionImportTargetGroup => return None,
@@ -222,27 +214,13 @@ pub fn apply_persisted_settings_input_draft(
         SettingsInput::TerminalLineHeight => parse_f64(draft)
             .map(|value| settings.terminal.line_height = value.clamp(0.8, 2.0))
             .into(),
-        SettingsInput::IdeFontSize => {
-            let value = draft.trim();
-            if value.is_empty() {
-                settings.ide.font_size = None;
-                SettingsInputDraftApply::Applied
-            } else {
-                parse_i64(value)
-                    .map(|value| settings.ide.font_size = Some(value.clamp(8, 32)))
-                    .into()
-            }
+        SettingsInput::CloudSyncServerUrl => {
+            settings.cloud_sync.server_url = non_empty_trimmed(draft).unwrap_or_default();
+            SettingsInputDraftApply::Applied
         }
-        SettingsInput::IdeLineHeight => {
-            let value = draft.trim();
-            if value.is_empty() {
-                settings.ide.line_height = None;
-                SettingsInputDraftApply::Applied
-            } else {
-                parse_f64(value)
-                    .map(|value| settings.ide.line_height = Some(value.clamp(0.8, 3.0)))
-                    .into()
-            }
+        SettingsInput::CloudSyncRoom => {
+            settings.cloud_sync.room = non_empty_trimmed(draft).unwrap_or_default();
+            SettingsInputDraftApply::Applied
         }
         SettingsInput::AppearanceUiFont => {
             settings.appearance.ui_font_family = draft.trim().to_string();

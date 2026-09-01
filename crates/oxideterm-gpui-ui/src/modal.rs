@@ -125,8 +125,12 @@ pub fn quicklook_backdrop_color() -> Rgba {
     backdrop_color(TauriBackdropRole::QuickLook)
 }
 
-pub fn modal_overlay(tokens: &ThemeTokens, dialog: impl IntoElement) -> AnyElement {
-    dialog_overlay(tokens, dialog)
+pub fn modal_overlay(
+    tokens: &ThemeTokens,
+    id: impl Into<gpui::ElementId>,
+    dialog: impl IntoElement,
+) -> AnyElement {
+    dialog_overlay(tokens, id, dialog)
 }
 
 pub fn modal_backdrop(backdrop: Rgba) -> Div {
@@ -231,10 +235,18 @@ where
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }
 
-pub fn dialog_overlay(tokens: &ThemeTokens, dialog: impl IntoElement) -> AnyElement {
+pub fn dialog_overlay(
+    tokens: &ThemeTokens,
+    id: impl Into<gpui::ElementId>,
+    dialog: impl IntoElement,
+) -> AnyElement {
+    // The animation id must be caller-supplied: nested or simultaneous dialog
+    // overlays rendered from one element path would otherwise share one
+    // animation timeline keyed by a single static id.
+    let id = id.into();
     let dialog = crate::motion::slide_fade_in_y(
         tokens,
-        "dialog-content-enter",
+        (id.clone(), "dialog-content-enter"),
         div().child(dialog),
         6.0,
         crate::motion::MotionDuration::Overlay,
@@ -243,7 +255,7 @@ pub fn dialog_overlay(tokens: &ThemeTokens, dialog: impl IntoElement) -> AnyElem
     // applied only to visual wrappers and never delays focus or dismissal.
     crate::motion::fade_in(
         tokens,
-        "dialog-backdrop-enter",
+        (id, "dialog-backdrop-enter"),
         dialog_backdrop().child(dialog),
         crate::motion::MotionDuration::Control,
     )

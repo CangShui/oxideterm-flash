@@ -11,18 +11,11 @@ pub enum InstallFlavor {
     LinuxAppImage,
     LinuxDeb,
     LinuxRpm,
-    Portable,
     Standard,
 }
 
 impl InstallFlavor {
-    // Portable markers take precedence because they define storage and package
-    // behavior independently from the executable's platform-specific shape.
-    pub fn infer(target: &PlatformTarget, current_exe: &Path, portable: bool) -> Self {
-        if portable {
-            return Self::Portable;
-        }
-
+    pub fn infer(target: &PlatformTarget, current_exe: &Path) -> Self {
         match target.os() {
             "macos" => Self::MacApp,
             "windows" => Self::WindowsNsis,
@@ -86,21 +79,6 @@ impl PlatformTarget {
                 format!("linux-{arch}-rpm"),
                 format!("{arch}-unknown-linux-gnu-rpm"),
             ],
-            ("macos", InstallFlavor::Portable) => vec![
-                format!("darwin-{arch}-portable"),
-                format!("macos-{arch}-portable"),
-                format!("{arch}-apple-darwin-portable"),
-            ],
-            ("windows", InstallFlavor::Portable) => vec![
-                format!("windows-{arch}-portable"),
-                format!("{arch}-pc-windows-msvc-portable"),
-                format!("{arch}-pc-windows-gnu-portable"),
-            ],
-            ("linux", InstallFlavor::Portable) => vec![
-                format!("linux-{arch}-portable"),
-                format!("{arch}-unknown-linux-gnu-portable"),
-                format!("{arch}-unknown-linux-musl-portable"),
-            ],
             (other, InstallFlavor::Standard) => vec![format!("{other}-{arch}")],
             _ => Vec::new(),
         }
@@ -137,7 +115,6 @@ mod tests {
             InstallFlavor::infer(
                 &PlatformTarget::new("windows", "x86_64"),
                 Path::new("C:/Users/me/OxideTerm/oxideterm-native.exe"),
-                false,
             ),
             InstallFlavor::WindowsNsis
         );
@@ -145,7 +122,6 @@ mod tests {
             InstallFlavor::infer(
                 &PlatformTarget::new("linux", "x86_64"),
                 Path::new("/tmp/OxideTerm.AppImage"),
-                false,
             ),
             InstallFlavor::LinuxAppImage
         );
@@ -153,17 +129,8 @@ mod tests {
             InstallFlavor::infer(
                 &PlatformTarget::new("linux", "x86_64"),
                 Path::new("/opt/oxideterm/oxideterm-native"),
-                false,
             ),
             InstallFlavor::LinuxDeb
-        );
-        assert_eq!(
-            InstallFlavor::infer(
-                &PlatformTarget::new("macos", "aarch64"),
-                Path::new("/Applications/OxideTerm.app/Contents/MacOS/oxideterm-native"),
-                true,
-            ),
-            InstallFlavor::Portable
         );
     }
 
@@ -174,7 +141,7 @@ mod tests {
         std::fs::write(directory.path().join("PACKAGE_KIND"), "rpm\n").unwrap();
 
         assert_eq!(
-            InstallFlavor::infer(&PlatformTarget::new("linux", "x86_64"), &executable, false,),
+            InstallFlavor::infer(&PlatformTarget::new("linux", "x86_64"), &executable,),
             InstallFlavor::LinuxRpm
         );
         assert_eq!(

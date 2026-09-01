@@ -145,10 +145,7 @@ impl SettingsWorkspaceEntity {
             }
             NativeUpdateUiState::Downloaded(_) => NativeUpdateRenderState::Downloaded,
             NativeUpdateUiState::Installing(plan) => {
-                NativeUpdateRenderState::Installing(plan.as_ref().and_then(|plan| {
-                    (plan.strategy != oxideterm_update::InstallStrategy::PortableReplaceArchive)
-                        .then(|| plan.summary.clone())
-                }))
+                NativeUpdateRenderState::Installing(plan.as_ref().map(|plan| plan.summary.clone()))
             }
             NativeUpdateUiState::InstallFinished(outcome) => {
                 NativeUpdateRenderState::InstallFinished {
@@ -591,23 +588,9 @@ impl WorkspaceApp {
                 cx.notify();
             }
             SettingsWorkspaceEvent::ShowNativeUpdateToast(toast) => {
-                let portable_replacement = self.native_update_is_portable(cx)
-                    && matches!(
-                        settings.read(cx).native_update_render_state(),
-                        NativeUpdateRenderState::InstallFinished {
-                            status: oxideterm_update::NativeInstallStatus::ReplacementScheduled,
-                            ..
-                        }
-                    );
-                let message = if portable_replacement {
-                    self.i18n.t("settings_view.help.replacement_scheduled")
-                } else {
-                    let Some(message) =
-                        settings.read(cx).native_update_message().map(str::to_owned)
-                    else {
-                        return;
-                    };
-                    message
+                let Some(message) = settings.read(cx).native_update_message().map(str::to_owned)
+                else {
+                    return;
                 };
                 let variant = match toast {
                     SettingsWorkspaceToast::Success => TerminalNoticeVariant::Success,
@@ -687,98 +670,6 @@ impl WorkspaceApp {
                 }
                 cx.notify();
             }
-            SettingsWorkspaceEvent::KeybindingFileOperationReady => {
-                let results = settings.update(cx, |settings, _cx| {
-                    settings.take_keybinding_file_operation_results()
-                });
-                for result in results {
-                    match result {
-                        KeybindingFileOperationResult::Exported => {
-                            self.push_settings_toast(
-                                self.i18n.t("settings_view.keybindings.export_success"),
-                                TerminalNoticeVariant::Success,
-                                cx,
-                            );
-                        }
-                        KeybindingFileOperationResult::ExportFailed => {
-                            self.push_settings_toast(
-                                self.i18n.t("settings_view.keybindings.export_error"),
-                                TerminalNoticeVariant::Error,
-                                cx,
-                            );
-                        }
-                        KeybindingFileOperationResult::Imported {
-                            overrides: next_overrides,
-                            target_window,
-                        } => {
-                            let side = crate::keybindings::KeybindingSide::current();
-                            let runtime_bindings = {
-                                let previous_overrides =
-                                    &self.settings_store.settings().keybindings.overrides;
-                                crate::keybindings::ACTION_DEFINITIONS
-                                    .iter()
-                                    .flat_map(|definition| {
-                                        let previous = crate::keybindings::effective_combo(
-                                            definition,
-                                            previous_overrides,
-                                            side,
-                                        );
-                                        let next = crate::keybindings::effective_combo(
-                                            definition,
-                                            &next_overrides,
-                                            side,
-                                        );
-                                        crate::keybindings::runtime_rebind_key_bindings(
-                                            definition.id,
-                                            previous.as_ref(),
-                                            next.as_ref(),
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            };
-                            self.edit_settings(
-                                move |settings| {
-                                    settings.keybindings.overrides = next_overrides;
-                                },
-                                cx,
-                            );
-                            self.apply_runtime_key_bindings_to_window_handle(
-                                runtime_bindings,
-                                target_window,
-                                cx,
-                            );
-                            self.push_settings_toast(
-                                self.i18n.t("settings_view.keybindings.import_success"),
-                                TerminalNoticeVariant::Success,
-                                cx,
-                            );
-                        }
-                        KeybindingFileOperationResult::ImportFailed => {
-                            self.push_settings_toast(
-                                self.i18n.t("settings_view.keybindings.import_invalid"),
-                                TerminalNoticeVariant::Error,
-                                cx,
-                            );
-                        }
-                    }
-                }
-                cx.notify();
-            }
-            SettingsWorkspaceEvent::PortablePasswordChangeFinished { success } => {
-                if *success {
-                    self.push_settings_toast(
-                        self.i18n
-                            .t("settings_view.general.portable_password_changed"),
-                        TerminalNoticeVariant::Success,
-                        cx,
-                    );
-                    self.refresh_portable_settings_snapshot(true, cx);
-                } else if let Some(error) =
-                    settings.read(cx).portable_action_error().map(str::to_owned)
-                {
-                    self.push_settings_toast(error, TerminalNoticeVariant::Error, cx);
-                }
-            }
         }
     }
 
@@ -801,10 +692,9 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let channel = self.settings_store.settings().general.update_channel;
-        let install_flavor =
-            oxideterm_update::NativeInstallContext::current(self.native_update_is_portable(cx))
-                .map(|context| context.install_flavor)
-                .map_err(|error| error.to_string());
+        let install_flavor = oxideterm_update::NativeInstallContext::current()
+            .map(|context| context.install_flavor)
+            .map_err(|error| error.to_string());
         let request = NativeUpdateCheckRequest {
             kind: check_kind,
             channel,
@@ -835,9 +725,8 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn install_native_update(&mut self, cx: &mut Context<Self>) {
-        let context =
-            oxideterm_update::NativeInstallContext::current(self.native_update_is_portable(cx))
-                .map_err(|error| error.to_string());
+        let context = oxideterm_update::NativeInstallContext::current()
+            .map_err(|error| error.to_string());
         let cleanup_directory = self.native_update_download_directory();
         let runtime = self.forwarding_runtime.clone();
         self.settings_workspace.update(cx, |settings, cx| {
@@ -870,14 +759,6 @@ impl WorkspaceApp {
             .unwrap_or_else(|| std::path::PathBuf::from("updates"))
     }
 
-    pub(in crate::workspace) fn native_update_is_portable(&self, cx: &App) -> bool {
-        // The portable runtime marker is the persisted source of truth. The
-        // cached snapshot avoids repeating filesystem detection when available.
-        self.settings_workspace
-            .read(cx)
-            .portable_mode()
-            .unwrap_or_else(|| oxideterm_portable_runtime::is_portable_mode().unwrap_or(false))
-    }
 }
 
 pub(in crate::workspace) fn native_update_progress_ratio(

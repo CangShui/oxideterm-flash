@@ -93,7 +93,7 @@ impl HostToolsEntity {
                     .child(self.render_connection_switcher(
                         &connections,
                         selected_id,
-                        !self.log_snapshot_in_flight(),
+                        !self.log_snapshot_running(selected_id),
                         tokens,
                         mono_font_family.clone(),
                         selectable_text,
@@ -112,7 +112,7 @@ impl HostToolsEntity {
             )
             .child(self.render_host_log_list(
                 rows,
-                self.log_snapshot_in_flight(),
+                self.log_snapshot_running(selected_id),
                 status,
                 tokens,
                 i18n,
@@ -275,7 +275,7 @@ impl HostToolsEntity {
                         rgb(theme.text),
                         oxideterm_gpui_ui::button::IconButtonOptions {
                             size: 24.0,
-                            disabled: self.log_snapshot_in_flight(),
+                            disabled: self.log_snapshot_running(selected_connection_id),
                             has_background: true,
                             background: Some(rgb(theme.bg_hover)),
                             hover_background: Some(rgb(theme.bg_panel)),
@@ -562,6 +562,7 @@ impl HostToolsEntity {
         let theme = tokens.ui;
         let level_label = i18n.t(log_level_label_key(&entry.level));
         div()
+            .id(("host-log-row", index))
             .w_full()
             .min_w_0()
             .border_b_1()
@@ -761,19 +762,15 @@ impl HostToolsEntity {
         &self,
         connection_id: &str,
     ) -> Option<ResourceLogSnapshot> {
-        self.host_logs
-            .snapshot
-            .as_ref()
-            .filter(|_| self.host_logs.snapshot_connection_id.as_deref() == Some(connection_id))
-            .cloned()
+        self.host_logs.snapshots.get(connection_id).cloned()
     }
 
     pub(super) fn log_preset(&self) -> LogPreset {
         self.host_logs.preset
     }
 
-    pub(super) fn log_snapshot_in_flight(&self) -> bool {
-        self.host_logs.snapshot_in_flight
+    pub(super) fn log_snapshot_running(&self, connection_id: &str) -> bool {
+        self.host_logs.running.contains_key(connection_id)
     }
 
     pub(super) fn log_list_state(&self) -> ListState {
@@ -816,13 +813,14 @@ impl HostToolsEntity {
         feedback: HostSnapshotFeedback,
         monitoring_enabled: bool,
         runtime: tokio::runtime::Handle,
-        failure_fallback: String,
         cx: &mut Context<Self>,
     ) -> Vec<HostToolsNotice> {
         if !monitoring_enabled {
             return Vec::new();
         }
-        if self.host_logs.snapshot_in_flight {
+        if self.host_logs.running.contains_key(&connection_id) {
+            // Only a same-host duplicate is coalesced; another host's capture
+            // must not block this host from fetching its own frozen view.
             return feedback
                 .should_toast()
                 .then_some(HostToolsNotice::LogSnapshotAlreadyRunning)
@@ -843,15 +841,20 @@ impl HostToolsEntity {
         ) {
             Ok(command) => command,
             Err(error) => {
-                self.host_logs.snapshot_connection_id = Some(connection_id);
-                self.host_logs.snapshot = Some(ResourceLogSnapshot {
-                    status: ResourceLogStatus::Error { message: error },
-                    entries: Vec::new(),
-                });
+                // The builder error is our own constant text, safe to surface.
+                self.host_logs.snapshots.insert(
+                    connection_id,
+                    ResourceLogSnapshot {
+                        status: ResourceLogStatus::Error {
+                            message: error.clone(),
+                        },
+                        entries: Vec::new(),
+                    },
+                );
                 cx.notify();
                 return feedback
                     .should_toast()
-                    .then_some(HostToolsNotice::LogSnapshotFailed)
+                    .then(|| HostToolsNotice::LogSnapshotFailed { reason: error })
                     .into_iter()
                     .collect();
             }
@@ -866,11 +869,10 @@ impl HostToolsEntity {
             preset: self.host_logs.preset,
             limit: HOST_LOG_SNAPSHOT_LIMIT,
             feedback,
-            failure_fallback,
         };
-        self.host_logs.snapshot_connection_id = Some(connection_id);
-        self.host_logs.running = Some(request.clone());
-        self.host_logs.snapshot_in_flight = true;
+        self.host_logs
+            .running
+            .insert(connection_id.clone(), request.clone());
         let spawned = self.spawn_log_snapshot_capture(
             command.command,
             request,
@@ -879,8 +881,7 @@ impl HostToolsEntity {
             runtime,
         );
         if !spawned {
-            self.host_logs.snapshot_in_flight = false;
-            self.host_logs.running = None;
+            self.host_logs.running.remove(&connection_id);
             return feedback
                 .should_toast()
                 .then_some(HostToolsNotice::LogConnectionMissing)
@@ -891,28 +892,68 @@ impl HostToolsEntity {
         notices
     }
 
+    /// Maps remote tool stderr into fixed, secret-free failure categories.
+    /// Only keyword matching happens here; the remote text itself is dropped.
+    fn classify_log_failure(messages: &HostToolsMessages, remote_detail: &str) -> String {
+        let detail = remote_detail.to_lowercase();
+        if detail.contains("permission denied")
+            || detail.contains("access denied")
+            || detail.contains("systemd-journal")
+        {
+            messages.log_failure_permission_denied.clone()
+        } else if detail.contains("no journal files")
+            || detail.contains("no machine-id")
+            || detail.contains("cannot open journal")
+        {
+            messages.log_failure_journal_unavailable.clone()
+        } else if detail.contains("not found")
+            || detail.contains("no such file")
+            || detail.contains("command not found")
+            || detail.contains("not recognized")
+        {
+            messages.log_failure_tool_missing.clone()
+        } else {
+            messages.log_failure_tool_error.clone()
+        }
+    }
+
     pub(in crate::workspace::connection_monitor) fn finish_host_logs_snapshot(
         &mut self,
         mut delivery: HostLogSnapshotDelivery,
         cx: &mut Context<Self>,
     ) {
-        if self.host_logs.running.as_ref() != Some(&delivery.request) {
+        if self
+            .host_logs
+            .running
+            .get(&delivery.request.connection_id)
+            != Some(&delivery.request)
+        {
             if let Ok(output) = delivery.result.as_mut() {
                 zeroize_host_snapshot_output(output);
             }
             return;
         }
+        let Some(messages) = self.messages.clone() else {
+            // Localized strings are installed once the workspace i18n is up;
+            // deliveries arriving before that have nothing useful to show.
+            return;
+        };
         let feedback = delivery.request.feedback;
-        let failure_fallback = delivery.request.failure_fallback.clone();
-        self.host_logs.snapshot_in_flight = false;
-        self.host_logs.running = None;
+        // A capture finishing for an inactive host refreshes only that host's
+        // frozen slot; the visible host's snapshot stays untouched.
+        let connection_id = delivery.request.connection_id.clone();
+        self.host_logs.running.remove(&connection_id);
         match delivery.result {
             Ok(mut output) if output.exit_code.unwrap_or(0) == 0 => {
                 let mut snapshot = parse_log_snapshot(&output.stdout);
-                if matches!(&snapshot.status, ResourceLogStatus::Error { .. }) {
-                    snapshot.status = ResourceLogStatus::Error {
-                        message: failure_fallback,
-                    };
+                let mut failure_reason = None;
+                if let ResourceLogStatus::Error { message } = &snapshot.status {
+                    // The marker detail is remote tool stderr. It is classified
+                    // locally into fixed, secret-free categories; the raw text
+                    // never reaches monitor state or the UI.
+                    let classified = Self::classify_log_failure(&messages, message);
+                    failure_reason = Some(classified.clone());
+                    snapshot.status = ResourceLogStatus::Error { message: classified };
                 }
                 zeroize_host_snapshot_output(&mut output);
                 if feedback.should_toast() {
@@ -927,44 +968,62 @@ impl HostToolsEntity {
                         ResourceLogStatus::Unavailable => {
                             cx.emit(HostToolsEvent::ShowNotice(HostToolsNotice::LogUnavailable));
                         }
-                        ResourceLogStatus::Error { .. } => {
+                        ResourceLogStatus::Error { message } => {
                             cx.emit(HostToolsEvent::ShowNotice(
-                                HostToolsNotice::LogSnapshotFailed,
+                                HostToolsNotice::LogSnapshotFailed {
+                                    reason: message.clone(),
+                                },
                             ));
                         }
                         ResourceLogStatus::Unknown => {}
                     }
                 }
-                self.host_logs.snapshot_connection_id = Some(delivery.request.connection_id);
-                self.host_logs.snapshot = Some(snapshot);
+                let _ = &failure_reason;
+                self.host_logs.snapshots.insert(connection_id, snapshot);
             }
             Ok(mut output) => {
+                let exit_code = output.exit_code.map(|code| code.to_string());
                 zeroize_host_snapshot_output(&mut output);
-                self.host_logs.snapshot_connection_id = Some(delivery.request.connection_id);
-                self.host_logs.snapshot = Some(ResourceLogSnapshot {
-                    status: ResourceLogStatus::Error {
-                        message: failure_fallback,
+                // Exit codes are safe to surface; stderr content is not.
+                let message = match exit_code {
+                    Some(code) => messages
+                        .log_failure_exit_code
+                        .replace("{{code}}", &code),
+                    None => messages.log_failure_tool_error.clone(),
+                };
+                self.host_logs.snapshots.insert(
+                    connection_id,
+                    ResourceLogSnapshot {
+                        status: ResourceLogStatus::Error {
+                            message: message.clone(),
+                        },
+                        entries: Vec::new(),
                     },
-                    entries: Vec::new(),
-                });
+                );
                 if feedback.should_toast() {
-                    cx.emit(HostToolsEvent::ShowNotice(
-                        HostToolsNotice::LogSnapshotFailed,
-                    ));
+                    cx.emit(HostToolsEvent::ShowNotice(HostToolsNotice::LogSnapshotFailed {
+                        reason: message,
+                    }));
                 }
             }
-            Err(()) => {
-                self.host_logs.snapshot_connection_id = Some(delivery.request.connection_id);
-                self.host_logs.snapshot = Some(ResourceLogSnapshot {
-                    status: ResourceLogStatus::Error {
-                        message: failure_fallback,
+            Err(failure) => {
+                let message = match failure {
+                    HostCaptureFailure::Timeout => messages.log_failure_timeout.clone(),
+                    HostCaptureFailure::Connection => messages.log_failure_connection.clone(),
+                };
+                self.host_logs.snapshots.insert(
+                    connection_id,
+                    ResourceLogSnapshot {
+                        status: ResourceLogStatus::Error {
+                            message: message.clone(),
+                        },
+                        entries: Vec::new(),
                     },
-                    entries: Vec::new(),
-                });
+                );
                 if feedback.should_toast() {
-                    cx.emit(HostToolsEvent::ShowNotice(
-                        HostToolsNotice::LogSnapshotFailed,
-                    ));
+                    cx.emit(HostToolsEvent::ShowNotice(HostToolsNotice::LogSnapshotFailed {
+                        reason: message,
+                    }));
                 }
             }
         }

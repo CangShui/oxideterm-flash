@@ -7,7 +7,7 @@ mod platform;
 mod temporary;
 
 use std::{
-    fs::{self, File},
+    fs,
     io::{self, Write},
     path::Path,
 };
@@ -64,7 +64,13 @@ pub fn durable_replace(source: &Path, destination: &Path) -> io::Result<()> {
     }
 
     // Sync the caller-provided source before making it visible at the destination.
-    File::open(source)?.sync_all()?;
+    // FlushFileBuffers on a read-only handle fails with access denied on Windows,
+    // so the durability flush needs write access to the source file.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(source)?
+        .sync_all()?;
     replace_and_sync_parent(source, destination, destination_parent)
 }
 

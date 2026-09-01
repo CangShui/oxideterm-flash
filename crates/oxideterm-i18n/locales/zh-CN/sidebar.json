@@ -4,45 +4,28 @@
       "expand": "展开侧边栏",
       "collapse": "折叠侧边栏",
       "new_local_terminal": "新建本地终端",
-      "open_pylance_guide": "打开 Pylance 指南"
+      "new_folder": "新建会话文件夹",
+      "import_connections": "导入连接",
+      "export_connections": "导出连接"
     },
     "panels": {
       "sessions": "活动会话",
-      "saved": "保存的连接",
-      "saved_title": "保存的连接",
       "sftp": "文件传输 (SFTP)",
       "sftp_sessions": "SFTP 会话",
-      "files": "文件管理器",
-      "forwards": "端口转发",
-      "forwards_title": "端口转发",
-      "runtime": "仪表盘",
-      "runtime_description": "监控连接使用情况和拓扑",
-      "runtime_overview": "概览",
-      "connection_pool": "连接池",
       "connection_monitor": "连接监控",
-      "connection_matrix": "连接矩阵",
-      "settings": "设置",
-      "no_saved_connections": "无保存的连接",
-      "no_active_sessions": "无活动会话",
-      "no_connected_sessions": "无已连接会话",
-      "import_tooltip": "从 .oxide 文件导入",
-      "export_tooltip": "导出到 .oxide 文件",
       "host_tools": "主机工具",
       "host_monitor": "监控",
+      "host_files": "远程文件",
       "gpu": "GPU / NPU",
       "processes": "进程",
       "services": "服务",
       "logs": "日志",
-      "tmux": "tmux",
+      "tmux": "虚拟终端",
       "docker": "Docker",
-      "tmux_management": "tmux 管理",
+      "tmux_management": "虚拟终端管理",
       "docker_management": "Docker 管理",
-      "session_manager": "会话管理器",
       "open_session_manager": "打开会话管理器",
       "activity": "活动",
-      "event_log": "事件日志",
-      "notifications": "通知中心",
-      "saved_connections": "保存的连接",
       "forwarding": "端口转发",
       "ports": "端口",
       "schedules": "计划任务",
@@ -51,16 +34,9 @@
     },
     "tooltips": {
       "settings": "设置",
-      "switch_tree": "切换到树形视图",
-      "switch_focus": "切换到聚焦视图",
       "new_connection": "新建连接",
-      "lock_app": "锁定 OxideTerm",
-      "setup_app_lock": "设置应用锁",
       "collapse": "折叠"
     },
-    "active_sessions": "活动会话",
-    "no_sessions": "暂无会话",
-    "add_new_connection": "点击 + 添加新连接",
     "host_gpu": {
       "count_suffix": "个加速设备",
       "refresh_interval": "每 2 秒更新",
@@ -127,7 +103,6 @@
         "unknown": "未知"
       },
       "actions": {
-        "column": "操作",
         "term": "终止",
         "kill": "强杀",
         "stop": "暂停",
@@ -297,6 +272,15 @@
       "empty": "没有匹配的日志",
       "unavailable": "此主机上日志不可用。",
       "error": "日志命令失败：{{error}}",
+      "failure": {
+        "permission_denied": "权限不足，读取系统日志需要 root 或加入 systemd-journal 组",
+        "journal_unavailable": "此主机上没有可读的系统日志文件",
+        "tool_missing": "远程主机缺少日志工具",
+        "tool_error": "远程日志命令失败，详细信息已被隐藏",
+        "exit_code": "远程命令以退出码 {{code}} 退出",
+        "timeout": "日志命令执行超时",
+        "connection": "SSH 连接不可用，无法执行日志命令"
+      },
       "capability": {
         "full": "完整支持",
         "partial": "部分支持",
@@ -338,6 +322,42 @@
         "follow_opened": "正在追踪 {{preset}} 日志。",
         "partial_support": "{{os}} 上的主机日志为部分支持。",
         "unknown_error": "未知错误"
+      }
+    },
+    "host_virtual_terminal": {
+      "engines": {
+        "screen": "Screen",
+        "tmux": "tmux"
+      },
+      "both_unavailable": "此主机 screen/tmux 均不可用。",
+      "screen_unavailable": "此主机上 screen 不可用。",
+      "screen_empty": "此主机未运行 Screen 会话。",
+      "loading_screen": "正在扫描 Screen 会话...",
+      "error_screen": "Screen 命令失败：{{error}}",
+      "actions": {
+        "refresh_screen": "刷新 Screen"
+      },
+      "confirm_screen_action_title": "确认 Screen 操作",
+      "tmux_unavailable": "此主机上 tmux 不可用。",
+      "search_screen_placeholder": "搜索 Screen...",
+      "new_screen_session_title": "新建 Screen 会话",
+      "new_screen_session_name": "新会话",
+      "screen_attach_title": "Screen：{{name}}",
+      "confirm": {
+        "kill_screen_session_desc": "要杀死 Screen 会话 {{id}}（{{name}}）吗？此会话中的所有进程都会被终止。"
+      },
+      "toast": {
+        "screen_attach_opened": "正在连接到 {{name}}。",
+        "new_screen_session_opened": "正在打开 {{name}}。",
+        "screen_action_succeeded": "Screen 对 {{target}} 的操作已完成。"
+      },
+      "input": {
+        "rename_screen_session_title": "重命名 Screen 会话",
+        "rename_screen_session_desc": "为 Screen 会话 {{target}} 设置新名称。",
+        "rename_screen_session_placeholder": "会话名称",
+        "send_screen_command_title": "向 Screen 会话发送命令",
+        "send_screen_command_desc": "向 Screen 会话 {{target}} 发送一条命令并回车。",
+        "send_screen_command_placeholder": "要发送的命令"
       }
     },
     "host_tmux": {
@@ -385,8 +405,7 @@
         "cancel": "取消",
         "kill_session_desc": "要杀死 tmux 会话 {{id}}（{{name}}）吗？此会话中的所有窗口和 pane 都会被终止。",
         "kill_window_desc": "要杀掉会话 {{name}} 中的 tmux 窗口 {{target}} 吗？该窗口内所有 Pane 都会被终止。",
-        "kill_pane_desc": "要杀掉会话 {{name}} 中的 tmux Pane {{target}} 吗？其中运行的命令会被终止。",
-        "action_desc": "要对会话 {{name}} 中的 {{target}} 执行 tmux 操作吗？"
+        "kill_pane_desc": "要杀掉会话 {{name}} 中的 tmux Pane {{target}} 吗？其中运行的命令会被终止。"
       },
       "toast": {
         "snapshot_already_running": "已有 tmux 快照正在执行。",
@@ -719,7 +738,6 @@
         "inspect_unsupported": "暂不支持 {{manager}} 的包详情命令。",
         "inspect_opened": "已打开 {{name}} 的详情。",
         "copied_name": "已复制 {{name}}。",
-        "partial_support": "{{os}} 上的软件包检查为只读支持。",
         "unknown_error": "未知的软件包扫描错误。"
       }
     }
@@ -729,56 +747,34 @@
       "no_sessions": "暂无会话",
       "click_to_add": "点击 + 添加新连接",
       "actions": {
-        "new_terminal": "新建终端",
-        "sftp": "SFTP",
-        "port_forwarding": "端口转发",
-        "disconnect": "断开",
-        "reconnect": "重新连接",
-        "edit_and_reconnect": "修改并重连",
-        "remove_session": "移除会话",
-        "cancel_reconnect": "取消重连",
-        "drill_in": "钻入 (下一跳)",
-        "saved_next_hop": "使用已保存连接作为下一跳...",
-        "connect": "连接",
-        "save_as_connection": "保存为连接..."
+        "cancel_reconnect": "取消重连"
       }
     },
-    "focused_list": {
-      "all_servers": "全部服务器",
-      "child": "子节点",
-      "children": "子节点",
-      "no_child_nodes": "此节点没有子节点",
-      "no_servers": "暂无服务器",
-      "add_by_drilling": "您可以通过钻取添加子节点",
-      "click_to_add": "点击 + 添加新连接",
-      "terminal": "终端 #{{number}}",
-      "close_terminal": "关闭终端"
-    },
-    "actions": {
-      "connect": "连接",
-      "new_terminal": "新建终端",
-      "sftp_explorer": "SFTP 文件管理器",
-      "port_forwarding": "端口转发",
-      "disconnect": "断开连接",
-      "reconnect": "重新连接",
-      "drill_in": "钻入 (下一跳)",
-      "saved_next_hop": "使用已保存连接作为下一跳...",
-      "save_as_connection": "保存为连接..."
-    },
     "saved_next_hop": {
-      "title": "使用已保存连接作为下一跳",
-      "description": "选择一个已保存连接，接到 {{host}} 下方。",
-      "empty": "暂无可用的已保存连接。",
-      "cancel": "取消",
-      "proxy_chain_badge": "{{count}} 跳",
-      "parent_not_ready": "请先连接父节点，再添加已保存的下一跳。",
-      "not_found": "未找到该已保存连接。",
-      "missing_credentials": "此已保存连接缺少连接所需的凭据。",
-      "materialize_failed": "无法将该已保存连接添加到会话树。"
+      "missing_credentials": "此已保存连接缺少连接所需的凭据。"
     },
-    "breadcrumb": {
-      "back_to_root": "返回根视图",
-      "all_servers": "全部服务器"
+    "context": {
+      "edit": "编辑",
+      "duplicate": "复制会话",
+      "move_to_folder": "移动到文件夹",
+      "delete": "删除会话",
+      "rename_folder": "重命名文件夹",
+      "delete_folder": "删除文件夹"
+    },
+    "dialog": {
+      "new_folder_title": "新建会话文件夹",
+      "new_folder_placeholder": "请输入文件夹名称",
+      "move_folder_title": "移动会话到文件夹",
+      "no_folder": "根目录 (不分类)",
+      "move_success": "已移动到文件夹 {{group}}",
+      "folder_created": "已创建文件夹 {{group}}",
+      "duplicate_success": "已复制会话 {{name}}",
+      "delete_success": "已删除会话 {{name}}",
+      "rename_folder_title": "重命名文件夹",
+      "delete_folder_title": "删除文件夹",
+      "delete_folder_confirm": "确定删除文件夹 \"{{name}}\" 吗？该文件夹及其子文件夹中的已保存会话将移动到根目录（不分类）。",
+      "folder_renamed": "已重命名文件夹 {{group}}",
+      "folder_deleted": "已删除文件夹 {{group}}"
     }
   }
 }

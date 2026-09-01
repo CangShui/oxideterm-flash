@@ -58,8 +58,12 @@ pub(crate) fn should_blink_cursor_for_mode(
     terminal_enabled: bool,
     alt_screen: bool,
     cursor_shape: TerminalCursorShape,
+    reduced_motion: bool,
 ) -> bool {
     focused
+        // Reduced or disabled motion profiles keep the cursor solid: blinking
+        // is continuous decorative motion with no informational value.
+        && !reduced_motion
         && !alt_screen
         && cursor_shape != TerminalCursorShape::Hidden
         && match mode {

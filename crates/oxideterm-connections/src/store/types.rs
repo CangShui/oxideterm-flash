@@ -2,7 +2,6 @@ use crate::{SecretString, keychain::ConnectionKeychain};
 
 pub const CONFIG_VERSION: u32 = 1;
 pub const CONNECTION_TOMBSTONE_RETENTION_DAYS: i64 = 30;
-pub const LOCAL_SHELL_PRIVILEGE_CONNECTION_ID: &str = "local-shell:default";
 pub const GLOBAL_UPSTREAM_PROXY_PASSWORD_KEYCHAIN_ID: &str = "oxide_global_upstream_proxy_password";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -457,36 +456,6 @@ impl fmt::Debug for SavedProxyCommand {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrivilegeCredentialKind {
-    SudoPassword,
-    SuPassword,
-    CustomPrompt,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SavedPrivilegeCredential {
-    pub id: String,
-    pub connection_id: String,
-    pub label: String,
-    pub kind: PrivilegeCredentialKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub username_hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prompt_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keychain_id: Option<String>,
-    #[serde(default, skip)]
-    pub plaintext_secret: Option<SecretString>,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_true")]
-    pub require_click_to_send: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyHopInfo {
     pub host: String,
@@ -582,18 +551,10 @@ pub struct SavedConnection {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_connect_command: Option<String>,
-    /// Privilege helper metadata is persisted with the connection, but the
-    /// secret value lives only in the dedicated keychain namespace.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub privilege_credentials: Vec<SavedPrivilegeCredential>,
 }
 
 fn default_port() -> u16 {
     22
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_proxy_remote_dns() -> bool {
@@ -704,41 +665,6 @@ impl ConnectionInfo {
             self.group.as_deref().unwrap_or_default(),
             self.tags.join(" ")
         )
-    }
-}
-
-#[derive(Clone)]
-pub struct SavePrivilegeCredentialRequest {
-    pub connection_id: String,
-    pub credential_id: Option<String>,
-    pub label: String,
-    pub kind: PrivilegeCredentialKind,
-    pub username_hint: Option<String>,
-    pub prompt_patterns: Vec<String>,
-    /// UI drafts become SecretString at the store boundary. The value is stored
-    /// in keychain and never serialized into SavedConnection.
-    pub secret: Option<SecretString>,
-    pub enabled: bool,
-    pub require_click_to_send: bool,
-}
-
-impl fmt::Debug for SavePrivilegeCredentialRequest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // This request crosses the UI-to-store secret boundary. Keep Debug
-        // useful for metadata while never depending on SecretString internals
-        // to redact the cleartext privilege credential.
-        formatter
-            .debug_struct("SavePrivilegeCredentialRequest")
-            .field("connection_id", &self.connection_id)
-            .field("credential_id", &self.credential_id)
-            .field("label", &self.label)
-            .field("kind", &self.kind)
-            .field("username_hint", &self.username_hint)
-            .field("prompt_patterns", &self.prompt_patterns)
-            .field("secret", &self.secret.as_ref().map(|_| "[redacted secret]"))
-            .field("enabled", &self.enabled)
-            .field("require_click_to_send", &self.require_click_to_send)
-            .finish()
     }
 }
 
@@ -1555,11 +1481,7 @@ pub struct ConnectionStoreData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_desktop_profiles: Vec<RemoteDesktopProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub local_privilege_credentials: Vec<SavedPrivilegeCredential>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_keychain_cleanup: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_privilege_keychain_cleanup: Vec<String>,
 }
 
 impl Default for ConnectionStoreData {
@@ -1575,9 +1497,7 @@ impl Default for ConnectionStoreData {
             telnet_profiles: Vec::new(),
             standalone_sftp_profiles: Vec::new(),
             remote_desktop_profiles: Vec::new(),
-            local_privilege_credentials: Vec::new(),
             pending_keychain_cleanup: Vec::new(),
-            pending_privilege_keychain_cleanup: Vec::new(),
         }
     }
 }
@@ -1725,7 +1645,6 @@ pub struct ConnectionStore {
     storage_format: ConnectionStoreStorageFormat,
     keychain: ConnectionKeychain,
     managed_keychain: ConnectionKeychain,
-    privilege_keychain: ConnectionKeychain,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1780,6 +1699,5 @@ pub struct ManagedSshKeyDeleteResult {
 struct StagedImportedConnection {
     id: String,
     touched_keychain_ids: Vec<String>,
-    touched_privilege_keychain_ids: Vec<String>,
     stale_old_keychain_ids: Vec<String>,
 }

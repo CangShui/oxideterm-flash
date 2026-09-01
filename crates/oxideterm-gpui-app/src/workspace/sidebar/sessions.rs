@@ -1,4 +1,28 @@
+use std::{
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
+
 use super::*;
+use crate::workspace::{
+    browser_behavior,
+    session_icons::{default_connection_transport_icon, session_icon_from_id},
+};
+use gpui::{
+    App, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement, Styled, Window, div, prelude::*, px, rgb, rgba,
+};
+use oxideterm_connections::{ConnectionTransport, SavedConnection};
+use oxideterm_gpui_terminal::TerminalNoticeVariant;
+use oxideterm_gpui_ui::{
+    button::ButtonTone,
+    context_menu::{
+        ContextMenuItemKind, context_menu_content, context_menu_event_boundary,
+        context_menu_item, context_menu_separator,
+    },
+    modal::{dismissible_dialog_backdrop, overlay_content_boundary},
+    text_input::{TextInputView, text_input, text_input_anchor_probe},
+};
 use oxideterm_remote_desktop::{RemoteDesktopProtocol, RemoteDesktopSessionStatus};
 use oxideterm_terminal::TerminalSessionKind;
 
@@ -8,16 +32,6 @@ enum StandaloneActiveSessionKind {
     Serial,
     Rdp,
     Vnc,
-}
-
-impl StandaloneActiveSessionKind {
-    fn icon(self) -> LucideIcon {
-        match self {
-            Self::Telnet => LucideIcon::Terminal,
-            Self::Serial => LucideIcon::Cable,
-            Self::Rdp | Self::Vnc => LucideIcon::Monitor,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -32,6 +46,17 @@ struct StandaloneActiveSession {
     target: StandaloneActiveSessionTarget,
 }
 
+/// Pending saved assets use distinct stores and launchers; keeping their kind
+/// on the row prevents the SSH-only connection flow from handling them.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::workspace) enum PendingSessionProfileKind {
+    Ssh,
+    Telnet,
+    Serial,
+    Rdp,
+    Vnc,
+}
+
 #[derive(Clone)]
 pub(in crate::workspace) struct ActiveSessionSidebarRow {
     node_id: NodeId,
@@ -41,11 +66,19 @@ pub(in crate::workspace) struct ActiveSessionSidebarRow {
     host: String,
     username: String,
     port: u16,
+    group: Option<String>,
     node_view: ActiveSessionNode,
     depth: usize,
     is_last: bool,
     has_children: bool,
     standalone_session: Option<StandaloneActiveSession>,
+    pending_profile: Option<PendingSessionProfileKind>,
+    /// A folder header row groups child saved-connection rows; clicking it
+    /// toggles the child rows instead of opening a connection.
+    is_folder: bool,
+    /// Child rows carry their folder's node id so the virtual list can keep
+    /// rows collapsed when the folder node is absent from the rows cache.
+    parent_is_folder: bool,
 }
 
 fn standalone_terminal_kind(kind: TerminalSessionKind) -> Option<StandaloneActiveSessionKind> {
@@ -61,6 +94,27 @@ fn standalone_remote_desktop_kind(protocol: RemoteDesktopProtocol) -> Standalone
         RemoteDesktopProtocol::Rdp => StandaloneActiveSessionKind::Rdp,
         RemoteDesktopProtocol::Vnc => StandaloneActiveSessionKind::Vnc,
     }
+}
+
+fn standalone_session_icon(kind: StandaloneActiveSessionKind) -> LucideIcon {
+    let transport = match kind {
+        StandaloneActiveSessionKind::Telnet => ConnectionTransport::Telnet,
+        StandaloneActiveSessionKind::Serial => ConnectionTransport::Serial,
+        StandaloneActiveSessionKind::Rdp => ConnectionTransport::Rdp,
+        StandaloneActiveSessionKind::Vnc => ConnectionTransport::Vnc,
+    };
+    default_connection_transport_icon(transport)
+}
+
+fn pending_profile_icon(kind: PendingSessionProfileKind) -> LucideIcon {
+    let transport = match kind {
+        PendingSessionProfileKind::Ssh => ConnectionTransport::Ssh,
+        PendingSessionProfileKind::Telnet => ConnectionTransport::Telnet,
+        PendingSessionProfileKind::Serial => ConnectionTransport::Serial,
+        PendingSessionProfileKind::Rdp => ConnectionTransport::Rdp,
+        PendingSessionProfileKind::Vnc => ConnectionTransport::Vnc,
+    };
+    default_connection_transport_icon(transport)
 }
 
 fn terminal_lifecycle_readiness(lifecycle: &TerminalLifecycle) -> ActiveSessionReadiness {
@@ -88,68 +142,108 @@ fn standalone_session_click_should_focus(click_count: usize) -> bool {
     click_count >= 2
 }
 
-fn session_status_can_remove_from_sidebar(status: ActiveSessionStatus) -> bool {
-    // Connected and connecting nodes still own live connection work. Callers
-    // also keep an active reconnect job out of this inactive-state action.
-    matches!(
-        status,
-        ActiveSessionStatus::Error | ActiveSessionStatus::Idle
-    )
+fn active_session_readiness(readiness: &NodeReadiness) -> ActiveSessionReadiness {
+    match readiness {
+        NodeReadiness::Ready => ActiveSessionReadiness::Ready,
+        NodeReadiness::Connecting => ActiveSessionReadiness::Connecting,
+        NodeReadiness::Error => ActiveSessionReadiness::Error,
+        NodeReadiness::Disconnected => ActiveSessionReadiness::Disconnected,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(in crate::workspace) struct SessionStatusStyle {
+    pub icon: LucideIcon,
+    pub text_color: u32,
+    pub dot_color: u32,
+    pub opacity: f32,
+    pub ring: bool,
 }
 
 impl WorkspaceApp {
-    fn queue_ssh_terminal_tab_for_sidebar_node(
-        &mut self,
-        node_id: NodeId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
-        let title = self
-            .ssh_nodes
-            .get(&node_id)
-            .map(|node| node.title.clone())
-            .ok_or_else(|| anyhow::anyhow!("SSH node {} not found", node_id.0))?;
-        if self.node_is_ready_for_terminal(&node_id) {
-            return self.queue_ssh_terminal_tab_for_existing_node(node_id, None, title, window, cx);
-        }
+    fn saved_profile_icon(
+        &self,
+        profile_id: &str,
+        profile_kind: PendingSessionProfileKind,
+    ) -> LucideIcon {
+        let stored_icon = match profile_kind {
+            PendingSessionProfileKind::Ssh => self
+                .connection_store
+                .get(profile_id)
+                .and_then(|profile| profile.icon.as_deref()),
+            PendingSessionProfileKind::Telnet => self
+                .connection_store
+                .telnet_profiles()
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .and_then(|profile| profile.icon.as_deref()),
+            PendingSessionProfileKind::Serial => self
+                .connection_store
+                .serial_profiles()
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .and_then(|profile| profile.icon.as_deref()),
+            PendingSessionProfileKind::Rdp | PendingSessionProfileKind::Vnc => self
+                .connection_store
+                .remote_desktop_profiles()
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .and_then(|profile| profile.icon.as_deref()),
+        };
+        stored_icon
+            .and_then(|icon| session_icon_from_id(Some(icon)))
+            .unwrap_or_else(|| pending_profile_icon(profile_kind))
+    }
 
-        let config = self
-            .node_router
-            .node_runtime_snapshot(&node_id)
-            .map(|snapshot| snapshot.config)
-            .ok_or_else(|| anyhow::anyhow!("SSH node {} has no runtime config", node_id.0))?;
-        let saved_connection_id = self
-            .ssh_nodes
-            .get(&node_id)
-            .and_then(|node| node.saved_connection_id.clone());
-        // Keep secret-bearing config out of virtual rows and retained listeners.
-        // A disconnected node copies it only at the explicit connect action.
-        self.queue_ssh_terminal_tab_for_node(
-            node_id,
-            config,
-            title,
-            saved_connection_id,
-            window,
-            cx,
-        )
+    pub(in crate::workspace) fn session_node_status(
+        &self,
+        status: ActiveSessionStatus,
+    ) -> SessionStatusStyle {
+        let theme = self.tokens.ui;
+        match status {
+            ActiveSessionStatus::Active | ActiveSessionStatus::Connected => SessionStatusStyle {
+                icon: LucideIcon::Server,
+                text_color: theme.text,
+                dot_color: theme.accent,
+                opacity: 1.0,
+                ring: false,
+            },
+            ActiveSessionStatus::Connecting => SessionStatusStyle {
+                icon: LucideIcon::LoaderCircle,
+                text_color: theme.text,
+                dot_color: theme.accent,
+                opacity: 1.0,
+                ring: true,
+            },
+            ActiveSessionStatus::Error => SessionStatusStyle {
+                icon: LucideIcon::Server,
+                text_color: theme.text,
+                dot_color: theme.error,
+                opacity: 1.0,
+                ring: false,
+            },
+            ActiveSessionStatus::Idle => SessionStatusStyle {
+                icon: LucideIcon::Server,
+                text_color: theme.text,
+                dot_color: theme.text_muted,
+                opacity: 1.0,
+                ring: false,
+            },
+        }
     }
 
     pub(in crate::workspace) fn render_active_sessions_sidebar_content(
         &mut self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.active_session_sidebar_view_mode == ActiveSessionSidebarViewMode::Focus {
-            return self.render_active_sessions_focus_sidebar_content(cx);
-        }
-
         let rows = self.active_session_sidebar_rows(cx);
         if rows.is_empty() {
             return self.render_empty_sessions_sidebar_content(cx);
         }
 
-        self.sync_active_session_sidebar_list_state(&rows, ActiveSessionSidebarViewMode::Tree, cx);
+        self.sync_active_session_sidebar_list_state(&rows, cx);
         let state = self.active_session_sidebar_list_state.clone();
-        let spec = self.active_session_sidebar_list_spec(ActiveSessionSidebarViewMode::Tree);
+        let spec = self.active_session_sidebar_list_spec();
         let workspace = cx.entity();
         div()
             .id("active-sessions-sidebar-scroll")
@@ -169,111 +263,329 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
-    pub(in crate::workspace) fn render_active_sessions_focus_sidebar_content(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let rows = self.active_session_sidebar_rows(cx);
-        let focused_node_id = self.effective_active_session_focus_node_id(&rows);
-        self.active_session_sidebar_focused_node_id = focused_node_id.clone();
-        let visible_rows = self.active_session_focus_rows(&rows, focused_node_id.as_ref());
-        self.sync_active_session_sidebar_list_state(
-            &visible_rows,
-            ActiveSessionSidebarViewMode::Focus,
-            cx,
-        );
-
-        let state = self.active_session_sidebar_list_state.clone();
-        let spec = self.active_session_sidebar_list_spec(ActiveSessionSidebarViewMode::Focus);
-        let workspace = cx.entity();
-        div()
-            .id("active-sessions-focus-sidebar")
-            .flex_1()
-            .min_h(px(0.0))
-            .w_full()
-            .pt(px(PRIMARY_SIDEBAR_CONTENT_TOP_INSET))
-            .flex()
-            .flex_col()
-            .child(self.render_active_session_focus_breadcrumb(&rows, focused_node_id.as_ref(), cx))
-            .child(self.render_active_session_focus_location_header(
-                &rows,
-                focused_node_id.as_ref(),
-                visible_rows.len(),
-                cx,
-            ))
-            .child(
-                div()
-                    .id("active-sessions-focus-list")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .w_full()
-                    .py_2()
-                    .child(if visible_rows.is_empty() {
-                        self.render_active_session_focus_empty(focused_node_id.as_ref(), cx)
-                    } else {
-                        tauri_virtual_list(state, spec, move |index, _window, cx| {
-                            workspace.update(cx, |this, cx| {
-                                this.render_active_session_focus_list_item(index, cx)
-                            })
-                        })
-                        .into_any_element()
-                    }),
-            )
-            .into_any_element()
-    }
-
     pub(in crate::workspace) fn active_session_sidebar_rows(
         &self,
         cx: &App,
     ) -> Vec<ActiveSessionSidebarRow> {
-        let mut tree_nodes = self.node_router.flatten_tree();
-        let flat_node_child_counts = tree_nodes
-            .iter()
-            .filter_map(|node| node.parent_id.as_ref())
-            .fold(HashMap::<String, usize>::new(), |mut counts, parent_id| {
-                *counts.entry(parent_id.clone()).or_default() += 1;
-                counts
-            });
-
-        let mut rows = tree_nodes
-            .drain(..)
-            .filter_map(|flat_node| {
-                let flat_node_id = flat_node.id.clone();
-                let node_id = NodeId::new(flat_node_id.clone());
-                let node = self.ssh_nodes.get(&node_id)?.clone();
-                let node_view = ActiveSessionNode {
-                    id: flat_node_id.clone(),
-                    title: node.title.clone(),
-                    port: flat_node.port,
-                    terminal_ids: node.terminal_ids.clone(),
-                    readiness: active_session_readiness(&node.readiness),
-                };
-                Some(ActiveSessionSidebarRow {
-                    node_id,
-                    parent_id: flat_node.parent_id.map(NodeId::new),
-                    saved_connection_id: node.saved_connection_id.clone(),
-                    title: node.title.clone(),
-                    host: node.endpoint.host.clone(),
-                    username: node.endpoint.username.clone(),
-                    port: node.endpoint.port,
-                    node_view,
-                    depth: flat_node.depth as usize,
-                    is_last: flat_node.is_last_child,
-                    has_children: flat_node_child_counts
-                        .get(&flat_node_id)
-                        .is_some_and(|count| *count > 0),
-                    standalone_session: None,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        // Standalone protocols own one connection row and never expose SSH capabilities.
-        rows.extend(
-            self.tabs(cx)
+        // The saved-connection catalog owns row placement. Runtime nodes render
+        // at their catalog position, so connecting never jumps a row to the
+        // top; runtime-only nodes (quick connect, drill-down children) keep
+        // their tree order in a tail section after the catalog entries.
+        let runtime_rows: Vec<ActiveSessionSidebarRow> = {
+            let mut tree_nodes = self.node_router.flatten_tree();
+            let flat_node_child_counts = tree_nodes
                 .iter()
-                .filter_map(|tab| self.standalone_active_session_sidebar_row(tab, cx)),
+                .filter_map(|node| node.parent_id.as_ref())
+                .fold(HashMap::<String, usize>::new(), |mut counts, parent_id| {
+                    *counts.entry(parent_id.clone()).or_default() += 1;
+                    counts
+                });
+            tree_nodes
+                .drain(..)
+                .filter_map(|flat_node| {
+                    let flat_node_id = flat_node.id.clone();
+                    let node_id = NodeId::new(flat_node_id.clone());
+                    let node = self.ssh_nodes.get(&node_id)?.clone();
+                    let node_view = ActiveSessionNode {
+                        id: flat_node_id.clone(),
+                        title: node.title.clone(),
+                        port: flat_node.port,
+                        terminal_ids: node.terminal_ids.clone(),
+                        readiness: active_session_readiness(&node.readiness),
+                    };
+                    Some(ActiveSessionSidebarRow {
+                        node_id,
+                        parent_id: flat_node.parent_id.map(NodeId::new),
+                        saved_connection_id: node.saved_connection_id.clone(),
+                        title: node.title.clone(),
+                        host: node.endpoint.host.clone(),
+                        username: node.endpoint.username.clone(),
+                        port: node.endpoint.port,
+                        group: None,
+                        node_view,
+                        depth: flat_node.depth as usize,
+                        is_last: flat_node.is_last_child,
+                        has_children: flat_node_child_counts
+                            .get(&flat_node_id)
+                            .is_some_and(|count| *count > 0),
+                        standalone_session: None,
+                        pending_profile: None,
+                        is_folder: false,
+                        parent_is_folder: false,
+                    })
+                })
+                .collect()
+        };
+        // A catalog entry claims its runtime node by saved id first, then by
+        // endpoint identity, mirroring the historical dedup rules.
+        let mut consumed = vec![false; runtime_rows.len()];
+        let mut claim_runtime_row = |connection: &SavedConnection| -> Option<ActiveSessionSidebarRow> {
+            let by_id = runtime_rows.iter().position(|row| {
+                row.saved_connection_id.as_deref() == Some(connection.id.as_str())
+            });
+            let by_endpoint = runtime_rows.iter().position(|row| {
+                !row.host.is_empty()
+                    && row.host == connection.host
+                    && row.port == connection.port
+                    && row.username == connection.username
+            });
+            let index = by_id
+                .filter(|index| !consumed[*index])
+                .or_else(|| by_endpoint.filter(|index| !consumed[*index]))?;
+            consumed[index] = true;
+            Some(runtime_rows[index].clone())
+        };
+
+        // Standalone sessions are built before the catalog pass: a running
+        // Telnet/Serial/RDP/VNC session claims its saved profile's row, so the
+        // sidebar never shows the same asset twice (pending + running).
+        let standalone_rows: Vec<ActiveSessionSidebarRow> = self
+            .tabs(cx)
+            .iter()
+            .filter_map(|tab| self.standalone_active_session_sidebar_row(tab, cx))
+            .collect();
+        let mut standalone_by_profile: HashMap<String, ActiveSessionSidebarRow> = HashMap::new();
+        for row in standalone_rows.iter() {
+            if let Some(profile_id) = row.saved_connection_id.clone() {
+                standalone_by_profile.insert(profile_id, row.clone());
+            }
+        }
+
+        // First pass: every catalog connection claims its runtime node (or becomes
+// a pending row) regardless of folder expansion, so a collapsed folder
+// never leaks its connected nodes into the runtime tail.
+        let mut claimed: HashMap<Option<String>, Vec<ActiveSessionSidebarRow>> = HashMap::new();
+        for connection in self.connection_store.connections() {
+            let is_folder_child = connection.group.is_some();
+            let row = match claim_runtime_row(connection) {
+                Some(mut node_row) => {
+                    node_row.depth = if is_folder_child { 1 } else { 0 };
+                    node_row.parent_is_folder = is_folder_child;
+                    node_row
+                }
+                None => Self::pending_connection_row(connection),
+            };
+            claimed.entry(connection.group.clone()).or_default().push(row);
+        }
+        for profile in self.connection_store.telnet_profiles() {
+            let is_folder_child = profile.group.is_some();
+            let mut row = match standalone_by_profile.remove(&profile.id) {
+                Some(mut running_row) => {
+                    // The running row inherits the catalog endpoint metadata.
+                    running_row.host = profile.host.clone();
+                    running_row.port = profile.port;
+                    running_row
+                }
+                None => Self::pending_telnet_profile_row(profile),
+            };
+            row.depth = if is_folder_child { 1 } else { 0 };
+            row.parent_is_folder = is_folder_child;
+            claimed.entry(profile.group.clone()).or_default().push(row);
+        }
+        for profile in self.connection_store.serial_profiles() {
+            let is_folder_child = profile.group.is_some();
+            let mut row = match standalone_by_profile.remove(&profile.id) {
+                Some(mut running_row) => {
+                    running_row.host = profile.port_path.clone();
+                    running_row
+                }
+                None => Self::pending_serial_profile_row(profile),
+            };
+            row.depth = if is_folder_child { 1 } else { 0 };
+            row.parent_is_folder = is_folder_child;
+            claimed.entry(profile.group.clone()).or_default().push(row);
+        }
+        for profile in self.connection_store.remote_desktop_profiles() {
+            let is_folder_child = profile.group.is_some();
+            let mut row = match standalone_by_profile.remove(&profile.id) {
+                Some(mut running_row) => {
+                    running_row.host = profile.host.clone();
+                    running_row.port = profile.port;
+                    running_row
+                }
+                None => Self::pending_remote_desktop_profile_row(profile),
+            };
+            row.depth = if is_folder_child { 1 } else { 0 };
+            row.parent_is_folder = is_folder_child;
+            claimed.entry(profile.group.clone()).or_default().push(row);
+        }
+
+        let mut rows = Vec::new();
+        // Folder rows render for every configured group so an empty folder is
+        // still visible after creation; collapsing works through the same
+        // expanded-node set used by SSH subtree drilling.
+        let configured_groups = self.connection_store.groups().to_vec();
+        for group in configured_groups {
+            let folder_node_id = NodeId::new(format!("folder-{group}"));
+            let group_rows = claimed.remove(&Some(group.clone())).unwrap_or_default();
+            let expanded = self.expanded_ssh_nodes.contains(&folder_node_id);
+            rows.push(ActiveSessionSidebarRow {
+                node_id: folder_node_id.clone(),
+                parent_id: None,
+                saved_connection_id: None,
+                title: group.clone(),
+                host: String::new(),
+                username: String::new(),
+                port: 0,
+                group: None,
+                node_view: ActiveSessionNode {
+                    id: format!("folder-{group}"),
+                    title: group.clone(),
+                    port: 0,
+                    terminal_ids: Vec::new(),
+                    readiness: ActiveSessionReadiness::Disconnected,
+                },
+                depth: 0,
+                is_last: true,
+                has_children: !group_rows.is_empty(),
+                standalone_session: None,
+                pending_profile: None,
+                is_folder: true,
+                parent_is_folder: false,
+            });
+            if expanded {
+                rows.extend(group_rows);
+            }
+        }
+        // Ungrouped catalog connections sit at the root of the list.
+        rows.extend(claimed.remove(&None).unwrap_or_default());
+
+        // Standalone sessions without a saved profile (ad-hoc launches) keep
+        // their own root-level rows; claimed ones already sit in their folder.
+        rows.extend(
+            standalone_rows
+                .into_iter()
+                .filter(|row| row.saved_connection_id.is_none()),
         );
+
+        // The registry can hold sibling runtime nodes for one identity (stale
+        // index rebuilds, connect-while-prompt flows). One catalog identity
+        // renders exactly one row: drop root-level leftovers whose endpoint a
+        // claimed catalog row already represents. Drill-down children keep
+        // their own endpoints and stay visible.
+        let claimed_endpoints: HashSet<(String, u16, String)> = rows
+            .iter()
+            .filter(|row| row.pending_profile.is_none() && !row.host.is_empty())
+            .map(|row| (row.host.clone(), row.port, row.username.clone()))
+            .collect();
+        for (index, row) in runtime_rows.into_iter().enumerate() {
+            if consumed[index] {
+                continue;
+            }
+            let duplicate_identity = row.depth == 0
+                && !row.host.is_empty()
+                && claimed_endpoints
+                    .contains(&(row.host.clone(), row.port, row.username.clone()));
+            if !duplicate_identity {
+                rows.push(row);
+            }
+        }
         rows
+    }
+
+    fn pending_connection_row(connection: &SavedConnection) -> ActiveSessionSidebarRow {
+        let is_folder_child = connection.group.is_some();
+        ActiveSessionSidebarRow {
+            node_id: NodeId::new(format!("saved-connection-{}", connection.id)),
+            parent_id: None,
+            saved_connection_id: Some(connection.id.clone()),
+            title: connection.name.clone(),
+            host: connection.host.clone(),
+            username: connection.username.clone(),
+            port: connection.port,
+            group: connection.group.clone(),
+            node_view: ActiveSessionNode {
+                id: format!("saved-connection-{}", connection.id),
+                title: connection.name.clone(),
+                port: connection.port,
+                terminal_ids: Vec::new(),
+                readiness: ActiveSessionReadiness::Disconnected,
+            },
+            depth: if is_folder_child { 1 } else { 0 },
+            is_last: true,
+            has_children: false,
+            standalone_session: None,
+            pending_profile: Some(PendingSessionProfileKind::Ssh),
+            is_folder: false,
+            parent_is_folder: is_folder_child,
+        }
+    }
+
+    fn pending_telnet_profile_row(
+        profile: &oxideterm_connections::TelnetProfile,
+    ) -> ActiveSessionSidebarRow {
+        Self::pending_profile_row(
+            &profile.id,
+            &profile.name,
+            &profile.host,
+            profile.port,
+            profile.group.clone(),
+            PendingSessionProfileKind::Telnet,
+        )
+    }
+
+    fn pending_serial_profile_row(
+        profile: &oxideterm_connections::SerialProfile,
+    ) -> ActiveSessionSidebarRow {
+        Self::pending_profile_row(
+            &profile.id,
+            &profile.name,
+            &profile.port_path,
+            0,
+            profile.group.clone(),
+            PendingSessionProfileKind::Serial,
+        )
+    }
+
+    fn pending_remote_desktop_profile_row(
+        profile: &oxideterm_connections::RemoteDesktopProfile,
+    ) -> ActiveSessionSidebarRow {
+        let kind = match profile.protocol {
+            RemoteDesktopProtocol::Rdp => PendingSessionProfileKind::Rdp,
+            RemoteDesktopProtocol::Vnc => PendingSessionProfileKind::Vnc,
+        };
+        Self::pending_profile_row(
+            &profile.id,
+            &profile.name,
+            &profile.host,
+            profile.port,
+            profile.group.clone(),
+            kind,
+        )
+    }
+
+    fn pending_profile_row(
+        id: &str,
+        title: &str,
+        host: &str,
+        port: u16,
+        group: Option<String>,
+        kind: PendingSessionProfileKind,
+    ) -> ActiveSessionSidebarRow {
+        ActiveSessionSidebarRow {
+            node_id: NodeId::new(format!("pending-profile-{id}")),
+            parent_id: None,
+            saved_connection_id: Some(id.to_string()),
+            title: title.to_string(),
+            host: host.to_string(),
+            username: String::new(),
+            port,
+            group,
+            node_view: ActiveSessionNode {
+                id: format!("pending-profile-{id}"),
+                title: title.to_string(),
+                port,
+                terminal_ids: Vec::new(),
+                readiness: ActiveSessionReadiness::Disconnected,
+            },
+            depth: 0,
+            is_last: true,
+            has_children: false,
+            standalone_session: None,
+            pending_profile: Some(kind),
+            is_folder: false,
+            parent_is_folder: false,
+        }
     }
 
     fn standalone_active_session_sidebar_row(
@@ -326,15 +638,32 @@ impl WorkspaceApp {
                 )
             };
 
+        // A session launched from a saved profile keeps the profile id so the
+        // running row claims the pending catalog row instead of duplicating it.
+        let saved_profile_id = if tab.kind == TabKind::RemoteDesktop {
+            self.remote_desktop
+                .read(cx)
+                .session(tab.id)
+                .map(|session| session.read(cx).saved_profile_id().to_string())
+        } else {
+            terminal_ids.first().and_then(|session_id| {
+                self.telnet_terminal_profile_ids
+                    .get(session_id)
+                    .or_else(|| self.serial_terminal_profile_ids.get(session_id))
+                    .cloned()
+            })
+        };
+
         let node_id = NodeId::new(row_id.clone());
         Some(ActiveSessionSidebarRow {
             node_id,
             parent_id: None,
-            saved_connection_id: None,
+            saved_connection_id: saved_profile_id,
             title: tab.title.clone(),
             host: String::new(),
             username: String::new(),
             port: 0,
+            group: None,
             node_view: ActiveSessionNode {
                 id: row_id,
                 title: tab.title.clone(),
@@ -346,37 +675,39 @@ impl WorkspaceApp {
             is_last: true,
             has_children: false,
             standalone_session: Some(standalone_session),
+            pending_profile: None,
+            is_folder: false,
+            parent_is_folder: false,
         })
     }
 
     pub(in crate::workspace) fn sync_active_session_sidebar_list_state(
         &mut self,
         rows: &[ActiveSessionSidebarRow],
-        view_mode: ActiveSessionSidebarViewMode,
         cx: &App,
     ) {
         let signatures = rows
             .iter()
-            .map(|row| self.active_session_sidebar_row_signature(row, view_mode, cx))
+            .map(|row| self.active_session_sidebar_row_signature(row, cx))
             .collect::<Vec<_>>();
         sync_tauri_variable_list_state_by_signatures(
             &self.active_session_sidebar_list_state,
             &mut self.active_session_sidebar_list_cache.borrow_mut(),
             "active-sessions-sidebar",
             &signatures,
-            self.active_session_sidebar_list_spec(view_mode),
+            self.active_session_sidebar_list_spec(),
         );
+        self.active_session_sidebar_rows_cache
+            .replace(Some((ActiveSessionSidebarViewMode::Tree, rows.to_vec())));
     }
 
     pub(in crate::workspace) fn active_session_sidebar_list_spec(
         &self,
-        view_mode: ActiveSessionSidebarViewMode,
     ) -> TauriVirtualListSpec {
-        let estimated_height = match view_mode {
-            ActiveSessionSidebarViewMode::Tree => ACTIVE_SESSION_SIDEBAR_LIST_ESTIMATED_HEIGHT,
-            ActiveSessionSidebarViewMode::Focus => ACTIVE_SESSION_FOCUS_LIST_ESTIMATED_HEIGHT,
-        };
-        TauriVirtualListSpec::new(px(estimated_height), ACTIVE_SESSION_SIDEBAR_LIST_OVERSCAN)
+        TauriVirtualListSpec::new(
+            px(ACTIVE_SESSION_SIDEBAR_LIST_ESTIMATED_HEIGHT),
+            ACTIVE_SESSION_SIDEBAR_LIST_OVERSCAN,
+        )
     }
 
     pub(in crate::workspace) fn render_active_session_sidebar_list_item(
@@ -384,10 +715,18 @@ impl WorkspaceApp {
         index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(row) = self.active_session_sidebar_rows(cx).into_iter().nth(index) else {
+        let Some(row) = self
+            .active_session_sidebar_rows_cache
+            .borrow()
+            .as_ref()
+            .and_then(|(_view_mode, rows)| rows.get(index).cloned())
+        else {
             return div().into_any_element();
         };
         div()
+            // The virtual-list wrapper owns the stable interactive identity;
+            // child row shapes can change between pending and connected states.
+            .id(("active-session-row", index))
             .px_1()
             .child(self.render_active_session_node(row, cx))
             .into_any_element()
@@ -396,812 +735,28 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn active_session_sidebar_row_signature(
         &self,
         row: &ActiveSessionSidebarRow,
-        view_mode: ActiveSessionSidebarViewMode,
         cx: &App,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
-        // This virtual row owns the node header plus expanded action/terminal
-        // children. Hash all state that can change its visible height or labels.
-        view_mode.hash(&mut hasher);
         row.node_id.hash(&mut hasher);
         row.parent_id.hash(&mut hasher);
         row.title.hash(&mut hasher);
-        row.port.hash(&mut hasher);
-        row.node_view.title.hash(&mut hasher);
-        row.node_view.terminal_ids.hash(&mut hasher);
-        format!("{:?}", row.node_view.status()).hash(&mut hasher);
+        row.host.hash(&mut hasher);
         row.depth.hash(&mut hasher);
-        row.is_last.hash(&mut hasher);
-        row.has_children.hash(&mut hasher);
         row.standalone_session.hash(&mut hasher);
-        self.expanded_ssh_nodes
-            .contains(&row.node_id)
-            .hash(&mut hasher);
-        self.has_active_reconnect_job(&row.node_id, cx)
-            .hash(&mut hasher);
+        row.pending_profile.hash(&mut hasher);
+        row.group.hash(&mut hasher);
+        row.is_folder.hash(&mut hasher);
+        row.parent_is_folder.hash(&mut hasher);
         (self.active_ssh_node_id.as_ref() == Some(&row.node_id)).hash(&mut hasher);
+        self.has_active_reconnect_job(&row.node_id, cx).hash(&mut hasher);
+        // Folder rows re-render with their child rows on expand/collapse.
+        if row.is_folder {
+            self.expanded_ssh_nodes
+                .contains(&row.node_id)
+                .hash(&mut hasher);
+        }
         hasher.finish()
-    }
-
-    pub(in crate::workspace) fn effective_active_session_focus_node_id(
-        &self,
-        rows: &[ActiveSessionSidebarRow],
-    ) -> Option<NodeId> {
-        let focused_node_id = self.active_session_sidebar_focused_node_id.as_ref()?;
-        rows.iter()
-            .any(|row| row.node_id == *focused_node_id)
-            .then(|| focused_node_id.clone())
-    }
-
-    pub(in crate::workspace) fn active_session_focus_rows(
-        &self,
-        rows: &[ActiveSessionSidebarRow],
-        focused_node_id: Option<&NodeId>,
-    ) -> Vec<ActiveSessionSidebarRow> {
-        rows.iter()
-            .filter(|row| match focused_node_id {
-                Some(focused_node_id) => row.parent_id.as_ref() == Some(focused_node_id),
-                None => row.parent_id.is_none(),
-            })
-            .cloned()
-            .collect()
-    }
-
-    pub(in crate::workspace) fn active_session_breadcrumb_rows(
-        &self,
-        rows: &[ActiveSessionSidebarRow],
-        focused_node_id: Option<&NodeId>,
-    ) -> Vec<ActiveSessionSidebarRow> {
-        let row_by_id = rows
-            .iter()
-            .map(|row| (row.node_id.clone(), row.clone()))
-            .collect::<HashMap<_, _>>();
-        let mut path = Vec::new();
-        let mut current_id = focused_node_id.cloned();
-        while let Some(node_id) = current_id {
-            let Some(row) = row_by_id.get(&node_id) else {
-                break;
-            };
-            path.push(row.clone());
-            current_id = row.parent_id.clone();
-        }
-        path.reverse();
-        path
-    }
-
-    pub(in crate::workspace) fn toggle_active_session_sidebar_view(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        self.active_session_sidebar_view_mode = match self.active_session_sidebar_view_mode {
-            ActiveSessionSidebarViewMode::Tree => ActiveSessionSidebarViewMode::Focus,
-            ActiveSessionSidebarViewMode::Focus => ActiveSessionSidebarViewMode::Tree,
-        };
-        // Tauri stores the focus node separately from expansion. Keep native's
-        // selected node visible when entering focus mode, but fall back to root
-        // if the selected node is stale or has disappeared.
-        if self.active_session_sidebar_view_mode == ActiveSessionSidebarViewMode::Focus {
-            let rows = self.active_session_sidebar_rows(cx);
-            let selected = self
-                .active_ssh_node_id
-                .as_ref()
-                .filter(|node_id| rows.iter().any(|row| row.node_id == **node_id))
-                .cloned();
-            self.active_session_sidebar_focused_node_id = selected;
-        }
-        cx.notify();
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_breadcrumb(
-        &self,
-        rows: &[ActiveSessionSidebarRow],
-        focused_node_id: Option<&NodeId>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let path_rows = self.active_session_breadcrumb_rows(rows, focused_node_id);
-        let root_active = focused_node_id.is_none();
-        let root_color = if root_active {
-            theme.accent
-        } else {
-            theme.text_muted
-        };
-
-        let mut breadcrumb = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .bg(rgb(theme.bg_card))
-            .overflow_hidden();
-
-        breadcrumb = breadcrumb.child(
-            div()
-                .h(px(22.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .rounded(px(self.tokens.radii.md))
-                .px(px(6.0))
-                .text_size(px(12.0))
-                .font_weight(if root_active {
-                    gpui::FontWeight::MEDIUM
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(rgb(root_color))
-                .cursor_pointer()
-                .hover(move |button| button.bg(rgb(theme.bg_hover)))
-                .child(Self::render_lucide_icon(
-                    LucideIcon::Home,
-                    14.0,
-                    rgb(root_color),
-                ))
-                .when(root_active, |button| {
-                    button.child(self.render_display_text_with_role(
-                        SelectableTextRole::PlainDocument,
-                        "session-focus-breadcrumb-root",
-                        "sessions.breadcrumb.all_servers",
-                        self.i18n.t("sessions.breadcrumb.all_servers"),
-                        root_color,
-                        cx,
-                    ))
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _event, _window, cx| {
-                        this.active_session_sidebar_focused_node_id = None;
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ),
-        );
-
-        let path_len = path_rows.len();
-        for (index, row) in path_rows.into_iter().enumerate() {
-            let is_last = index + 1 == path_len;
-            let text_color = if is_last {
-                theme.accent
-            } else {
-                theme.text_muted
-            };
-            let node_id = row.node_id.clone();
-            let title = row.node_view.title.clone();
-            let key = format!("session-focus-breadcrumb-{}", node_id.0);
-            breadcrumb = breadcrumb
-                .child(Self::render_lucide_icon(
-                    LucideIcon::ChevronRight,
-                    12.0,
-                    rgb(theme.text_muted),
-                ))
-                .child(
-                    div()
-                        .max_w(px(120.0))
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(self.tokens.radii.md))
-                        .px(px(6.0))
-                        .truncate()
-                        .text_size(px(12.0))
-                        .font_weight(if is_last {
-                            gpui::FontWeight::MEDIUM
-                        } else {
-                            gpui::FontWeight::NORMAL
-                        })
-                        .text_color(rgb(text_color))
-                        .cursor_pointer()
-                        .hover(move |button| button.bg(rgb(theme.bg_hover)))
-                        .child(self.render_row_safe_selectable_display_text_in_group(
-                            crate::workspace::selectable_text::selectable_text_id(
-                                "session-focus-breadcrumb",
-                                &node_id,
-                            ),
-                            &key,
-                            "label",
-                            0,
-                            title,
-                            text_color,
-                            None,
-                            cx,
-                        ))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.active_session_sidebar_focused_node_id = Some(node_id.clone());
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        ),
-                );
-        }
-
-        breadcrumb.into_any_element()
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_location_header(
-        &self,
-        rows: &[ActiveSessionSidebarRow],
-        focused_node_id: Option<&NodeId>,
-        visible_count: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let focused_row =
-            focused_node_id.and_then(|node_id| rows.iter().find(|row| row.node_id == *node_id));
-        let title = focused_row
-            .map(|row| row.node_view.title.clone())
-            .unwrap_or_else(|| self.i18n.t("sessions.focused_list.all_servers"));
-        let title = title.to_uppercase();
-        let count_label_key = if visible_count == 1 {
-            "sessions.focused_list.child"
-        } else {
-            "sessions.focused_list.children"
-        };
-        let count_text = if focused_node_id.is_some() {
-            format!("({} {})", visible_count, self.i18n.t(count_label_key))
-        } else {
-            format!("({})", visible_count)
-        }
-        .to_uppercase();
-
-        // Tauri FocusedNodeList renders this compact location strip below the
-        // breadcrumb (`🏠 All Servers (n)` or `📍 node (n children)`), separate
-        // from the sidebar section title above the scroll area.
-        div()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgba((theme.border << 8) | SESSION_FOCUS_DIVIDER_ALPHA))
-            .text_size(px(SESSION_TREE_META_TEXT_SIZE))
-            .text_color(rgb(theme.text_muted))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .child(if focused_node_id.is_some() {
-                "📍"
-            } else {
-                "🏠"
-            })
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .child(self.render_display_text_with_role(
-                        SelectableTextRole::PlainDocument,
-                        "session-focus-location-title",
-                        if focused_node_id.is_some() {
-                            "session-focus-location-node"
-                        } else {
-                            "sessions.focused_list.all_servers"
-                        },
-                        title,
-                        theme.text_muted,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(rgba((theme.text_muted << 8) | 0x80))
-                    .child(count_text),
-            )
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_empty(
-        &self,
-        focused_node_id: Option<&NodeId>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let title_key = if focused_node_id.is_some() {
-            "sessions.focused_list.no_child_nodes"
-        } else {
-            "sessions.focused_list.no_servers"
-        };
-        let subtitle_key = if focused_node_id.is_some() {
-            "sessions.focused_list.add_by_drilling"
-        } else {
-            "sessions.focused_list.click_to_add"
-        };
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .py(px(32.0))
-            .px_4()
-            .text_center()
-            .text_color(rgb(theme.text_muted))
-            .child(div().mb_2().child(Self::render_lucide_icon(
-                LucideIcon::Server,
-                SESSION_FOCUS_EMPTY_ICON_SIZE,
-                rgba((theme.text_muted << 8) | SESSION_FOCUS_EMPTY_ICON_ALPHA),
-            )))
-            .child(
-                div()
-                    .text_size(px(SESSION_FOCUS_EMPTY_TITLE_TEXT_SIZE))
-                    .text_color(rgb(theme.text_muted))
-                    .child(self.render_display_text_with_role(
-                        SelectableTextRole::PlainDocument,
-                        "session-focus-empty-title",
-                        title_key,
-                        self.i18n.t(title_key),
-                        theme.text_muted,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .mt_1()
-                    .text_size(px(SESSION_FOCUS_EMPTY_SUBTITLE_TEXT_SIZE))
-                    .text_color(rgba(
-                        (theme.text_muted << 8)
-                            | (SESSION_FOCUS_EMPTY_SUBTITLE_ALPHA * 255.0).round() as u32,
-                    ))
-                    .child(self.render_display_text_with_role_and_alpha(
-                        SelectableTextRole::PlainDocument,
-                        "session-focus-empty-subtitle",
-                        subtitle_key,
-                        self.i18n.t(subtitle_key),
-                        theme.text_muted,
-                        SESSION_FOCUS_EMPTY_SUBTITLE_ALPHA,
-                        cx,
-                    )),
-            )
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_list_item(
-        &self,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let rows = self.active_session_sidebar_rows(cx);
-        let focused_node_id = self.effective_active_session_focus_node_id(&rows);
-        let Some(row) = self
-            .active_session_focus_rows(&rows, focused_node_id.as_ref())
-            .into_iter()
-            .nth(index)
-        else {
-            return div().into_any_element();
-        };
-        self.render_active_session_focus_node(row, cx)
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_node(
-        &self,
-        row: ActiveSessionSidebarRow,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if row.standalone_session.is_some() {
-            return self.render_standalone_session_sidebar_row(row, cx);
-        }
-        let theme = self.tokens.ui;
-        let selected = self.active_ssh_node_id.as_ref() == Some(&row.node_id);
-        let status = self.session_node_status(row.node_view.status());
-        let connected = matches!(
-            row.node_view.status(),
-            ActiveSessionStatus::Active | ActiveSessionStatus::Connected
-        );
-        let connecting = matches!(row.node_view.status(), ActiveSessionStatus::Connecting);
-        let subtitle = format!("{}@{}:{}", row.username, row.host, row.port);
-        let terminal_count = row.node_view.terminal_ids.len();
-        let has_children = row.has_children;
-        let action_label = self.i18n.t("sessions.actions.connect");
-        let selection_group_id = crate::workspace::selectable_text::selectable_text_id(
-            "session-focus-card",
-            &row.node_id,
-        );
-        let border_color = if selected {
-            rgba((theme.accent << 8) | SESSION_FOCUS_CARD_SELECTED_BORDER_ALPHA)
-        } else {
-            rgba((theme.border << 8) | SESSION_FOCUS_CARD_BORDER_ALPHA)
-        };
-        let background = if selected {
-            rgba((theme.accent << 8) | SESSION_FOCUS_CARD_SELECTED_BG_ALPHA)
-        } else {
-            rgba(theme.bg_card << 8)
-        };
-
-        let node_id = row.node_id.clone();
-        let mut card = div()
-            .mx_2()
-            .mb_2()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .rounded(px(self.tokens.radii.md))
-            .border_1()
-            .border_color(border_color)
-            .bg(background)
-            .cursor_pointer()
-            .hover(move |card| card.bg(rgb(theme.bg_hover)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.active_ssh_node_id = Some(node_id.clone());
-                    if event.click_count >= 2 && has_children {
-                        this.active_session_sidebar_focused_node_id = Some(node_id.clone());
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(self.render_session_status_dot(status))
-                    .child(if matches!(status.icon, LucideIcon::LoaderCircle) {
-                        self.render_loading_icon(
-                            (
-                                gpui::SharedString::from(format!(
-                                    "session-focus-connecting-{:?}",
-                                    row.node_id
-                                )),
-                                0usize,
-                            ),
-                            SESSION_TREE_ICON_SIZE,
-                            rgb(status.text_color),
-                        )
-                    } else {
-                        Self::render_lucide_icon(
-                            status.icon,
-                            SESSION_TREE_ICON_SIZE,
-                            rgb(status.text_color),
-                        )
-                    })
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(SESSION_TREE_TEXT_SIZE))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(rgb(status.text_color))
-                                    .child(self.render_row_safe_selectable_display_text_in_group(
-                                        selection_group_id,
-                                        "session-focus-card-cell",
-                                        "title",
-                                        0,
-                                        row.node_view.title.clone(),
-                                        status.text_color,
-                                        None,
-                                        cx,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(SESSION_TREE_META_TEXT_SIZE))
-                                    .text_color(rgb(theme.text_muted))
-                                    .child(self.render_row_safe_selectable_display_text_in_group(
-                                        selection_group_id,
-                                        "session-focus-card-cell",
-                                        "subtitle",
-                                        1,
-                                        subtitle,
-                                        theme.text_muted,
-                                        None,
-                                        cx,
-                                    )),
-                            ),
-                    )
-                    .when(terminal_count > 0, |row_el| {
-                        row_el.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(4.0))
-                                .rounded(px(self.tokens.radii.md))
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .bg(rgba(
-                                    (SESSION_FOCUS_EMERALD << 8)
-                                        | SESSION_FOCUS_TERMINAL_BADGE_BG_ALPHA,
-                                ))
-                                .text_size(px(SESSION_TREE_META_TEXT_SIZE))
-                                .text_color(rgb(SESSION_FOCUS_EMERALD))
-                                .child(Self::render_lucide_icon(
-                                    LucideIcon::Terminal,
-                                    12.0,
-                                    rgb(SESSION_FOCUS_EMERALD),
-                                ))
-                                .child(terminal_count.to_string()),
-                        )
-                    })
-                    .when(has_children, |row_el| {
-                        row_el.child(Self::render_lucide_icon(
-                            LucideIcon::ChevronRight,
-                            16.0,
-                            rgb(theme.text_muted),
-                        ))
-                    })
-                    .when(!connected && !connecting, |row_el| {
-                        let node_id = row.node_id.clone();
-                        row_el.child(
-                            div()
-                                .rounded(px(self.tokens.radii.md))
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(rgb(SESSION_FOCUS_EMERALD))
-                                .bg(rgba(
-                                    (SESSION_FOCUS_EMERALD << 8)
-                                        | SESSION_FOCUS_TERMINAL_BADGE_BG_ALPHA,
-                                ))
-                                .hover(|button| {
-                                    button.bg(rgba(
-                                        (SESSION_FOCUS_EMERALD << 8)
-                                            | SESSION_FOCUS_TERMINAL_BADGE_HOVER_ALPHA,
-                                    ))
-                                })
-                                .child(action_label)
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _event, window, cx| {
-                                        let _ = this.queue_ssh_terminal_tab_for_sidebar_node(
-                                            node_id.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                        cx.stop_propagation();
-                                    }),
-                                ),
-                        )
-                    }),
-            );
-
-        if selected && terminal_count > 0 {
-            card = card.child(
-                div()
-                    .mt_1()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(rgba((theme.border << 8) | SESSION_FOCUS_DIVIDER_ALPHA))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .children(row.node_view.terminal_ids.iter().enumerate().map(
-                        |(index, session_id)| {
-                            self.render_active_session_focus_terminal(*session_id, index + 1, cx)
-                        },
-                    )),
-            );
-        }
-
-        if selected && connected {
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    // Sidebar width is user-controlled, so actions must form
-                    // additional rows instead of extending beyond the card.
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .children(self.render_active_session_focus_actions(&row, cx)),
-            );
-        }
-
-        if selected
-            && !self.has_active_reconnect_job(&row.node_id, cx)
-            && session_status_can_remove_from_sidebar(row.node_view.status())
-        {
-            let node_id = row.node_id.clone();
-            card = card.child(div().flex().flex_row().items_center().child(
-                self.render_active_session_focus_action_chip(
-                    LucideIcon::Trash2,
-                    self.i18n.t("sessions.tree.actions.remove_session"),
-                    SessionActionVariant::Danger,
-                    cx.listener(move |this, _event, window, cx| {
-                        this.remove_inactive_session_tree_node(&node_id, window, cx);
-                        cx.stop_propagation();
-                    }),
-                    cx,
-                ),
-            ));
-        }
-
-        card.into_any_element()
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_terminal(
-        &self,
-        session_id: TerminalSessionId,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let active = self.active_terminal_session_id(cx) == Some(session_id);
-        let text_color = if active {
-            theme.accent
-        } else {
-            theme.text_muted
-        };
-        let text = self
-            .i18n
-            .t("sessions.focused_list.terminal")
-            .replace("{{number}}", &index.to_string());
-
-        div()
-            .h(px(24.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .rounded(px(self.tokens.radii.md))
-            .px_2()
-            .bg(if active {
-                rgba((theme.accent << 8) | SESSION_FOCUS_TERMINAL_ACTIVE_BG_ALPHA)
-            } else {
-                rgba(theme.bg << 8)
-            })
-            .text_color(rgb(text_color))
-            .hover(move |row| row.bg(rgb(theme.bg_hover)))
-            .child(Self::render_lucide_icon(
-                LucideIcon::Terminal,
-                12.0,
-                rgb(text_color),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .truncate()
-                    .text_size(px(SESSION_TREE_META_TEXT_SIZE))
-                    .child(self.render_row_safe_selectable_display_text_in_group(
-                        crate::workspace::selectable_text::selectable_text_id(
-                            "session-focus-terminal",
-                            session_id,
-                        ),
-                        "session-focus-terminal-cell",
-                        "label",
-                        0,
-                        text,
-                        text_color,
-                        None,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .size(px(18.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(self.tokens.radii.md))
-                    .child(Self::render_lucide_icon(
-                        LucideIcon::X,
-                        12.0,
-                        rgb(text_color),
-                    ))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event, window, cx| {
-                            this.close_terminal_session(session_id, window, cx);
-                            cx.stop_propagation();
-                        }),
-                    ),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    this.focus_terminal_session(session_id, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_actions(
-        &self,
-        row: &ActiveSessionSidebarRow,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let node_id = row.node_id.clone();
-        vec![
-            self.render_active_session_focus_action_chip(
-                LucideIcon::Plus,
-                self.i18n.t("sessions.tree.actions.new_terminal"),
-                SessionActionVariant::Primary,
-                cx.listener(move |this, _event, window, cx| {
-                    let _ =
-                        this.queue_ssh_terminal_tab_for_sidebar_node(node_id.clone(), window, cx);
-                    cx.stop_propagation();
-                }),
-                cx,
-            ),
-            {
-                let node_id = row.node_id.clone();
-                self.render_active_session_focus_action_chip(
-                    LucideIcon::FolderOpen,
-                    self.i18n.t("sessions.tree.actions.sftp"),
-                    SessionActionVariant::Primary,
-                    cx.listener(move |this, _event, window, cx| {
-                        this.open_sftp_tab(node_id.clone(), window, cx);
-                        cx.stop_propagation();
-                    }),
-                    cx,
-                )
-            },
-            {
-                let node_id = row.node_id.clone();
-                self.render_active_session_focus_action_chip(
-                    LucideIcon::ArrowLeftRight,
-                    self.i18n.t("sessions.tree.actions.port_forwarding"),
-                    SessionActionVariant::Primary,
-                    cx.listener(move |this, _event, window, cx| {
-                        this.open_forwards_tab(node_id.clone(), window, cx);
-                        cx.stop_propagation();
-                    }),
-                    cx,
-                )
-            },
-        ]
-    }
-
-    pub(in crate::workspace) fn render_active_session_focus_action_chip(
-        &self,
-        icon: LucideIcon,
-        label: String,
-        variant: SessionActionVariant,
-        listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let (text_color, background, hover_background) = match variant {
-            SessionActionVariant::Primary => (
-                theme.accent,
-                rgba((theme.accent << 8) | SESSION_FOCUS_ACTION_BG_ALPHA),
-                rgba((theme.accent << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA),
-            ),
-            SessionActionVariant::Danger => (
-                theme.error,
-                rgba((theme.error << 8) | SESSION_FOCUS_ACTION_BG_ALPHA),
-                rgba((theme.error << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA),
-            ),
-        };
-        div()
-            .h(px(24.0))
-            .max_w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .rounded(px(self.tokens.radii.md))
-            .px(px(7.0))
-            .text_size(px(11.0))
-            .text_color(rgb(text_color))
-            .bg(background)
-            .hover(move |chip| chip.bg(hover_background))
-            .child(Self::render_lucide_icon(icon, 12.0, rgb(text_color)))
-            .child(
-                // Long localized labels stay inside the chip at the narrowest
-                // supported sidebar widths.
-                div().min_w(px(0.0)).truncate().child(label),
-            )
-            .on_mouse_down(MouseButton::Left, listener)
-            .into_any_element()
     }
 
     pub(in crate::workspace) fn render_active_session_node(
@@ -1209,291 +764,372 @@ impl WorkspaceApp {
         row: ActiveSessionSidebarRow,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Folder children keep a guide indent under their folder header so the
+        // grouping is visible without a second tree gutter column.
+        let indent = px(if row.parent_is_folder { 16.0 } else { 0.0 });
+        if row.is_folder {
+            return self.render_folder_sidebar_row(row, cx);
+        }
         if row.standalone_session.is_some() {
             return self.render_standalone_session_sidebar_row(row, cx);
         }
+        if row.pending_profile.is_some() {
+            return div()
+                .pl(indent)
+                .child(self.render_pending_saved_connection_row(row, cx))
+                .into_any_element();
+        }
         let node_id = row.node_id;
         let node_view = row.node_view;
-        let node_depth = row.depth;
-        let is_last = row.is_last;
-        let expanded = self.expanded_ssh_nodes.contains(&node_id);
         let selected = self.active_ssh_node_id.as_ref() == Some(&node_id);
         let status = self.session_node_status(node_view.status());
-        let terminal_ids = node_view.terminal_ids.clone();
-        let mut children = Vec::new();
+        div()
+            .pl(indent)
+            .child(self.render_session_node_header(
+                node_id,
+                node_view,
+                &row.host,
+                row.saved_connection_id,
+                selected,
+                status,
+                cx,
+            ))
+            .into_any_element()
+    }
 
-        if expanded {
-            if self.has_active_reconnect_job(&node_id, cx) {
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, _window, cx| {
-                        this.cancel_reconnect_for_node(&node_id, cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    is_last,
-                    LucideIcon::X,
-                    self.i18n.t("sessions.tree.actions.cancel_reconnect"),
-                    SessionActionVariant::Danger,
-                    listener,
-                    cx,
-                ));
-            } else if matches!(
-                node_view.status(),
-                ActiveSessionStatus::Active | ActiveSessionStatus::Connected
-            ) {
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        let _ = this.queue_ssh_terminal_tab_for_sidebar_node(
-                            node_id.clone(),
-                            window,
-                            cx,
-                        );
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::Plus,
-                    self.i18n.t("sessions.tree.actions.new_terminal"),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        this.open_sftp_tab(node_id.clone(), window, cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::FolderOpen,
-                    self.i18n.t("sessions.tree.actions.sftp"),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, _window, cx| {
-                        // Mirrors Tauri's node-first IDE route: opening IDE creates
-                        // an IDE owner surface and remote folder chooser for the
-                        // node, not a terminal pane or implicit "/" project.
-                        this.open_ide_folder_picker_tab(node_id.clone(), cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::Code2,
-                    "IDE".to_string(),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        this.open_forwards_tab(node_id.clone(), window, cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::ArrowLeftRight,
-                    self.i18n.t("sessions.tree.actions.port_forwarding"),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-                if self.can_save_runtime_node_as_connection(
-                    &node_id,
-                    row.saved_connection_id.as_deref(),
-                ) {
-                    let listener = cx.listener({
-                        let node_id = node_id.clone();
-                        move |this, _event, window, cx| {
-                            this.open_save_runtime_node_form(node_id.clone(), window, cx);
-                            cx.stop_propagation();
-                        }
-                    });
-                    children.push(self.render_session_action_item(
-                        node_depth + 1,
-                        false,
-                        LucideIcon::Save,
-                        self.i18n.t("sessions.tree.actions.save_as_connection"),
-                        SessionActionVariant::Primary,
-                        listener,
-                        cx,
-                    ));
-                }
-                for (index, session_id) in terminal_ids.iter().copied().enumerate() {
-                    children.push(self.render_session_terminal_item(
-                        node_depth + 1,
-                        false,
-                        session_id,
-                        index + 1,
-                        cx,
-                    ));
-                }
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        this.request_disconnect_ssh_node(&node_id, window, cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::WifiOff,
-                    self.i18n.t("sessions.tree.actions.disconnect"),
-                    SessionActionVariant::Danger,
-                    listener,
-                    cx,
-                ));
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        this.open_drill_down_form(node_id.clone(), window, cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    is_last,
-                    LucideIcon::ArrowDownRight,
-                    self.i18n.t("sessions.tree.actions.drill_in"),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-            } else if matches!(node_view.status(), ActiveSessionStatus::Error) {
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        let _ = this.queue_ssh_terminal_tab_for_sidebar_node(
-                            node_id.clone(),
-                            window,
-                            cx,
-                        );
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::RefreshCw,
-                    self.i18n.t("sessions.actions.reconnect"),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    let saved_connection_id = row.saved_connection_id.clone();
-                    move |this, _event, window, cx| {
-                        if let Some(saved_connection_id) = saved_connection_id.as_deref() {
-                            this.open_saved_connection_reconnect_editor(
-                                node_id.clone(),
-                                saved_connection_id,
-                                window,
-                                cx,
-                            );
-                        } else {
-                            this.open_runtime_node_reconnect_editor(node_id.clone(), window, cx);
-                        }
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::Pencil,
-                    self.i18n.t("sessions.tree.actions.edit_and_reconnect"),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        this.remove_inactive_session_tree_node(&node_id, window, cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    is_last,
-                    LucideIcon::Trash2,
-                    self.i18n.t("sessions.tree.actions.remove_session"),
-                    SessionActionVariant::Danger,
-                    listener,
-                    cx,
-                ));
-            } else if matches!(node_view.status(), ActiveSessionStatus::Idle) {
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        let _ = this.queue_ssh_terminal_tab_for_sidebar_node(
-                            node_id.clone(),
-                            window,
-                            cx,
-                        );
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    false,
-                    LucideIcon::Power,
-                    self.i18n.t("sessions.actions.connect"),
-                    SessionActionVariant::Primary,
-                    listener,
-                    cx,
-                ));
-                let listener = cx.listener({
-                    let node_id = node_id.clone();
-                    move |this, _event, window, cx| {
-                        this.remove_inactive_session_tree_node(&node_id, window, cx);
-                        cx.stop_propagation();
-                    }
-                });
-                children.push(self.render_session_action_item(
-                    node_depth + 1,
-                    is_last,
-                    LucideIcon::Trash2,
-                    self.i18n.t("sessions.tree.actions.remove_session"),
-                    SessionActionVariant::Danger,
-                    listener,
-                    cx,
-                ));
-            }
-        }
-
-        let header =
-            self.render_session_node_header(node_id, node_view, expanded, selected, status, cx);
-        let header = if node_depth == 0 {
-            header
-        } else {
-            self.render_session_tree_child(node_depth, is_last && children.is_empty(), header)
-        };
+    fn render_folder_sidebar_row(
+        &self,
+        row: ActiveSessionSidebarRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.tokens.ui;
+        let node_id = row.node_id.clone();
+        let expanded = self.expanded_ssh_nodes.contains(&node_id);
+        let title = row.title.clone();
+        let folder_group = title.clone();
 
         div()
+            .id(format!("active-session-folder-{}", node_id.0))
+            .relative()
+            .h(px(SESSION_TREE_NODE_HEIGHT))
             .w_full()
             .flex()
-            .flex_col()
-            .child(header)
-            .children(children)
+            .flex_row()
+            .items_center()
+            .rounded(px(self.tokens.radii.md))
+            .px_2()
+            .cursor_pointer()
+            .border_b_1()
+            .border_color(rgba((theme.border << 8) | SESSION_ROW_SEPARATOR_ALPHA))
+            .hover(move |row| row.bg(rgb(theme.bg_hover)))
+            .child(
+                div()
+                    .mr(px(8.0))
+                    .flex_none()
+                    .child(Self::render_lucide_icon(
+                        if expanded {
+                            LucideIcon::FolderOpen
+                        } else {
+                            LucideIcon::Folder
+                        },
+                        SESSION_TREE_ICON_SIZE,
+                        rgb(theme.text_muted),
+                    )),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(SESSION_TREE_TEXT_SIZE))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(theme.text))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .ml_2()
+                    .flex_none()
+                    .text_size(px(SESSION_TREE_META_TEXT_SIZE))
+                    .text_color(rgb(theme.text_muted))
+                    .child(if expanded { "∨" } else { "›" }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    if !this.expanded_ssh_nodes.insert(node_id.clone()) {
+                        this.expanded_ssh_nodes.remove(&node_id);
+                    }
+                    this.active_session_sidebar_rows_cache.borrow_mut().take();
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let group = folder_group;
+                    move |this, event: &MouseDownEvent, _window, cx| {
+                        this.open_active_session_folder_context_menu(
+                            group.clone(),
+                            f32::from(event.position.x),
+                            f32::from(event.position.y),
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn render_session_node_header(
+        &self,
+        node_id: NodeId,
+        node: ActiveSessionNode,
+        host: &str,
+        saved_connection_id: Option<String>,
+        selected: bool,
+        status: SessionStatusStyle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.tokens.ui;
+        let selected_bg = rgba((theme.accent << 8) | 0x1a);
+        let selected_border = rgba((theme.accent << 8) | 0x4d);
+        let muted_text = rgb(theme.text_muted);
+
+        let title_str = node.title.clone();
+        let host_str = host.to_string();
+
+        div()
+            .id(format!("active-session-node-{}", node_id.0))
+            .relative()
+            .h(px(SESSION_TREE_NODE_HEIGHT))
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .rounded(px(self.tokens.radii.md))
+            .px_2()
+            .cursor_pointer()
+            .border_b_1()
+            .border_color(rgba((theme.border << 8) | SESSION_ROW_SEPARATOR_ALPHA))
+            .bg(if selected {
+                selected_bg
+            } else {
+                rgba(theme.bg << 8)
+            })
+            .border_1()
+            .border_color(if selected {
+                selected_border
+            } else {
+                rgba(theme.bg << 8)
+            })
+            .hover(move |row| row.bg(rgb(theme.bg_hover)))
+            .child(
+                div()
+                    .mr(px(8.0))
+                    .flex_none()
+                    .child(
+                        if matches!(status.icon, LucideIcon::LoaderCircle) {
+                            self.render_loading_icon(
+                                (
+                                    gpui::SharedString::from(format!("session-connecting-{node_id:?}")),
+                                    0usize,
+                                ),
+                                SESSION_TREE_ICON_SIZE,
+                                rgb(theme.text_muted),
+                            )
+                        } else {
+                            Self::render_lucide_icon(
+                                LucideIcon::Server,
+                                SESSION_TREE_ICON_SIZE,
+                                rgb(theme.text_muted),
+                            )
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(SESSION_TREE_TEXT_SIZE))
+                    .font_weight(if selected {
+                        gpui::FontWeight::MEDIUM
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .text_color(rgb(theme.text))
+                    .child(node.title),
+            )
+            .when(!host.is_empty(), |row| {
+                row.child(
+                    div()
+                        .ml_2()
+                        .max_w(px(240.0))
+                        .truncate()
+                        .text_size(px(SESSION_TREE_META_TEXT_SIZE))
+                        .text_color(muted_text)
+                        .child(host_str),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
+                    let node_id = node_id.clone();
+                    let saved_connection_id = saved_connection_id.clone();
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        // Single click is a deliberate no-op: no selection, no
+                        // side effects. Each double click opens one independent
+                        // SSH session (a fresh connection per activation).
+                        if event.click_count < 2 {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if let Some(id) = saved_connection_id.as_deref() {
+                            this.open_saved_connection_new_terminal(id, window, cx);
+                        } else {
+                            this.duplicate_ssh_node_connection(&node_id, window, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let saved_connection_id = saved_connection_id.clone();
+                    let node_id = node_id.clone();
+                    let title = title_str;
+                    move |this, event: &MouseDownEvent, _window, cx| {
+                        this.open_active_session_context_menu(
+                            saved_connection_id.clone(),
+                            Some(node_id.clone()),
+                            title.clone(),
+                            None,
+                            None,
+                            event.position.x.into(),
+                            event.position.y.into(),
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_pending_saved_connection_row(
+        &self,
+        row: ActiveSessionSidebarRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.tokens.ui;
+        let Some(connection_id) = row.saved_connection_id.clone() else {
+            return div().into_any_element();
+        };
+        let muted_text = rgb(theme.text_muted);
+        let host = row.host;
+        let title_str = row.title.clone();
+        let group_str = row.group.clone();
+        let profile_kind = row
+            .pending_profile
+            .expect("pending sidebar rows always carry a profile kind");
+        let icon = self.saved_profile_icon(&connection_id, profile_kind);
+        let conn_id_clone = connection_id.clone();
+        let conn_id_for_right = connection_id.clone();
+
+        div()
+            .id(format!("active-session-pending-{connection_id}"))
+            .relative()
+            .h(px(SESSION_TREE_NODE_HEIGHT))
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .rounded(px(self.tokens.radii.md))
+            .px_2()
+            .cursor_pointer()
+            .border_b_1()
+            .border_color(rgba((theme.border << 8) | SESSION_ROW_SEPARATOR_ALPHA))
+            .hover(move |surface| surface.bg(rgb(theme.bg_hover)))
+            .child(
+                div()
+                    .mr(px(8.0))
+                    .flex_none()
+                    .child(Self::render_lucide_icon(
+                        icon,
+                        SESSION_TREE_ICON_SIZE,
+                        rgb(theme.text_muted),
+                    )),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(SESSION_TREE_TEXT_SIZE))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(rgb(theme.text))
+                    .child(row.title),
+            )
+            .when(!host.is_empty(), |r| {
+                r.child(
+                    div()
+                        .ml_2()
+                        .max_w(px(240.0))
+                        .truncate()
+                        .text_size(px(SESSION_TREE_META_TEXT_SIZE))
+                        .text_color(muted_text)
+                        .child(host),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // Pending saved profiles launch only on double click.
+                    if event.click_count >= 2 {
+                        match profile_kind {
+                            PendingSessionProfileKind::Ssh => {
+                                this.open_saved_connection(&conn_id_clone, window, cx);
+                            }
+                            PendingSessionProfileKind::Telnet => {
+                                this.open_saved_telnet_profile(&conn_id_clone, window, cx);
+                            }
+                            PendingSessionProfileKind::Serial => {
+                                this.open_saved_serial_profile(&conn_id_clone, window, cx);
+                            }
+                            PendingSessionProfileKind::Rdp
+                            | PendingSessionProfileKind::Vnc => {
+                                this.open_saved_remote_desktop_profile(
+                                    &conn_id_clone,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.open_active_session_context_menu(
+                        Some(conn_id_for_right.clone()),
+                        None,
+                        title_str.clone(),
+                        group_str.clone(),
+                        Some(profile_kind.clone()),
+                        event.position.x.into(),
+                        event.position.y.into(),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
             .into_any_element()
     }
 
@@ -1505,6 +1141,13 @@ impl WorkspaceApp {
         let Some(session) = row.standalone_session else {
             return div().into_any_element();
         };
+        // Running rows claim saved profiles; the menu must edit the same asset.
+        let profile_kind = match session.kind {
+            StandaloneActiveSessionKind::Telnet => Some(PendingSessionProfileKind::Telnet),
+            StandaloneActiveSessionKind::Serial => Some(PendingSessionProfileKind::Serial),
+            StandaloneActiveSessionKind::Rdp => Some(PendingSessionProfileKind::Rdp),
+            StandaloneActiveSessionKind::Vnc => Some(PendingSessionProfileKind::Vnc),
+        };
         let theme = self.tokens.ui;
         let active = match session.target {
             StandaloneActiveSessionTarget::Terminal(session_id) => {
@@ -1514,71 +1157,74 @@ impl WorkspaceApp {
                 self.active_tab_id(cx) == Some(tab_id)
             }
         };
-        let status = self.session_node_status(row.node_view.status());
-        let background = if active {
-            rgba((theme.accent << 8) | SESSION_FOCUS_TERMINAL_ACTIVE_BG_ALPHA)
-        } else {
-            rgba(theme.bg << 8)
-        };
+        // The running row copies the SSH connected-row chrome exactly: same
+        // Server icon, same selected background/border, same weight, no close
+        // affordance. Closing stays in the right-click menu.
+        let selected_bg = rgba((theme.accent << 8) | 0x1a);
+        let selected_border = rgba((theme.accent << 8) | 0x4d);
+        let background = if active { selected_bg } else { rgba(theme.bg << 8) };
+        let border = if active { selected_border } else { rgba(theme.bg << 8) };
+        let muted_text = rgb(theme.text_muted);
+        let host = row.host;
+        let title_str = row.title.clone();
+        let row_saved_profile_id = row.saved_connection_id.clone();
+        let icon = row_saved_profile_id
+            .as_deref()
+            .and_then(|profile_id| {
+                profile_kind.map(|profile_kind| self.saved_profile_icon(profile_id, profile_kind))
+            })
+            .unwrap_or_else(|| standalone_session_icon(session.kind));
 
         div()
+            .id(format!("active-session-standalone-{}", row.node_id.0))
             .h(px(SESSION_TREE_NODE_HEIGHT))
             .w_full()
             .px_2()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
             .rounded(px(self.tokens.radii.md))
+            .border_b_1()
+            .border_color(rgba((theme.border << 8) | SESSION_ROW_SEPARATOR_ALPHA))
+            .border_1()
+            .border_color(border)
             .bg(background)
             .hover(move |surface| surface.bg(rgb(theme.bg_hover)))
-            .child(self.render_session_status_dot(status))
-            .child(Self::render_lucide_icon(
-                session.kind.icon(),
-                SESSION_TREE_ICON_SIZE,
-                rgb(status.text_color),
-            ))
+            .child(
+                div()
+                    .mr(px(8.0))
+                    .flex_none()
+                    .child(Self::render_lucide_icon(
+                        icon,
+                        SESSION_TREE_ICON_SIZE,
+                        rgb(theme.text_muted),
+                    )),
+            )
             .child(
                 div()
                     .min_w(px(0.0))
                     .flex_1()
                     .truncate()
                     .text_size(px(SESSION_TREE_TEXT_SIZE))
-                    .text_color(rgb(status.text_color))
+                    .font_weight(if active {
+                        gpui::FontWeight::MEDIUM
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .text_color(rgb(theme.text))
                     .child(row.title),
             )
-            .child(
-                div()
-                    .size(px(22.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(self.tokens.radii.md))
-                    .cursor_pointer()
-                    .hover(move |button| {
-                        button.bg(rgba((theme.error << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA))
-                    })
-                    .child(Self::render_lucide_icon(
-                        LucideIcon::X,
-                        13.0,
-                        rgb(theme.text_muted),
-                    ))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event, window, cx| {
-                            match session.target {
-                                StandaloneActiveSessionTarget::Terminal(session_id) => {
-                                    this.close_terminal_session(session_id, window, cx);
-                                }
-                                StandaloneActiveSessionTarget::RemoteDesktop(tab_id) => {
-                                    this.request_close_tab_by_id(tab_id, window, cx);
-                                }
-                            }
-                            cx.stop_propagation();
-                        }),
-                    ),
-            )
+            .when(!host.is_empty(), |r| {
+                r.child(
+                    div()
+                        .ml_2()
+                        .max_w(px(240.0))
+                        .truncate()
+                        .text_size(px(SESSION_TREE_META_TEXT_SIZE))
+                        .text_color(muted_text)
+                        .child(host),
+                )
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1595,431 +1241,971 @@ impl WorkspaceApp {
                     cx.stop_propagation();
                 }),
             )
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn can_save_runtime_node_as_connection(
-        &self,
-        node_id: &NodeId,
-        saved_connection_id: Option<&str>,
-    ) -> bool {
-        if saved_connection_id.is_some() {
-            return false;
-        }
-        let Some(snapshot) = self.node_router.node_metadata(node_id) else {
-            return true;
-        };
-        // ManualPreset/Restored are already saved-connection materializations,
-        // while legacy AutoRoute nodes came from derived topology. Only live
-        // drill-down nodes and genuinely unsaved direct nodes expose this action.
-        matches!(
-            snapshot.origin,
-            NodeOrigin::DrillDown { .. } | NodeOrigin::Direct
-        )
-    }
-
-    pub(in crate::workspace) fn render_session_node_header(
-        &self,
-        node_id: NodeId,
-        node: ActiveSessionNode,
-        expanded: bool,
-        selected: bool,
-        status: SessionStatusStyle,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let selected_bg = rgba((theme.accent << 8) | 0x1a);
-        let selected_border = rgba((theme.accent << 8) | 0x4d);
-        let muted_text = rgb(theme.text_muted);
-        let row_text = rgb(status.text_color);
-        let port_text = format!(":{}", node.port);
-        let terminal_count = node.terminal_ids.len();
-        let selection_group_id =
-            crate::workspace::selectable_text::selectable_text_id("session-sidebar-node", &node_id);
-
-        div()
-            .relative()
-            .h(px(SESSION_TREE_NODE_HEIGHT))
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .rounded(px(self.tokens.radii.md))
-            .px_2()
-            .cursor_pointer()
-            .bg(if selected {
-                selected_bg
-            } else {
-                rgba(theme.bg << 8)
-            })
-            .border_1()
-            .border_color(if selected {
-                selected_border
-            } else {
-                rgba(theme.bg << 8)
-            })
-            .hover(move |row| row.bg(rgb(theme.bg_hover)))
-            .opacity(status.opacity)
-            .child(self.render_animated_chevron(
-                (
-                    gpui::SharedString::from(format!("session-node-chevron-{}", node_id.0)),
-                    expanded as usize,
-                ),
-                expanded,
-                12.0,
-                muted_text,
-            ))
-            .child(div().ml_1().mr(px(6.0)).child(
-                if matches!(status.icon, LucideIcon::LoaderCircle) {
-                    self.render_loading_icon(
-                        (
-                            gpui::SharedString::from(format!("session-connecting-{node_id:?}")),
-                            0usize,
-                        ),
-                        SESSION_TREE_ICON_SIZE,
-                        row_text,
-                    )
-                } else {
-                    Self::render_lucide_icon(status.icon, SESSION_TREE_ICON_SIZE, row_text)
-                },
-            ))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .truncate()
-                    .text_size(px(SESSION_TREE_TEXT_SIZE))
-                    .font_weight(if selected {
-                        gpui::FontWeight::MEDIUM
-                    } else {
-                        gpui::FontWeight::NORMAL
-                    })
-                    .text_color(row_text)
-                    .child(self.render_row_safe_selectable_display_text_in_group(
-                        selection_group_id,
-                        "session-sidebar-node-cell",
-                        "title",
-                        0,
-                        node.title,
-                        status.text_color,
-                        None,
-                        cx,
-                    )),
-            )
-            .when(node.port != 22, |row| {
-                row.child(
-                    div()
-                        .ml_2()
-                        .text_size(px(SESSION_TREE_META_TEXT_SIZE))
-                        .text_color(muted_text)
-                        .child(self.render_row_safe_selectable_display_text_in_group(
-                            selection_group_id,
-                            "session-sidebar-node-cell",
-                            "port",
-                            1,
-                            port_text,
-                            theme.text_muted,
-                            None,
-                            cx,
-                        )),
-                )
-            })
-            .when(terminal_count > 0, |row| {
-                row.child(
-                    div()
-                        .ml_2()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(2.0))
-                        .text_size(px(SESSION_TREE_META_TEXT_SIZE))
-                        .text_color(muted_text)
-                        .child(Self::render_lucide_icon(
-                            LucideIcon::Terminal,
-                            12.0,
-                            muted_text,
-                        ))
-                        .child(self.render_row_safe_selectable_display_text_in_group(
-                            selection_group_id,
-                            "session-sidebar-node-cell",
-                            "terminal-count",
-                            2,
-                            terminal_count.to_string(),
-                            theme.text_muted,
-                            None,
-                            cx,
-                        )),
-                )
-            })
-            .child(self.render_session_status_dot(status))
             .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.active_ssh_node_id = Some(node_id.clone());
-                    if !this.expanded_ssh_nodes.insert(node_id.clone()) {
-                        this.expanded_ssh_nodes.remove(&node_id);
-                    }
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.open_active_session_context_menu(
+                        row_saved_profile_id.clone(),
+                        None,
+                        title_str.clone(),
+                        None,
+                        profile_kind,
+                        event.position.x.into(),
+                        event.position.y.into(),
+                        cx,
+                    );
                     cx.stop_propagation();
-                    cx.notify();
                 }),
             )
             .into_any_element()
     }
 
-    pub(in crate::workspace) fn render_session_status_dot(
-        &self,
-        status: SessionStatusStyle,
-    ) -> AnyElement {
-        div()
-            .ml(px(6.0))
-            .size(px(if status.ring { 12.0 } else { 8.0 }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(if status.ring {
-                rgba((status.dot_color << 8) | 0x33)
-            } else {
-                rgba(status.dot_color << 8)
-            })
-            .child(div().size(px(8.0)).rounded_full().bg(rgb(status.dot_color)))
-            .into_any_element()
+    // =========================================================================
+    // Context Menu and Dialog Actions
+    // =========================================================================
+
+    pub(in crate::workspace) fn open_active_session_context_menu(
+        &mut self,
+        saved_connection_id: Option<String>,
+        node_id: Option<NodeId>,
+        title: String,
+        group: Option<String>,
+        profile_kind: Option<PendingSessionProfileKind>,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        // Only one sidebar context menu can be visible at a time.
+        self.active_session_folder_context_menu = None;
+        self.active_session_context_menu = Some(ActiveSessionContextMenu {
+            saved_connection_id,
+            node_id,
+            title,
+            group,
+            profile_kind,
+            x,
+            y,
+        });
+        cx.notify();
     }
 
-    pub(in crate::workspace) fn render_session_terminal_item(
-        &self,
-        depth: usize,
-        line_stops_here: bool,
-        session_id: TerminalSessionId,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let active = self.active_terminal_session_id(cx) == Some(session_id);
-        let text = self
-            .i18n
-            .t("sessions.focused_list.terminal")
-            .replace("{{number}}", &index.to_string());
-        let row_bg = if active {
-            rgba((theme.accent << 8) | 0x1a)
-        } else {
-            rgba(theme.bg << 8)
-        };
-        let text_color = if active {
-            rgb(theme.accent)
-        } else {
-            rgb(theme.text_muted)
-        };
+    pub(in crate::workspace) fn close_active_session_context_menu(&mut self) -> bool {
+        self.active_session_context_menu.take().is_some()
+    }
 
-        self.render_session_tree_child(
-            depth,
-            line_stops_here,
-            div()
-                .relative()
-                .h(px(SESSION_TREE_ITEM_HEIGHT))
-                .w_full()
-                .ml_1()
-                .flex()
-                .flex_row()
-                .items_center()
-                .rounded(px(self.tokens.radii.md))
-                .px_2()
-                .cursor_pointer()
-                .bg(row_bg)
-                .hover(move |row| row.bg(rgb(theme.bg_hover)))
-                .when(active, |row| {
-                    row.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(4.0))
-                            .bottom(px(4.0))
-                            .w(px(2.0))
-                            .rounded_full()
-                            .bg(rgb(theme.accent)),
-                    )
-                    .pl(px(6.0))
-                })
-                .child(Self::render_lucide_icon(
-                    LucideIcon::Terminal,
-                    SESSION_TREE_CHILD_ICON_SIZE,
-                    text_color,
-                ))
+    pub(in crate::workspace) fn render_active_session_context_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.active_session_context_menu.as_ref()?;
+        let viewport = window.viewport_size();
+        const MENU_WIDTH: f32 = 180.0;
+        const MENU_HEIGHT: f32 = 150.0;
+        const MENU_MARGIN: f32 = 8.0;
+
+        let placement = browser_behavior::clamp_context_menu_position(
+            menu.x,
+            menu.y,
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            MENU_WIDTH,
+            MENU_HEIGHT,
+            MENU_MARGIN,
+        );
+
+        let saved_connection_id = menu.saved_connection_id.clone();
+        let node_id = menu.node_id.clone();
+        let title = menu.title.clone();
+        let group = menu.group.clone();
+        let profile_kind = menu.profile_kind.clone();
+
+        let menu_body = context_menu_event_boundary(
+            context_menu_content(&self.tokens)
+                .w(px(MENU_WIDTH))
                 .child(
-                    div()
-                        .ml(px(6.0))
-                        .min_w(px(0.0))
-                        .flex_1()
-                        .truncate()
-                        .text_size(px(SESSION_TREE_TEXT_SIZE))
-                        .font_weight(if active {
-                            gpui::FontWeight::MEDIUM
-                        } else {
-                            gpui::FontWeight::NORMAL
-                        })
-                        .text_color(text_color)
-                        .child(self.render_row_safe_selectable_display_text_in_group(
-                            crate::workspace::selectable_text::selectable_text_id(
-                                "session-sidebar-terminal",
-                                session_id,
-                            ),
-                            "session-sidebar-terminal-cell",
-                            "label",
-                            0,
-                            text,
-                            if active {
-                                theme.accent
-                            } else {
-                                theme.text_muted
+                    context_menu_item(
+                        &self.tokens,
+                        self.i18n.t("sessions.context.edit"),
+                        ContextMenuItemKind::Plain,
+                        false,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let saved_connection_id = saved_connection_id.clone();
+                            let node_id = node_id.clone();
+                            let profile_kind = profile_kind.clone();
+                            move |this, _event, window, cx| {
+                                this.close_active_session_context_menu();
+                                if let Some(id) = saved_connection_id.as_deref() {
+                                    match profile_kind {
+                                        Some(PendingSessionProfileKind::Telnet) => {
+                                            this.open_telnet_profile_editor(id, window, cx);
+                                        }
+                                        Some(PendingSessionProfileKind::Serial) => {
+                                            this.open_serial_profile_editor(id, window, cx);
+                                        }
+                                        Some(PendingSessionProfileKind::Rdp) | Some(PendingSessionProfileKind::Vnc) => {
+                                            this.open_remote_desktop_profile_editor(id, window, cx);
+                                        }
+                                        _ => {
+                                            this.open_saved_connection_editor(id, None, window, cx);
+                                        }
+                                    }
+                                } else if let Some(node_id) = node_id.clone() {
+                                    this.open_runtime_node_reconnect_editor(node_id, window, cx);
+                                }
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
+                )
+                .child(
+                    context_menu_item(
+                        &self.tokens,
+                        self.i18n.t("sessions.context.duplicate"),
+                        ContextMenuItemKind::Plain,
+                        false,
+                        saved_connection_id.is_none() || matches!(
+                            profile_kind,
+                            Some(PendingSessionProfileKind::Telnet)
+                                | Some(PendingSessionProfileKind::Serial)
+                                | Some(PendingSessionProfileKind::Rdp)
+                                | Some(PendingSessionProfileKind::Vnc)
+                        ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let saved_connection_id = saved_connection_id.clone();
+                            move |this, _event, _window, cx| {
+                                this.close_active_session_context_menu();
+                                if let Some(id) = saved_connection_id.as_deref() {
+                                    if let Ok(Some(dup)) = this.connection_store.duplicate(id) {
+                                        let msg = this
+                                            .i18n
+                                            .t("sessions.dialog.duplicate_success")
+                                            .replace("{{name}}", &dup.name);
+                                        this.push_command_palette_toast(
+                                            msg,
+                                            None,
+                                            TerminalNoticeVariant::Success,
+                                            cx,
+                                        );
+                                        this.active_session_sidebar_rows_cache.borrow_mut().take();
+                                        cx.notify();
+                                    }
+                                }
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
+                )
+                .child(
+                    context_menu_item(
+                        &self.tokens,
+                        self.i18n.t("sessions.context.move_to_folder"),
+                        ContextMenuItemKind::Plain,
+                        false,
+                        saved_connection_id.is_none(),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let saved_connection_id = saved_connection_id.clone();
+                            let title = title.clone();
+                            let group = group.clone();
+                            let profile_kind = profile_kind.clone();
+                            move |this, _event, _window, cx| {
+                                this.close_active_session_context_menu();
+                                if let Some(id) = saved_connection_id.clone() {
+                                    this.open_move_session_folder_dialog(id, title.clone(), group.clone(), profile_kind.clone(), cx);
+                                }
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
+                )
+                .child(context_menu_separator(&self.tokens))
+                .child(
+                    context_menu_item(
+                        &self.tokens,
+                        self.i18n.t("sessions.context.delete"),
+                        ContextMenuItemKind::Plain,
+                        false,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let saved_connection_id = saved_connection_id.clone();
+                            let node_id = node_id.clone();
+                            let title = title.clone();
+                            let profile_kind = profile_kind.clone();
+                            move |this, _event, window, cx| {
+                                this.close_active_session_context_menu();
+                                if let Some(id) = saved_connection_id.as_deref() {
+                                    match profile_kind {
+                                        Some(PendingSessionProfileKind::Telnet) => {
+                                            let _ = this.connection_store.delete_telnet_profile(id);
+                                        }
+                                        Some(PendingSessionProfileKind::Serial) => {
+                                            let _ = this.connection_store.delete_serial_profile(id);
+                                        }
+                                        Some(PendingSessionProfileKind::Rdp) | Some(PendingSessionProfileKind::Vnc) => {
+                                            let _ = this.connection_store.delete_remote_desktop_profile(id);
+                                        }
+                                        _ => {
+                                            let _ = this.connection_store.delete(id);
+                                            if let Some(node_id) = this.saved_ssh_nodes.remove(id) {
+                                                this.remove_inactive_session_tree_node(&node_id, window, cx);
+                                            }
+                                        }
+                                    }
+                                    let msg = this
+                                        .i18n
+                                        .t("sessions.dialog.delete_success")
+                                        .replace("{{name}}", &title);
+                                    this.push_command_palette_toast(
+                                        msg,
+                                        None,
+                                        TerminalNoticeVariant::Success,
+                                        cx,
+                                    );
+                                    this.active_session_sidebar_rows_cache.borrow_mut().take();
+                                    cx.notify();
+                                } else if let Some(ref node_id) = node_id {
+                                    this.remove_inactive_session_tree_node(node_id, window, cx);
+                                    this.active_session_sidebar_rows_cache.borrow_mut().take();
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
+                ),
+        );
+
+        let menu_body = overlay_content_boundary(menu_body);
+
+        Some(
+            self.workspace_context_menu_backdrop(
+                div()
+                    .absolute()
+                    .top(px(placement.y))
+                    .left(px(placement.x))
+                    .child(menu_body),
+                cx,
+            )
+            .into_any_element(),
+        )
+    }
+
+    pub(in crate::workspace) fn open_active_session_folder_context_menu(
+        &mut self,
+        group: String,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        // Opening a folder menu replaces any open session menu so the two
+        // sidebar overlays can never stack on top of each other.
+        self.active_session_context_menu = None;
+        self.active_session_folder_context_menu = Some(ActiveSessionFolderContextMenu {
+            group,
+            x,
+            y,
+        });
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn close_active_session_folder_context_menu(&mut self) -> bool {
+        self.active_session_folder_context_menu.take().is_some()
+    }
+
+    pub(in crate::workspace) fn render_active_session_folder_context_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.active_session_folder_context_menu.as_ref()?;
+        let viewport = window.viewport_size();
+        const MENU_WIDTH: f32 = 180.0;
+        const MENU_HEIGHT: f32 = 88.0;
+        const MENU_MARGIN: f32 = 8.0;
+
+        let placement = browser_behavior::clamp_context_menu_position(
+            menu.x,
+            menu.y,
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            MENU_WIDTH,
+            MENU_HEIGHT,
+            MENU_MARGIN,
+        );
+
+        let group = menu.group.clone();
+
+        let menu_body = context_menu_event_boundary(
+            context_menu_content(&self.tokens)
+                .w(px(MENU_WIDTH))
+                .child(
+                    context_menu_item(
+                        &self.tokens,
+                        self.i18n.t("sessions.context.rename_folder"),
+                        ContextMenuItemKind::Plain,
+                        false,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let group = group.clone();
+                            move |this, _event, window, cx| {
+                                this.close_active_session_folder_context_menu();
+                                this.open_rename_session_folder_dialog(group.clone(), window, cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
+                )
+                .child(context_menu_separator(&self.tokens))
+                .child(
+                    context_menu_item(
+                        &self.tokens,
+                        self.i18n.t("sessions.context.delete_folder"),
+                        ContextMenuItemKind::Plain,
+                        false,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let group = group.clone();
+                            move |this, _event, _window, cx| {
+                                this.close_active_session_folder_context_menu();
+                                this.open_delete_session_folder_dialog(group.clone(), cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
+                ),
+        );
+
+        Some(
+            self.workspace_context_menu_backdrop(
+                div()
+                    .absolute()
+                    .top(px(placement.y))
+                    .left(px(placement.x))
+                    .child(menu_body),
+                cx,
+            )
+            .into_any_element(),
+        )
+    }
+
+    pub(in crate::workspace) fn open_delete_session_folder_dialog(
+        &mut self,
+        group: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_folder_delete_pending = Some(group);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn close_delete_session_folder_dialog(&mut self) -> bool {
+        self.session_folder_delete_pending.take().is_some()
+    }
+
+    /// Confirms the delete-folder dialog through the single shared path used
+    /// by both the destructive button and the window-level Enter routing.
+    pub(in crate::workspace) fn confirm_delete_session_folder_dialog(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.session_folder_delete_pending.clone() else {
+            return;
+        };
+        let _ = self.connection_store.delete_group(&group);
+        let msg = self
+            .i18n
+            .t("sessions.dialog.folder_deleted")
+            .replace("{{group}}", &group);
+        self.push_command_palette_toast(msg, None, TerminalNoticeVariant::Success, cx);
+        self.close_delete_session_folder_dialog();
+        self.active_session_sidebar_rows_cache.borrow_mut().take();
+        self.expanded_ssh_nodes
+            .remove(&NodeId::new(format!("folder-{group}")));
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn render_delete_session_folder_dialog(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = self.tokens.ui;
+        let group = self.session_folder_delete_pending.as_ref()?.clone();
+
+        let modal = div()
+            .w(px(380.0))
+            .p_4()
+            .rounded(px(self.tokens.radii.lg))
+            .bg(rgb(theme.bg_card))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            // Pointer-downs inside the dialog must not reach the dismissible
+            // backdrop, or clicking any content area closes the dialog.
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .text_size(px(self.tokens.metrics.ui_text_base))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.text))
+                    .child(self.i18n.t("sessions.dialog.delete_folder_title")),
+            )
+            .child(
+                div()
+                    .text_size(px(self.tokens.metrics.ui_text_sm))
+                    .text_color(rgb(theme.text_muted))
+                    .child(
+                        self.i18n
+                            .t("sessions.dialog.delete_folder_confirm")
+                            .replace("{{name}}", &group),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        oxideterm_gpui_ui::button::button(
+                            &self.tokens,
+                            self.i18n.t("common.actions.cancel"),
+                            ButtonTone::Secondary,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _event, _window, cx| {
+                                this.close_delete_session_folder_dialog();
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        oxideterm_gpui_ui::button::button_with(
+                            &self.tokens,
+                            self.i18n.t("common.actions.confirm"),
+                            oxideterm_gpui_ui::button::ButtonOptions {
+                                variant: oxideterm_gpui_ui::button::ButtonVariant::Destructive,
+                                size: oxideterm_gpui_ui::button::ButtonSize::Default,
+                                radius: oxideterm_gpui_ui::button::ButtonRadius::Md,
+                                disabled: false,
                             },
-                            None,
-                            cx,
-                        )),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.confirm_delete_session_folder_dialog(cx);
+                            }),
+                        ),
+                    ),
+            );
+
+        Some(
+            dismissible_dialog_backdrop()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.close_delete_session_folder_dialog();
+                        cx.notify();
+                    }),
                 )
                 .child(
                     div()
-                        .size(px(20.0))
+                        .size_full()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(self.tokens.radii.md))
-                        .opacity(0.0)
-                        .hover(|button| button.opacity(1.0))
-                        .child(Self::render_lucide_icon(LucideIcon::X, 12.0, text_color))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, window, cx| {
-                                this.close_terminal_session(session_id, window, cx);
-                                cx.stop_propagation();
-                            }),
-                        ),
+                        .child(modal),
                 )
+                .into_any_element(),
+        )
+    }
+
+    // =========================================================================
+    // Folder Dialogs
+    // =========================================================================
+
+    pub(in crate::workspace) fn open_new_session_folder_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_session_folder_dialog = Some(NewSessionFolderDialogState::default());
+        self.ime_marked_text = None;
+        self.set_ime_selection_from_anchor(WorkspaceImeTarget::NewSessionFolder, 0, 0);
+        window.focus(&self.focus_handle, cx);
+        self.show_active_input_caret(cx);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn open_rename_session_folder_dialog(
+        &mut self,
+        group: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Prefill the current group name and leave the caret at its end so a
+        // plain confirm renames without retyping the whole path.
+        let caret = group.encode_utf16().count();
+        let original = group.clone();
+        self.new_session_folder_dialog = Some(NewSessionFolderDialogState {
+            folder_name: group,
+            rename_group: Some(original),
+        });
+        self.ime_marked_text = None;
+        self.set_ime_selection_from_anchor(WorkspaceImeTarget::NewSessionFolder, caret, caret);
+        window.focus(&self.focus_handle, cx);
+        self.show_active_input_caret(cx);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn close_new_session_folder_dialog(&mut self) -> bool {
+        self.new_session_folder_dialog.take().is_some()
+    }
+
+    /// Confirms the new/rename folder dialog through the single shared path
+    /// used by both the mouse confirm button and the window-level Enter
+    /// routing, so keyboard confirm performs the identical rename/create
+    /// branch as the mouse.
+    pub(in crate::workspace) fn confirm_new_session_folder_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.new_session_folder_dialog.as_ref() else {
+            return;
+        };
+        let name = dialog.folder_name.trim().to_string();
+        let rename_group = dialog.rename_group.clone();
+        if !name.is_empty() {
+            if let Some(original) = rename_group.as_ref()
+                && name != *original
+            {
+                let _ = self.connection_store.rename_group(original, name.clone());
+                // The folder node id embeds the group name, so preserve expand
+                // state across the rename instead of collapsing.
+                let old_id = NodeId::new(format!("folder-{original}"));
+                let new_id = NodeId::new(format!("folder-{name}"));
+                if self.expanded_ssh_nodes.remove(&old_id) {
+                    self.expanded_ssh_nodes.insert(new_id);
+                }
+                let msg = self
+                    .i18n
+                    .t("sessions.dialog.folder_renamed")
+                    .replace("{{group}}", &name);
+                self.push_command_palette_toast(msg, None, TerminalNoticeVariant::Success, cx);
+            } else {
+                let _ = self.connection_store.create_group(name.clone());
+                // New folders open expanded so the created folder is visible
+                // and its children land under it immediately.
+                let folder_id = NodeId::new(format!("folder-{name}"));
+                self.expanded_ssh_nodes.insert(folder_id);
+                let msg = self
+                    .i18n
+                    .t("sessions.dialog.folder_created")
+                    .replace("{{group}}", &name);
+                self.push_command_palette_toast(msg, None, TerminalNoticeVariant::Success, cx);
+            }
+            self.active_session_sidebar_rows_cache.borrow_mut().take();
+        }
+        self.close_new_session_folder_dialog();
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn open_move_session_folder_dialog(
+        &mut self,
+        connection_id: String,
+        connection_title: String,
+        current_group: Option<String>,
+        profile_kind: Option<PendingSessionProfileKind>,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_session_folder_dialog = Some(MoveSessionFolderDialogState {
+            connection_id,
+            connection_title,
+            current_group: current_group.clone(),
+            selected_group: current_group,
+            custom_folder_name: String::new(),
+            is_custom: false,
+            profile_kind,
+        });
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn close_move_session_folder_dialog(&mut self) -> bool {
+        self.move_session_folder_dialog.take().is_some()
+    }
+
+    /// Option order mirrors the rendered list: the no-folder target first,
+    /// then existing groups. Keyboard navigation and rendering share it.
+    fn move_session_folder_options(&self) -> Vec<Option<String>> {
+        let mut options = vec![None];
+        options.extend(
+            self.connection_store
+                .groups()
+                .iter()
+                .map(|group| Some(group.clone())),
+        );
+        options
+    }
+
+    /// Moves the keyboard selection across the folder options with wraparound.
+    pub(in crate::workspace) fn move_session_folder_selection(
+        &mut self,
+        delta: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.move_session_folder_dialog.as_ref() else {
+            return;
+        };
+        let options = self.move_session_folder_options();
+        if options.is_empty() {
+            return;
+        }
+        let current = dialog.selected_group.clone();
+        let index = options
+            .iter()
+            .position(|option| *option == current)
+            .unwrap_or(0);
+        let next = (index as isize + delta).rem_euclid(options.len() as isize) as usize;
+        if let Some(dialog) = self.move_session_folder_dialog.as_mut() {
+            dialog.selected_group = options[next].clone();
+        }
+        cx.notify();
+    }
+
+    /// Moves the pending connection into `target_group` and closes the
+    /// dialog. Row clicks and the keyboard Enter routing share this path so
+    /// both apply the identical move, toast, and cache invalidation.
+    pub(in crate::workspace) fn confirm_move_session_folder_dialog(
+        &mut self,
+        target_group: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.move_session_folder_dialog.as_ref() else {
+            return;
+        };
+        let connection_id = dialog.connection_id.clone();
+        match dialog.profile_kind {
+            Some(PendingSessionProfileKind::Telnet) => {
+                let _ = self.connection_store.move_session_assets_to_group(&[], &[], &[connection_id], &[], &[], target_group.as_deref());
+            }
+            Some(PendingSessionProfileKind::Serial) => {
+                let _ = self.connection_store.move_session_assets_to_group(&[], &[connection_id], &[], &[], &[], target_group.as_deref());
+            }
+            Some(PendingSessionProfileKind::Rdp) | Some(PendingSessionProfileKind::Vnc) => {
+                let _ = self.connection_store.move_session_assets_to_group(&[], &[], &[], &[], &[connection_id], target_group.as_deref());
+            }
+            _ => {
+                let _ = self.connection_store.move_to_group(&[connection_id], target_group.as_deref());
+            }
+        }
+        // The no-folder target reuses the localized option label instead of a
+        // hardcoded name in the confirmation toast.
+        let group_label = target_group.unwrap_or_else(|| self.i18n.t("sessions.dialog.no_folder"));
+        let msg = self
+            .i18n
+            .t("sessions.dialog.move_success")
+            .replace("{{group}}", &group_label);
+        self.push_command_palette_toast(msg, None, TerminalNoticeVariant::Success, cx);
+        self.active_session_sidebar_rows_cache.borrow_mut().take();
+        self.close_move_session_folder_dialog();
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn render_new_session_folder_dialog(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.new_session_folder_dialog.as_ref()?;
+        let theme = self.tokens.ui;
+        let rename_group = dialog.rename_group.clone();
+        let target = WorkspaceImeTarget::NewSessionFolder;
+
+        let input = text_input(
+            &self.tokens,
+            TextInputView {
+                value: dialog.folder_name.as_str(),
+                placeholder: self.i18n.t("sessions.dialog.new_folder_placeholder"),
+                focused: true,
+                caret_visible: self.input_caret.visible(),
+                secret: false,
+                selected_all: false,
+                selected_range: self.ime_selected_range_for_target(target, cx),
+                marked_text: self.marked_text_for_target(target, cx),
+            },
+        )
+        .h(px(34.0))
+        .cursor(CursorStyle::IBeam);
+        let workspace = cx.entity();
+        let input = text_input_anchor_probe(
+            target.anchor_id(),
+            input
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _event, window, cx| {
-                        this.focus_terminal_session(session_id, window, cx);
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.ime_marked_text = None;
+                        this.show_active_input_caret(cx);
+                        window.focus(&this.focus_handle, cx);
+                        this.begin_ime_selection_from_mouse_down(target, event, window, cx);
                         cx.stop_propagation();
                     }),
                 )
-                .into_any_element(),
-        )
-    }
-
-    pub(in crate::workspace) fn render_session_action_item(
-        &self,
-        depth: usize,
-        line_stops_here: bool,
-        icon: LucideIcon,
-        label: String,
-        variant: SessionActionVariant,
-        listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = self.tokens.ui;
-        let (text_color, hover_bg) = match variant {
-            SessionActionVariant::Primary => (theme.accent, theme.bg_hover),
-            SessionActionVariant::Danger => {
-                (theme.error, mix_rgb(theme.bg_hover, theme.error, 0.10))
-            }
-        };
-        let selection_group_id = crate::workspace::selectable_text::selectable_text_id(
-            "session-sidebar-action",
-            (depth, line_stops_here, label.as_str()),
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    this.update_ime_selection_drag_from_mouse_move(event, window, cx);
+                })),
+            move |anchor, _window, cx| {
+                let _ = workspace.update(cx, |this, cx| {
+                    this.update_text_input_anchor(anchor, cx);
+                });
+            },
         );
 
-        self.render_session_tree_child(
-            depth,
-            line_stops_here,
-            div()
-                .h(px(SESSION_TREE_ITEM_HEIGHT))
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .rounded(px(self.tokens.radii.md))
-                .px_2()
-                .text_size(px(SESSION_TREE_TEXT_SIZE))
-                .text_color(rgb(text_color))
-                .cursor_pointer()
-                .hover(move |row| row.bg(rgb(hover_bg)))
-                .child(Self::render_lucide_icon(
-                    icon,
-                    SESSION_TREE_CHILD_ICON_SIZE,
-                    rgb(text_color),
-                ))
-                .child(div().truncate().child(
-                    self.render_row_safe_selectable_display_text_in_group(
-                        selection_group_id,
-                        "session-sidebar-action-cell",
-                        "label",
-                        0,
-                        label,
-                        text_color,
-                        None,
-                        cx,
+        let modal = div()
+            .w(px(380.0))
+            .p_4()
+            .rounded(px(self.tokens.radii.lg))
+            .bg(rgb(theme.bg_card))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            // Pointer-downs inside the dialog must not reach the dismissible
+            // backdrop, or clicking any content area closes the dialog.
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .text_size(px(self.tokens.metrics.ui_text_base))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.text))
+                    .child(if rename_group.is_some() {
+                        self.i18n.t("sessions.dialog.rename_folder_title")
+                    } else {
+                        self.i18n.t("sessions.dialog.new_folder_title")
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .child(input),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        oxideterm_gpui_ui::button::button(
+                            &self.tokens,
+                            self.i18n.t("common.actions.cancel"),
+                            ButtonTone::Secondary,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _event, _window, cx| {
+                                this.close_new_session_folder_dialog();
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        oxideterm_gpui_ui::button::button(
+                            &self.tokens,
+                            self.i18n.t("common.actions.confirm"),
+                            ButtonTone::Primary,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.confirm_new_session_folder_dialog(cx);
+                            }),
+                        ),
                     ),
-                ))
-                .on_mouse_down(MouseButton::Left, listener)
+            );
+
+        Some(
+            dismissible_dialog_backdrop()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.close_new_session_folder_dialog();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(modal),
+                )
                 .into_any_element(),
         )
     }
 
-    pub(in crate::workspace) fn render_session_tree_child(
+    pub(in crate::workspace) fn render_move_session_folder_dialog(
         &self,
-        depth: usize,
-        line_stops_here: bool,
-        child: AnyElement,
-    ) -> AnyElement {
-        tree_child(
-            &self.tokens,
-            TreeBranchMetrics::tauri_session_tree(),
-            depth,
-            line_stops_here,
-            child,
-        )
-    }
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.move_session_folder_dialog.as_ref()?;
+        let theme = self.tokens.ui;
+        let connection_title = dialog.connection_title.clone();
+        let groups = self.connection_store.groups().to_vec();
 
-    pub(in crate::workspace) fn session_node_status(
-        &self,
-        status: ActiveSessionStatus,
-    ) -> SessionStatusStyle {
-        match status {
-            ActiveSessionStatus::Connecting => SessionStatusStyle {
-                icon: LucideIcon::LoaderCircle,
-                text_color: self.tokens.ui.info,
-                dot_color: self.tokens.ui.info,
-                opacity: 1.0,
-                ring: false,
-            },
-            ActiveSessionStatus::Active => SessionStatusStyle {
-                icon: LucideIcon::Server,
-                text_color: self.tokens.ui.success,
-                dot_color: self.tokens.ui.success,
-                opacity: 1.0,
-                ring: true,
-            },
-            ActiveSessionStatus::Connected => SessionStatusStyle {
-                icon: LucideIcon::Server,
-                text_color: self.tokens.ui.success,
-                dot_color: self.tokens.ui.success,
-                opacity: 1.0,
-                ring: true,
-            },
-            ActiveSessionStatus::Error => SessionStatusStyle {
-                icon: LucideIcon::WifiOff,
-                text_color: self.tokens.ui.error,
-                dot_color: self.tokens.ui.error,
-                opacity: 1.0,
-                ring: false,
-            },
-            ActiveSessionStatus::Idle => SessionStatusStyle {
-                icon: LucideIcon::Server,
-                text_color: self.tokens.ui.text_muted,
-                dot_color: self.tokens.ui.text_muted,
-                opacity: 0.7,
-                ring: false,
-            },
+        let mut group_options = Vec::new();
+        // Option 1: Root / No folder
+        group_options.push((None, self.i18n.t("sessions.dialog.no_folder")));
+        // Existing groups
+        for g in groups {
+            group_options.push((Some(g.clone()), g));
         }
+
+        let modal = div()
+            .w(px(380.0))
+            .max_h(px(420.0))
+            .p_4()
+            .rounded(px(self.tokens.radii.lg))
+            .bg(rgb(theme.bg_card))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            // Pointer-downs inside the dialog must not reach the dismissible
+            // backdrop, or clicking any content area closes the dialog.
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .text_size(px(self.tokens.metrics.ui_text_base))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.text))
+                    .child(format!(
+                        "{}: {}",
+                        self.i18n.t("sessions.dialog.move_folder_title"),
+                        connection_title
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .children(
+                        group_options.into_iter().map(|(target_group, label)| {
+                            // The highlight follows the dialog selection so
+                            // keyboard navigation stays visible; it starts on
+                            // the current group because selection is seeded
+                            // from it when the dialog opens.
+                            let is_selected = dialog.selected_group == target_group;
+                            let target_grp = target_group.clone();
+                            let display_label = label.clone();
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(self.tokens.radii.md))
+                                .cursor_pointer()
+                                .bg(if is_selected {
+                                    rgba((theme.accent << 8) | 0x26)
+                                } else {
+                                    rgb(theme.bg)
+                                })
+                                .hover(move |row| row.bg(rgb(theme.bg_hover)))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(self.tokens.metrics.ui_text_sm))
+                                        .text_color(if is_selected {
+                                            rgb(theme.accent)
+                                        } else {
+                                            rgb(theme.text)
+                                        })
+                                        .child(display_label.clone()),
+                                )
+                                .when(is_selected, |row| {
+                                    row.child(Self::render_lucide_icon(
+                                        LucideIcon::Check,
+                                        14.0,
+                                        rgb(theme.accent),
+                                    ))
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _event, _window, cx| {
+                                        this.confirm_move_session_folder_dialog(
+                                            target_grp.clone(),
+                                            cx,
+                                        );
+                                    }),
+                                )
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        oxideterm_gpui_ui::button::button(
+                            &self.tokens,
+                            self.i18n.t("common.actions.cancel"),
+                            ButtonTone::Secondary,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _event, _window, cx| {
+                                this.close_move_session_folder_dialog();
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            );
+
+        Some(
+            dismissible_dialog_backdrop()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.close_move_session_folder_dialog();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(modal),
+                )
+                .into_any_element(),
+        )
     }
 }

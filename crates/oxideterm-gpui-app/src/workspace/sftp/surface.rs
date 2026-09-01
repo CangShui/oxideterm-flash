@@ -192,14 +192,14 @@ impl WorkspaceApp {
     ) -> AnyElement {
         let theme = self.tokens.ui;
         let Some(node_id) = self.embedded_sftp_node_id.clone() else {
-            return div()
+            let mut empty = div()
                 .flex_1()
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_2()
+                .gap_3()
                 .px_4()
                 .text_size(px(SFTP_TEXT_XS))
                 .text_color(rgb(theme.text_muted))
@@ -207,9 +207,18 @@ impl WorkspaceApp {
                     LucideIcon::FolderOpen,
                     28.0,
                     rgb(theme.text_muted),
-                ))
-                .child(self.i18n.t("sftp.sidebar.no_session"))
-                .into_any_element();
+                ));
+            if let Some(reconnect_node_id) = self.active_visible_ssh_node_id(cx) {
+                empty = empty.child(self.render_sftp_text_button(
+                    self.i18n.t("sftp.sidebar.reconnect"),
+                    true,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.open_sftp_files_for_node(reconnect_node_id.clone(), cx);
+                        cx.stop_propagation();
+                    }),
+                ));
+            }
+            return empty.into_any_element();
         };
         if self
             .active_tab(cx)
@@ -338,13 +347,13 @@ impl WorkspaceApp {
                                 }),
                                 cx.entity(),
                             ))
-                            // Dismissing the embedded surface leaves the node
-                            // and its other consumers connected.
+                            // X explicitly closes the SFTP view until the user
+                            // presses reconnect or starts SSH again.
                             .child(self.render_sftp_icon_button(
                                 LucideIcon::X,
                                 self.i18n.t("sftp.preview.close"),
                                 cx.listener(move |this, _event, _window, cx| {
-                                    this.close_embedded_sftp_for_node(&close_node_id, cx);
+                                    this.close_sftp_files_manually_for_node(&close_node_id, cx);
                                     cx.stop_propagation();
                                 }),
                                 cx.entity(),
@@ -415,11 +424,13 @@ impl WorkspaceApp {
 
         if editing {
             // The sidebar uses one compact text field instead of the full breadcrumb row.
+            // If the draft input is empty, seed it with the current path so it never displays blank.
+            let active_input = if path_input.is_empty() { path } else { path_input };
             path_bar = path_bar
                 .child(self.render_sftp_inline_text(
                     SftpInput::RemotePath,
                     Some(SftpPane::Remote),
-                    path_input,
+                    active_input,
                     "sftp.file_list.path_placeholder",
                     focused,
                     cx,
@@ -448,14 +459,22 @@ impl WorkspaceApp {
                         ),
                 );
         } else {
+            // The path is the panel's primary orientation cue: keep it at the
+            // regular list size and full text contrast instead of a tiny muted
+            // line that reads as an empty box.
             path_bar = path_bar
                 .cursor(CursorStyle::IBeam)
                 .child(
                     div()
+                        // This text sits in a flex path bar: it must grow before
+                        // truncating, otherwise GPUI collapses it to "...".
+                        .flex_1()
                         .min_w(px(0.0))
-                        .truncate()
-                        .text_size(px(SFTP_TEXT_10))
-                        .text_color(rgb(theme.text_muted))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(SFTP_TEXT_XS))
+                        .text_color(rgb(theme.text))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .child(path.to_string()),
                 )
                 .on_mouse_down(
@@ -1075,6 +1094,12 @@ impl WorkspaceApp {
             SftpPane::Local => self.sftp_view.read(cx).local_path_scroll.clone(),
             SftpPane::Remote => self.sftp_view.read(cx).remote_path_scroll.clone(),
         };
+        // A path that shrank below the container cannot be scrolled; correct
+        // the stale offset here so this frame's paint already shows the start
+        // of the path instead of a bar translated out of view.
+        crate::workspace::breadcrumb_scroll::reset_breadcrumb_scroll_if_content_fits(
+            &scroll_handle,
+        );
         let mut inner = div()
             .flex_none()
             .flex()
@@ -1291,7 +1316,10 @@ impl WorkspaceApp {
                 let icon = match (field, direction) {
                     (SftpSortField::Name, SftpSortDirection::Asc) => LucideIcon::ArrowUpAZ,
                     (SftpSortField::Name, SftpSortDirection::Desc) => LucideIcon::ArrowDownAZ,
-                    _ => LucideIcon::ArrowUpDown,
+                    // Size and Modified sort numerically, so they render plain
+                    // directional arrows instead of the bidirectional default.
+                    (_, SftpSortDirection::Asc) => LucideIcon::ArrowUp,
+                    (_, SftpSortDirection::Desc) => LucideIcon::ArrowDown,
                 };
                 header.child(Self::render_lucide_icon(
                     icon,

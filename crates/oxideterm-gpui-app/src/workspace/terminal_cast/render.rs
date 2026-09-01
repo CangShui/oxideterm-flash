@@ -3,7 +3,7 @@ use crate::workspace::ime::WorkspaceImeTarget;
 use oxideterm_gpui_ui::button::{
     ButtonOptions, ButtonRadius, ButtonSize, ButtonVariant, IconButtonOptions, ToolbarButtonOptions,
 };
-use oxideterm_gpui_ui::text_input::{text_caret, text_input_anchor_probe};
+use oxideterm_gpui_ui::text_input::{text_input_anchor_probe, text_input_value_segments};
 use oxideterm_terminal_recording::{format_cast_time, format_recording_elapsed};
 
 impl WorkspaceApp {
@@ -206,6 +206,15 @@ impl WorkspaceApp {
         } else {
             player.search_query.clone()
         };
+        let search_selection_range = self
+            .ime_selected_range_for_target(search_target, cx)
+            .filter(|_| !search_empty);
+        let search_caret_offset = search_selection_range
+            .as_ref()
+            .filter(|range| range.start == range.end)
+            .map(|range| range.start);
+        let search_selection = search_selection_range
+            .filter(|range| range.start < range.end);
         let search_results = player.search_results;
         let search_result_count = search_results.len();
         let search_results_empty = search_results.is_empty();
@@ -409,7 +418,21 @@ window.focus(&this.focus_handle, cx);
                                                             .flex()
                                                             .items_center()
                                                             .overflow_hidden()
-                                                            .child(search_text)
+                                                            // The shared segments renderer
+                                                            // places the caret at the real
+                                                            // offset and highlights the
+                                                            // active selection, instead of
+                                                            // always appending a caret at
+                                                            // the end of the query.
+                                                            .child(text_input_value_segments(
+                                                                &self.tokens,
+                                                                &search_text,
+                                                                search_empty,
+                                                                search_selection,
+                                                                search_caret_offset,
+                                                                player.search_focused
+                                                                    && self.input_caret.visible(),
+                                                            ))
                                                             .when_some(
                                                                 search_marked,
                                                                 |input, marked| {
@@ -423,15 +446,6 @@ window.focus(&this.focus_handle, cx);
                                                                                 marked.to_string(),
                                                                             ),
                                                                     )
-                                                                },
-                                                            )
-                                                            .when(
-                                                                player.search_focused,
-                                                                |input| {
-                                                                    input.child(text_caret(
-                                                                        &self.tokens,
-                                                                        self.input_caret.visible(),
-                                                                    ))
                                                                 },
                                                             ),
                                                     ),

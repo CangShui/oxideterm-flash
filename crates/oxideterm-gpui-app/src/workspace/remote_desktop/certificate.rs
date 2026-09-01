@@ -251,6 +251,11 @@ impl WorkspaceApp {
         let reject_challenge_id = challenge_id.clone();
         let accept_challenge_id = challenge_id;
         let accept_fingerprint = fingerprint.clone();
+        // Per-dialog motion id keyed by the challenge so two identity dialogs
+        // never share one enter/exit animation timeline.
+        let motion_id = gpui::ElementId::Name(
+            format!("remote-desktop-certificate-confirm-{remember_challenge_id}").into(),
+        );
         let endpoint = challenge.certificate.endpoint.format_authority();
         let endpoint_label = self
             .i18n
@@ -319,6 +324,7 @@ impl WorkspaceApp {
 
         confirm_dialog(
             &self.tokens,
+            motion_id,
             ConfirmDialogView {
                 variant: if certificate_changed {
                     ConfirmDialogVariant::Danger
@@ -397,9 +403,15 @@ impl WorkspaceApp {
         let challenge_id = challenge.certificate.challenge_id.clone();
         let fingerprint = challenge.certificate.sha256_fingerprint.clone();
         let reject_challenge_id = challenge_id.clone();
+        // Per-dialog motion id keyed by the challenge so two identity dialogs
+        // never share one enter/exit animation timeline.
+        let motion_id = gpui::ElementId::Name(
+            format!("remote-desktop-weak-security-confirm-{challenge_id}").into(),
+        );
 
         confirm_dialog(
             &self.tokens,
+            motion_id,
             ConfirmDialogView {
                 variant: ConfirmDialogVariant::Danger,
                 title: div().child(self.i18n.t(title_key)).into_any_element(),

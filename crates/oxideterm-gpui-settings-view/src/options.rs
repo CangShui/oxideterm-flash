@@ -4,7 +4,7 @@ use oxideterm_gpui_ui::select::SelectAnchorId;
 use oxideterm_i18n::I18n;
 use oxideterm_settings::{
     AiThinkingStyle, AnimationSpeed, BackgroundFit, ConflictAction,
-    CursorStyle as SettingsCursorStyle, FontFamily, IdeAgentMode, Language, PersistedSettings,
+    CursorStyle as SettingsCursorStyle, FontFamily, Language, PersistedSettings,
     TerminalBackspaceSequence, TerminalDeleteSequence, TerminalEncoding, UiDensity, UpdateChannel,
     UpdateProxyMode, UpdateProxyProtocol,
 };
@@ -190,11 +190,6 @@ pub fn background_tab_options() -> &'static [(&'static str, &'static str, Settin
             SettingsBackgroundTabIcon::Monitor,
         ),
         (
-            "file_manager",
-            "settings_view.terminal.bg_tab_files",
-            SettingsBackgroundTabIcon::Folder,
-        ),
-        (
             "launcher",
             "settings_view.terminal.bg_tab_launcher",
             SettingsBackgroundTabIcon::Rocket,
@@ -228,11 +223,6 @@ pub fn background_tab_options() -> &'static [(&'static str, &'static str, Settin
             "sftp",
             "settings_view.terminal.bg_tab_sftp",
             SettingsBackgroundTabIcon::FolderInput,
-        ),
-        (
-            "ide",
-            "settings_view.terminal.bg_tab_ide",
-            SettingsBackgroundTabIcon::Code2,
         ),
         (
             "forwards",
@@ -351,22 +341,6 @@ pub fn set_sftp_speed_limit_kbps(settings: &mut PersistedSettings, value: i64) {
     settings.sftp.speed_limit_kbps = value;
 }
 
-pub fn set_ide_auto_save(settings: &mut PersistedSettings, value: bool) {
-    settings.ide.auto_save = value;
-}
-
-pub fn set_ide_word_wrap(settings: &mut PersistedSettings, value: bool) {
-    settings.ide.word_wrap = value;
-}
-
-pub fn set_ide_font_size(settings: &mut PersistedSettings, value: i64) {
-    settings.ide.font_size = Some(value);
-}
-
-pub fn set_ide_line_height_percent(settings: &mut PersistedSettings, value: i64) {
-    settings.ide.line_height = Some(value as f64 / 100.0);
-}
-
 pub fn set_command_bar_enabled(settings: &mut PersistedSettings, value: bool) {
     settings.terminal.command_bar.enabled = value;
 }
@@ -477,8 +451,8 @@ pub fn settings_slider_anchor_id(slider: SettingsSlider) -> SelectAnchorId {
     }
 }
 
-pub fn language_options() -> [Language; 3] {
-    [Language::En, Language::ZhCn, Language::ZhTw]
+pub fn language_options() -> [Language; 2] {
+    [Language::En, Language::ZhCn]
 }
 
 pub fn cycle_sftp_conflict(settings: &mut PersistedSettings) {
@@ -487,14 +461,6 @@ pub fn cycle_sftp_conflict(settings: &mut PersistedSettings) {
         ConflictAction::Overwrite => ConflictAction::Skip,
         ConflictAction::Skip => ConflictAction::Rename,
         ConflictAction::Rename => ConflictAction::Ask,
-    };
-}
-
-pub fn cycle_ide_agent_mode(settings: &mut PersistedSettings) {
-    settings.ide.agent_mode = match settings.ide.agent_mode {
-        IdeAgentMode::Ask => IdeAgentMode::Enabled,
-        IdeAgentMode::Enabled => IdeAgentMode::Disabled,
-        IdeAgentMode::Disabled => IdeAgentMode::Ask,
     };
 }
 

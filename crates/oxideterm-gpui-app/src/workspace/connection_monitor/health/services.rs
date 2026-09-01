@@ -800,10 +800,8 @@ impl HostToolsEntity {
         let state_color = service_state_color(&service.active_state, theme.text_muted);
 
         div()
-            .w_full()
-            .min_w_0()
-            .border_b_1()
-            .border_color(rgba((theme.border << 8) | MONITOR_BORDER_ALPHA))
+            .id(format!("host-service-row-{}", service.id))
+            .w_full()           .border_color(rgba((theme.border << 8) | MONITOR_BORDER_ALPHA))
             .cursor_pointer()
             .hover(|row| row.bg(rgb(theme.bg_hover)))
             .child(

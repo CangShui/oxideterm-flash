@@ -21,6 +21,7 @@ use oxideterm_remote_desktop::{
     RemoteDesktopVncImageQuality, RemoteDesktopVncOptions, RemoteDesktopVncSecurityPolicy,
     RemoteDesktopVncSessionMode,
 };
+use crate::workspace::session_icons::default_connection_transport_icon_id;
 use zeroize::Zeroize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,12 +138,10 @@ pub(in crate::workspace) fn new_connection_form_mode(
 
 pub(in crate::workspace) fn connection_icon_field_visible(
     mode: NewConnectionFormMode,
-    drill_down_mode: bool,
     transport: NewConnectionTransport,
 ) -> bool {
     // Only persisted session assets expose custom icons in this shared form.
     mode != NewConnectionFormMode::SavedConnectionPrompt
-        && !drill_down_mode
         && oxideterm_connections::transport_is_persistable(transport)
 }
 
@@ -1057,7 +1056,9 @@ impl Default for NewConnectionForm {
             cert_path: String::new(),
             passphrase: String::new(),
             passphrase_visible: false,
-            save_password: false,
+            // Passwords entered for saved connections persist by default, so
+            // SSH and remote-desktop reconnects use the same keychain contract.
+            save_password: true,
             group: String::new(),
             notes: String::new(),
             sftp_initial_remote_path: String::new(),
@@ -1186,10 +1187,19 @@ pub(in crate::workspace) fn form_from_remote_desktop_profile(
     form.remote_desktop_profile_id = Some(profile.id.clone());
     form.remote_desktop_ssh_gateway_connection_id = profile.ssh_gateway_connection_id.clone();
     form.saved_password_keychain_id = profile.credential_ref.clone();
-    form.save_password = profile.credential_ref.is_some();
+    // SSH prompt semantics: default to saving newly entered passwords so a
+    // reconnect does not ask again. A stored credential shows the keep hint.
+    form.save_password = true;
     form.group = profile.group.clone().unwrap_or(ungrouped_label);
     form.notes = profile.notes.clone().unwrap_or_default();
-    form.icon = profile.icon.clone().unwrap_or_default();
+    form.icon = profile.icon.clone().unwrap_or_else(|| {
+        default_connection_transport_icon_id(match form.transport {
+            NewConnectionTransport::Rdp => oxideterm_connections::ConnectionTransport::Rdp,
+            NewConnectionTransport::Vnc => oxideterm_connections::ConnectionTransport::Vnc,
+            _ => unreachable!("remote desktop form must use a remote desktop transport"),
+        })
+        .to_string()
+    });
     form.color = profile.color.clone().unwrap_or_default();
     form.icon_background_color = profile.icon_background_color.clone().unwrap_or_default();
     form.focused_field = NewConnectionField::Name;
@@ -1233,7 +1243,10 @@ pub(in crate::workspace) fn form_from_serial_profile(
     form.serial_profile_name = profile.name.clone();
     form.group = profile.group.clone().unwrap_or(ungrouped_label);
     form.notes = profile.notes.clone().unwrap_or_default();
-    form.icon = profile.icon.clone().unwrap_or_default();
+    form.icon = profile
+        .icon
+        .clone()
+        .unwrap_or_else(|| default_connection_transport_icon_id(NewConnectionTransport::Serial).to_string());
     form.color = profile.color.clone().unwrap_or_default();
     form.icon_background_color = profile.icon_background_color.clone().unwrap_or_default();
     form.serial_port_path = profile.port_path.clone();
@@ -1257,7 +1270,10 @@ pub(in crate::workspace) fn form_from_telnet_profile(
     form.telnet_profile_name = profile.name.clone();
     form.group = profile.group.clone().unwrap_or(ungrouped_label);
     form.notes = profile.notes.clone().unwrap_or_default();
-    form.icon = profile.icon.clone().unwrap_or_default();
+    form.icon = profile
+        .icon
+        .clone()
+        .unwrap_or_else(|| default_connection_transport_icon_id(NewConnectionTransport::Telnet).to_string());
     form.color = profile.color.clone().unwrap_or_default();
     form.icon_background_color = profile.icon_background_color.clone().unwrap_or_default();
     form.host = profile.host.clone();
@@ -1361,6 +1377,36 @@ pub(in crate::workspace) fn apply_transport_default_username(
         Some(TransportUsernameTransition::Set(username)) => form.username = username.to_string(),
         Some(TransportUsernameTransition::Clear) => form.username.clear(),
         None => {}
+    }
+}
+
+pub(in crate::workspace) fn apply_transport_default_remote_desktop_options(
+    form: &mut NewConnectionForm,
+    previous_transport: NewConnectionTransport,
+    next_transport: NewConnectionTransport,
+) {
+    if next_transport == NewConnectionTransport::Vnc
+        && previous_transport != NewConnectionTransport::Vnc
+        && form.remote_desktop_profile_id.is_none()
+    {
+        // New VNC profiles must work with the common TigerVNC VncAuth + TLSVnc
+        // server setup; existing profiles retain their persisted policy.
+        form.remote_desktop_session_options.vnc.security_policy =
+            RemoteDesktopVncSecurityPolicy::AllowLegacy;
+    }
+}
+
+pub(in crate::workspace) fn apply_transport_default_icon(
+    form: &mut NewConnectionForm,
+    previous_transport: NewConnectionTransport,
+    next_transport: NewConnectionTransport,
+) {
+    if previous_transport == next_transport {
+        return;
+    }
+    let previous_default = default_connection_transport_icon_id(previous_transport);
+    if form.icon.trim().is_empty() || form.icon.trim() == previous_default {
+        form.icon = default_connection_transport_icon_id(next_transport).to_string();
     }
 }
 
@@ -1735,6 +1781,38 @@ pub(in crate::workspace) fn next_standalone_sftp_field(
     fields[next]
 }
 
+/// Focus target used when a stale jump-host focus must be remapped back to
+/// the main form; every jump-capable transport keeps this field editable.
+const CONNECTION_FORM_FOCUS_FALLBACK_FIELD: NewConnectionField = NewConnectionField::Name;
+
+/// Reports whether the field lives inside the jump-host sub-form, whose
+/// backing storage disappears when the sub-form closes.
+pub(in crate::workspace) fn connection_field_targets_jump_form(field: NewConnectionField) -> bool {
+    matches!(
+        field,
+        NewConnectionField::JumpHost
+            | NewConnectionField::JumpPort
+            | NewConnectionField::JumpUsername
+            | NewConnectionField::JumpPassword
+            | NewConnectionField::JumpKeyPath
+            | NewConnectionField::JumpManagedKeyId
+            | NewConnectionField::JumpCertPath
+            | NewConnectionField::JumpPassphrase
+            | NewConnectionField::JumpGssapiServerIdentity
+            | NewConnectionField::JumpIdentityAgent
+    )
+}
+
+/// Drops a jump-host focus that outlived the jump sub-form. Without this,
+/// later Tab or typing routes into a missing field owner and panics.
+pub(in crate::workspace) fn clear_stale_jump_field_focus(form: &mut NewConnectionForm) {
+    if form.jump_server_form.is_none() && connection_field_targets_jump_form(form.focused_field) {
+        form.focused_field = CONNECTION_FORM_FOCUS_FALLBACK_FIELD;
+        form.field_focused = false;
+        form.selected_field = None;
+    }
+}
+
 pub(in crate::workspace) fn current_connection_field_mut(
     form: &mut NewConnectionForm,
 ) -> &mut String {
@@ -1813,75 +1891,35 @@ pub(in crate::workspace) fn current_connection_field_mut(
         NewConnectionField::UpstreamProxyPassword => &mut form.upstream_proxy_password,
         NewConnectionField::Color => &mut form.color,
         NewConnectionField::IconBackgroundColor => &mut form.icon_background_color,
-        NewConnectionField::JumpHost => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump host field without jump form")
-                .host
-        }
-        NewConnectionField::JumpPort => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump port field without jump form")
-                .port
-        }
-        NewConnectionField::JumpUsername => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump username field without jump form")
-                .username
-        }
-        NewConnectionField::JumpPassword => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump password field without jump form")
-                .password
-        }
-        NewConnectionField::JumpKeyPath => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump key path field without jump form")
-                .key_path
-        }
-        NewConnectionField::JumpManagedKeyId => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump managed key field without jump form")
-                .managed_key_id
-        }
-        NewConnectionField::JumpCertPath => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump cert path field without jump form")
-                .cert_path
-        }
-        NewConnectionField::JumpPassphrase => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump passphrase field without jump form")
-                .passphrase
-        }
-        NewConnectionField::JumpGssapiServerIdentity => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump Kerberos server field without jump form")
-                .gssapi_server_identity
-        }
-        NewConnectionField::JumpIdentityAgent => {
-            &mut form
-                .jump_server_form
-                .as_mut()
-                .expect("jump identity agent field without jump form")
-                .identity_agent
+        NewConnectionField::JumpHost
+        | NewConnectionField::JumpPort
+        | NewConnectionField::JumpUsername
+        | NewConnectionField::JumpPassword
+        | NewConnectionField::JumpKeyPath
+        | NewConnectionField::JumpManagedKeyId
+        | NewConnectionField::JumpCertPath
+        | NewConnectionField::JumpPassphrase
+        | NewConnectionField::JumpGssapiServerIdentity
+        | NewConnectionField::JumpIdentityAgent => {
+            let Some(jump_form) = form.jump_server_form.as_mut() else {
+                // The jump sub-form closed while its field kept focus; route
+                // the input into the main form instead of panicking.
+                form.focused_field = CONNECTION_FORM_FOCUS_FALLBACK_FIELD;
+                form.field_focused = false;
+                return &mut form.name;
+            };
+            match form.focused_field {
+                NewConnectionField::JumpPort => &mut jump_form.port,
+                NewConnectionField::JumpUsername => &mut jump_form.username,
+                NewConnectionField::JumpPassword => &mut jump_form.password,
+                NewConnectionField::JumpKeyPath => &mut jump_form.key_path,
+                NewConnectionField::JumpManagedKeyId => &mut jump_form.managed_key_id,
+                NewConnectionField::JumpCertPath => &mut jump_form.cert_path,
+                NewConnectionField::JumpPassphrase => &mut jump_form.passphrase,
+                NewConnectionField::JumpGssapiServerIdentity => &mut jump_form.gssapi_server_identity,
+                NewConnectionField::JumpIdentityAgent => &mut jump_form.identity_agent,
+                _ => &mut jump_form.host,
+            }
         }
         NewConnectionField::SerialPortPath => &mut form.serial_port_path,
         NewConnectionField::SerialBaudRate => &mut form.serial_baud_rate,
@@ -1966,75 +2004,34 @@ pub(in crate::workspace) fn current_connection_field(form: &NewConnectionForm) -
         NewConnectionField::UpstreamProxyPassword => &form.upstream_proxy_password,
         NewConnectionField::Color => &form.color,
         NewConnectionField::IconBackgroundColor => &form.icon_background_color,
-        NewConnectionField::JumpHost => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump host field without jump form")
-                .host
-        }
-        NewConnectionField::JumpPort => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump port field without jump form")
-                .port
-        }
-        NewConnectionField::JumpUsername => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump username field without jump form")
-                .username
-        }
-        NewConnectionField::JumpPassword => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump password field without jump form")
-                .password
-        }
-        NewConnectionField::JumpKeyPath => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump key path field without jump form")
-                .key_path
-        }
-        NewConnectionField::JumpManagedKeyId => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump managed key field without jump form")
-                .managed_key_id
-        }
-        NewConnectionField::JumpCertPath => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump cert path field without jump form")
-                .cert_path
-        }
-        NewConnectionField::JumpPassphrase => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump passphrase field without jump form")
-                .passphrase
-        }
-        NewConnectionField::JumpGssapiServerIdentity => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump Kerberos server field without jump form")
-                .gssapi_server_identity
-        }
-        NewConnectionField::JumpIdentityAgent => {
-            &form
-                .jump_server_form
-                .as_ref()
-                .expect("jump identity agent field without jump form")
-                .identity_agent
+        NewConnectionField::JumpHost
+        | NewConnectionField::JumpPort
+        | NewConnectionField::JumpUsername
+        | NewConnectionField::JumpPassword
+        | NewConnectionField::JumpKeyPath
+        | NewConnectionField::JumpManagedKeyId
+        | NewConnectionField::JumpCertPath
+        | NewConnectionField::JumpPassphrase
+        | NewConnectionField::JumpGssapiServerIdentity
+        | NewConnectionField::JumpIdentityAgent => {
+            let Some(jump_form) = form.jump_server_form.as_ref() else {
+                // Shared-state accessors cannot remap a stale jump focus, so
+                // project an empty draft instead of panicking on the missing
+                // owner; the mutable path repairs the focus on the next edit.
+                return "";
+            };
+            match form.focused_field {
+                NewConnectionField::JumpPort => &jump_form.port,
+                NewConnectionField::JumpUsername => &jump_form.username,
+                NewConnectionField::JumpPassword => &jump_form.password,
+                NewConnectionField::JumpKeyPath => &jump_form.key_path,
+                NewConnectionField::JumpManagedKeyId => &jump_form.managed_key_id,
+                NewConnectionField::JumpCertPath => &jump_form.cert_path,
+                NewConnectionField::JumpPassphrase => &jump_form.passphrase,
+                NewConnectionField::JumpGssapiServerIdentity => &jump_form.gssapi_server_identity,
+                NewConnectionField::JumpIdentityAgent => &jump_form.identity_agent,
+                _ => &jump_form.host,
+            }
         }
         NewConnectionField::SerialPortPath => &form.serial_port_path,
         NewConnectionField::SerialBaudRate => &form.serial_baud_rate,
@@ -2182,14 +2179,15 @@ mod tests {
     };
     use oxideterm_remote_desktop::{
         RemoteDesktopAudioOptions, RemoteDesktopClipboardOptions, RemoteDesktopDisplayOptions,
-        RemoteDesktopProtocol, RemoteDesktopRdpOptions,
+        RemoteDesktopProtocol, RemoteDesktopRdpNetworkProfile, RemoteDesktopRdpOptions,
     };
 
     use super::{
-        NewConnectionField, NewConnectionForm, NewConnectionProxyHop, NewConnectionTransport,
-        RemoteDesktopSessionOptions, RemoteDesktopVncCompression, RemoteDesktopVncImageQuality,
+        NewConnectionField, NewConnectionForm, NewConnectionFormMode, NewConnectionProxyHop,
+        NewConnectionTransport, RemoteDesktopSessionOptions, new_connection_form_mode, RemoteDesktopVncCompression, RemoteDesktopVncImageQuality,
         RemoteDesktopVncOptions, RemoteDesktopVncSecurityPolicy, RemoteDesktopVncSessionMode,
         SshAuthFamily, SshAuthTab, SshKeyAuthSource, StandaloneSftpTransferMode,
+        apply_transport_default_remote_desktop_options,
         auth_family_from_tab, backspace_current_connection_field, connection_secret_field_visible,
         form_from_remote_desktop_profile, form_from_serial_profile,
         form_from_telnet_profile, insert_text_into_current_connection_field, key_source_from_tab,
@@ -2300,6 +2298,7 @@ mod tests {
                 use_all_monitors: true,
             },
             rdp: RemoteDesktopRdpOptions {
+                network_profile: RemoteDesktopRdpNetworkProfile::Broadband,
                 disable_graphics_pipeline: true,
             },
             vnc: RemoteDesktopVncOptions {
@@ -2356,6 +2355,39 @@ mod tests {
         );
         assert!(form.save_password);
         assert!(form.password.is_empty());
+    }
+
+    #[test]
+    fn remote_desktop_profile_uses_its_own_edit_identity_not_ssh_mode() {
+        let now = Utc::now();
+        let profile = RemoteDesktopProfile {
+            id: "remote-mode".to_string(),
+            name: "Lab desktop".to_string(),
+            group: None,
+            notes: None,
+            icon: None,
+            color: None,
+            icon_background_color: None,
+            protocol: RemoteDesktopProtocol::Rdp,
+            host: "127.0.0.1".to_string(),
+            port: 3389,
+            username: Some("operator".to_string()),
+            domain: None,
+            credential_ref: None,
+            ssh_gateway_connection_id: None,
+            read_only: false,
+            session_options: RemoteDesktopSessionOptions::default(),
+            created_at: now,
+            updated_at: now,
+            last_used_at: None,
+        };
+        let form = form_from_remote_desktop_profile(&profile, "Ungrouped".to_string());
+
+        assert_eq!(form.remote_desktop_profile_id.as_deref(), Some("remote-mode"));
+        assert!(form.save_password);
+        // The profile id is carried by the draft. The SSH-only global edit id
+        // must remain absent so submit dispatch stays in the RDP branch.
+        assert_eq!(new_connection_form_mode(None, None, None), NewConnectionFormMode::NewConnection);
     }
 
     #[test]
@@ -2480,9 +2512,28 @@ mod tests {
     }
 
     #[test]
+    fn stale_jump_focus_falls_back_to_the_main_form_without_panicking() {
+        let mut form = NewConnectionForm::default();
+        form.focused_field = NewConnectionField::JumpPort;
+        form.field_focused = true;
+
+        // The jump sub-form closed while its field kept focus; edits must land
+        // in a real field instead of unwrapping a missing owner.
+        insert_text_into_current_connection_field(&mut form, "22");
+        assert_eq!(form.name, "22");
+        assert_eq!(form.focused_field, NewConnectionField::Name);
+        assert!(!form.field_focused);
+        assert!(backspace_current_connection_field(&mut form));
+        assert_eq!(form.name, "2");
+    }
+
+    #[test]
     fn remote_desktop_form_uses_privacy_preserving_session_defaults() {
         let form = NewConnectionForm::default();
 
+        // SSH and RDP/VNC share the no-checkbox keychain policy: a password
+        // entered into any new saved connection persists by default.
+        assert!(form.save_password);
         assert!(form.remote_desktop_session_options.clipboard.text);
         assert!(form.remote_desktop_session_options.clipboard.images);
         assert!(!form.remote_desktop_session_options.clipboard.files);
@@ -2504,6 +2555,33 @@ mod tests {
         assert_eq!(
             form.remote_desktop_session_options.vnc.compression,
             RemoteDesktopVncCompression::Balanced
+        );
+    }
+
+    #[test]
+    fn selecting_new_vnc_uses_legacy_password_compatibility_without_overriding_edits() {
+        let mut form = NewConnectionForm::default();
+        apply_transport_default_remote_desktop_options(
+            &mut form,
+            NewConnectionTransport::Ssh,
+            NewConnectionTransport::Vnc,
+        );
+        assert_eq!(
+            form.remote_desktop_session_options.vnc.security_policy,
+            RemoteDesktopVncSecurityPolicy::AllowLegacy
+        );
+
+        form.remote_desktop_profile_id = Some("existing-vnc".to_string());
+        form.remote_desktop_session_options.vnc.security_policy =
+            RemoteDesktopVncSecurityPolicy::RequireVerifiedEncryption;
+        apply_transport_default_remote_desktop_options(
+            &mut form,
+            NewConnectionTransport::Ssh,
+            NewConnectionTransport::Vnc,
+        );
+        assert_eq!(
+            form.remote_desktop_session_options.vnc.security_policy,
+            RemoteDesktopVncSecurityPolicy::RequireVerifiedEncryption
         );
     }
 

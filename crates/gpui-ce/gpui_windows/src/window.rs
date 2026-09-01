@@ -127,10 +127,11 @@ impl WindowsWindowState {
         #[cfg(not(feature = "wgpu"))] invalidate_devices: Arc<AtomicBool>,
         draw_coordinator: Rc<WindowDrawCoordinator>,
     ) -> Result<Self> {
-        let scale_factor = {
-            let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
-            monitor_dpi / USER_DEFAULT_SCREEN_DPI as f32
-        };
+        // The monitor's effective DPI is authoritative for rendering. At
+        // creation time GetDpiForWindow can still report the logon-time system
+        // DPI, which silently diverges from `display.scale_factor` in
+        // mixed-DPI sessions and breaks every logical<->physical conversion.
+        let scale_factor = display.scale_factor;
         let origin = logical_point(window_params.x as f32, window_params.y as f32, scale_factor);
         let physical_size = size(
             DevicePixels(window_params.cx),
@@ -582,6 +583,23 @@ impl WindowsWindow {
         )?;
         if params.show {
             unsafe { SetWindowPlacement(hwnd, &placement)? };
+            // SetWindowPlacement normalizes rcNormalPosition against the
+            // window's not-yet-settled DPI context while still inside
+            // creation, which drops the scale factor in mixed-DPI sessions
+            // and lands the window at logical-size-as-physical. Re-assert the
+            // same rect in physical pixels once the window is realized.
+            let rect = placement.rcNormalPosition;
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    None,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )?;
+            }
         } else {
             this.state.initial_placement.set(Some(WindowOpenStatus {
                 placement,

@@ -13,15 +13,13 @@ const DEFAULT_SETTINGS_TEXTAREA_LINE_HEIGHT: f32 = 20.0;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SettingsTab {
     General,
-    Portable,
     Terminal,
     Appearance,
     Connections,
-    Privilege,
     Network,
     Sftp,
-    Ide,
-    Keybindings,
+    CloudSync,
+    SessionIO,
     Help,
 }
 
@@ -34,15 +32,6 @@ pub enum TerminalSettingsPage {
     Awareness,
     Transfer,
     Highlight,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SettingsKeybindingScopeFilter {
-    All,
-    Global,
-    Terminal,
-    Split,
-    Palette,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,17 +52,15 @@ pub enum SettingsSelect {
     TerminalBackspaceSequence,
     TerminalDeleteSequence,
     TerminalCursorStyle,
-    RemoteShellIntegrationMode,
     TerminalTriggerMatchMode,
     TerminalTriggerAction,
     TerminalTriggerProcessMode,
     TerminalTriggerQuickCommand,
     TerminalTriggerTiming,
     TerminalTriggerScope,
-    IdeAgentMode,
+    CloudSyncMode,
     LocalShell,
     LocalShellSemanticScheme(usize),
-    LocalPrivilegeKind,
     ConnectionIdleTimeout,
     ReconnectMaxAttempts,
     ReconnectBaseDelay,
@@ -95,6 +82,7 @@ pub enum SettingsSelect {
     HighlightMatchScope(usize),
     ConnectionImportSource,
     ConnectionImportDuplicateStrategy,
+    SessionExportFormat,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -104,20 +92,16 @@ pub enum SettingsInput {
     TerminalFontSize,
     TerminalScrollback,
     TerminalLineHeight,
-    IdeFontSize,
-    IdeLineHeight,
     AppearanceUiFont,
     LocalDefaultCwd,
     LocalGitBashPath,
     LocalOhMyPoshTheme,
-    LocalPrivilegeLabel,
-    LocalPrivilegeUsernameHint,
-    LocalPrivilegeSecret,
-    LocalPrivilegePromptPatterns,
     ConnectionDefaultUsername,
     ConnectionDefaultPort,
     ConnectionImportTargetGroup,
     ExternalEditorPath,
+    CloudSyncServerUrl,
+    CloudSyncRoom,
     NetworkProxyHost,
     NetworkProxyPort,
     NetworkProxyNoProxy,
@@ -144,7 +128,6 @@ pub enum SettingsInput {
     TerminalTriggerWorkingDirectory,
     TerminalTriggerDelayMs,
     TerminalTriggerCooldownMs,
-    KeybindingSearch,
     SemanticSchemeName,
     SemanticSchemeRulePattern(usize),
     SemanticSchemeRuleCapture(usize),
@@ -154,9 +137,6 @@ pub enum SettingsInput {
     HighlightPattern(usize),
     HighlightForeground(usize),
     HighlightBackground(usize),
-    PortableCurrentPassword,
-    PortableNewPassword,
-    PortableConfirmPassword,
     ManagedKeyFilePath,
     ManagedKeyFileName,
     ManagedKeyFilePassphrase,
@@ -204,41 +184,17 @@ impl TerminalSettingsPage {
     }
 }
 
-impl SettingsKeybindingScopeFilter {
-    pub fn all() -> &'static [Self] {
-        &[
-            Self::All,
-            Self::Global,
-            Self::Terminal,
-            Self::Split,
-            Self::Palette,
-        ]
-    }
-
-    pub fn label_key(self) -> &'static str {
-        match self {
-            Self::All => "settings_view.keybindings.scope_all",
-            Self::Global => "settings_view.keybindings.scope_global",
-            Self::Terminal => "settings_view.keybindings.scope_terminal",
-            Self::Split => "settings_view.keybindings.scope_split",
-            Self::Palette => "settings_view.keybindings.scope_palette",
-        }
-    }
-}
-
 impl SettingsTab {
     pub fn all() -> &'static [Self] {
         &[
             Self::General,
             Self::Appearance,
-            Self::Keybindings,
             Self::Terminal,
-            Self::Portable,
             Self::Connections,
             Self::Network,
             Self::Sftp,
-            Self::Privilege,
-            Self::Ide,
+            Self::CloudSync,
+            Self::SessionIO,
             Self::Help,
         ]
     }
@@ -246,15 +202,13 @@ impl SettingsTab {
     pub fn id(self) -> &'static str {
         match self {
             Self::General => "general",
-            Self::Portable => "portable",
             Self::Terminal => "terminal",
             Self::Appearance => "appearance",
             Self::Connections => "connections",
-            Self::Privilege => "privilege",
             Self::Network => "network",
             Self::Sftp => "sftp",
-            Self::Ide => "ide",
-            Self::Keybindings => "keybindings",
+            Self::CloudSync => "cloud_sync",
+            Self::SessionIO => "session_io",
             Self::Help => "help",
         }
     }
@@ -267,15 +221,15 @@ impl SettingsTab {
         // Keep navigation groups aligned with user tasks: application preferences,
         // runtime behavior, remote access, productivity, then support.
         &[
-            &[Self::General, Self::Appearance, Self::Keybindings],
-            &[Self::Terminal, Self::Portable],
+            &[Self::General, Self::Appearance],
+            &[Self::Terminal],
             &[
                 Self::Connections,
                 Self::Network,
                 Self::Sftp,
-                Self::Privilege,
+                Self::CloudSync,
+                Self::SessionIO,
             ],
-            &[Self::Ide],
             &[Self::Help],
         ]
     }
@@ -283,15 +237,13 @@ impl SettingsTab {
     pub fn label_key(self) -> &'static str {
         match self {
             Self::General => "settings.general.title",
-            Self::Portable => "settings_view.general.portable_runtime",
             Self::Terminal => "settings.terminal.title",
             Self::Appearance => "settings_view.tabs.appearance",
             Self::Connections => "settings_view.connections.keys_and_connections_title",
-            Self::Privilege => "settings_view.tabs.privilege",
             Self::Network => "settings_view.tabs.network",
             Self::Sftp => "settings_view.tabs.sftp",
-            Self::Ide => "settings_view.tabs.ide",
-            Self::Keybindings => "settings_view.tabs.keybindings",
+            Self::CloudSync => "settings_view.tabs.cloudsync",
+            Self::SessionIO => "settings_view.tabs.sessionio",
             Self::Help => "settings_view.tabs.help",
         }
     }
@@ -299,15 +251,13 @@ impl SettingsTab {
     pub fn title_key(self) -> &'static str {
         match self {
             Self::General => "settings_view.general.title",
-            Self::Portable => "settings_view.general.portable_runtime",
             Self::Terminal => "settings_view.terminal.title",
             Self::Appearance => "settings_view.appearance.title",
             Self::Connections => "settings_view.connections.keys_and_connections_title",
-            Self::Privilege => "settings_view.privilege_credentials.title",
             Self::Network => "settings_view.network.title",
             Self::Sftp => "settings_view.sftp.title",
-            Self::Ide => "settings_view.ide.title",
-            Self::Keybindings => "settings_view.keybindings.title",
+            Self::CloudSync => "settings_view.general.cloudsync.title",
+            Self::SessionIO => "settings_view.sessionio.title",
             Self::Help => "settings_view.help.title",
         }
     }
@@ -315,15 +265,13 @@ impl SettingsTab {
     pub fn description_key(self) -> &'static str {
         match self {
             Self::General => "settings_view.general.description",
-            Self::Portable => "settings_view.general.portable_runtime_disabled_hint",
             Self::Terminal => "settings_view.terminal.description",
             Self::Appearance => "settings_view.appearance.description",
             Self::Connections => "settings_view.connections.keys_and_connections_description",
-            Self::Privilege => "settings_view.privilege_credentials.description",
             Self::Network => "settings_view.network.description",
             Self::Sftp => "settings_view.sftp.description",
-            Self::Ide => "settings_view.ide.description",
-            Self::Keybindings => "settings_view.keybindings.description",
+            Self::CloudSync => "settings_view.general.cloudsync.description",
+            Self::SessionIO => "settings_view.sessionio.description",
             Self::Help => "settings_view.help.description",
         }
     }
@@ -331,13 +279,12 @@ impl SettingsTab {
     pub fn icon(self) -> SettingsTabIcon {
         match self {
             Self::General | Self::Appearance => SettingsTabIcon::Monitor,
-            Self::Portable | Self::Sftp => SettingsTabIcon::HardDrive,
+            Self::Sftp => SettingsTabIcon::HardDrive,
             Self::Terminal => SettingsTabIcon::Terminal,
             Self::Connections => SettingsTabIcon::Shield,
-            Self::Privilege => SettingsTabIcon::Key,
             Self::Network => SettingsTabIcon::Network,
-            Self::Ide => SettingsTabIcon::Code2,
-            Self::Keybindings => SettingsTabIcon::Keyboard,
+            Self::CloudSync => SettingsTabIcon::Sparkles,
+            Self::SessionIO => SettingsTabIcon::Square,
             Self::Help => SettingsTabIcon::HelpCircle,
         }
     }
@@ -352,7 +299,6 @@ impl SettingsInput {
             Self::TerminalCommandBarFocusHandoff
                 | Self::TerminalCommandSpecsJson
                 | Self::TerminalTriggerArguments
-                | Self::LocalPrivilegePromptPatterns
                 | Self::ManagedKeyPastePrivateKey
         )
     }
@@ -363,7 +309,7 @@ impl SettingsInput {
         match self {
             Self::TerminalCommandBarFocusHandoff | Self::TerminalCommandSpecsJson => 20.0,
             Self::TerminalTriggerArguments => 20.0,
-            Self::LocalPrivilegePromptPatterns | Self::ManagedKeyPastePrivateKey => 20.0,
+            Self::ManagedKeyPastePrivateKey => 20.0,
             _ => DEFAULT_SETTINGS_TEXTAREA_LINE_HEIGHT,
         }
     }
@@ -375,17 +321,13 @@ impl SettingsInput {
             Self::TerminalFontSize => 1,
             Self::TerminalScrollback => 33_000,
             Self::TerminalLineHeight => 2,
-            Self::IdeFontSize => 3,
-            Self::IdeLineHeight => 4,
             Self::AppearanceUiFont => 5,
             Self::LocalDefaultCwd => 6,
             Self::LocalGitBashPath => 7,
             Self::LocalOhMyPoshTheme => 8,
-            Self::LocalPrivilegeLabel => 31_000,
-            Self::LocalPrivilegeUsernameHint => 31_001,
-            Self::LocalPrivilegeSecret => 31_002,
-            Self::LocalPrivilegePromptPatterns => 31_003,
             Self::ExternalEditorPath => 31_004,
+            Self::CloudSyncServerUrl => 35_000,
+            Self::CloudSyncRoom => 35_001,
             Self::ConnectionDefaultUsername => 9,
             Self::ConnectionDefaultPort => 10,
             Self::ConnectionImportTargetGroup => 20,
@@ -415,7 +357,6 @@ impl SettingsInput {
             Self::TerminalTriggerWorkingDirectory => 33_106,
             Self::TerminalTriggerDelayMs => 33_107,
             Self::TerminalTriggerCooldownMs => 33_108,
-            Self::KeybindingSearch => 18,
             Self::SemanticSchemeName => 10_300,
             Self::SemanticSchemeRulePattern(index) => 10_400 + index as u64,
             Self::SemanticSchemeRuleCapture(index) => 10_500 + index as u64,
@@ -425,9 +366,6 @@ impl SettingsInput {
             Self::HighlightPattern(index) => 101 + index as u64 * 4,
             Self::HighlightForeground(index) => 102 + index as u64 * 4,
             Self::HighlightBackground(index) => 103 + index as u64 * 4,
-            Self::PortableCurrentPassword => 28_000,
-            Self::PortableNewPassword => 28_001,
-            Self::PortableConfirmPassword => 28_002,
             Self::ManagedKeyFilePath => 30_000,
             Self::ManagedKeyFileName => 30_001,
             Self::ManagedKeyFilePassphrase => 30_002,
@@ -441,10 +379,7 @@ impl SettingsInput {
     pub fn is_secret(self) -> bool {
         matches!(
             self,
-            |Self::PortableCurrentPassword| Self::PortableNewPassword
-                | Self::PortableConfirmPassword
-                | Self::LocalPrivilegeSecret
-                | Self::ManagedKeyFilePassphrase
+            |Self::ManagedKeyFilePassphrase
                 | Self::ManagedKeyPastePrivateKey
                 | Self::ManagedKeyPastePassphrase
                 | Self::NetworkProxyPassword
@@ -455,11 +390,8 @@ impl SettingsInput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsTabIcon {
     BookOpen,
-    Code2,
     HardDrive,
     HelpCircle,
-    Key,
-    Keyboard,
     Monitor,
     Network,
     Shield,
@@ -475,8 +407,6 @@ pub enum SettingsBackgroundTabIcon {
     ArrowLeftRight,
     Bell,
     Cloud,
-    Code2,
-    Folder,
     FolderInput,
     Gauge,
     ListTree,
@@ -494,10 +424,7 @@ mod tests {
 
     #[test]
     fn secret_inputs_are_categorized_in_the_model_layer() {
-        assert!(SettingsInput::PortableCurrentPassword.is_secret());
-        assert!(SettingsInput::PortableNewPassword.is_secret());
-        assert!(SettingsInput::PortableConfirmPassword.is_secret());
-        assert!(SettingsInput::LocalPrivilegeSecret.is_secret());
+        assert!(SettingsInput::NetworkProxyPassword.is_secret());
         assert!(!SettingsInput::TerminalFontSize.is_secret());
     }
 }

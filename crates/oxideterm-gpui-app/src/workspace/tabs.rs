@@ -4,7 +4,6 @@ use super::*;
 mod create;
 mod detach;
 mod entity;
-mod helpers;
 mod navigation;
 mod nodes;
 mod nodes_reconnect_helpers;
@@ -16,6 +15,9 @@ pub(in crate::workspace) use entity::{
     TabMountCloseReason, TabMountId, TabRemovalTransition, TerminalLocation,
     WorkspaceTabHostEntity, WorkspaceTabHostEvent,
 };
+// Terminal-kind classification is shared with actions and IME dispatch so all
+// transport gating stays in one predicate.
+pub(in crate::workspace) use navigation::is_terminal_tab_kind;
 
 // The main tab strip keeps a thin visual thumb while exposing a larger drag target.
 const TABBAR_SCROLLBAR_HEIGHT: f32 = 3.0;

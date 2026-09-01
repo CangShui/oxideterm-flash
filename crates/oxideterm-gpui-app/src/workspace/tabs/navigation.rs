@@ -1,11 +1,13 @@
 use super::*;
 use crate::workspace::sftp::{SftpRemoteId, SftpSurfaceId};
 
-fn is_terminal_tab_kind(kind: &TabKind) -> bool {
-    // Terminal focus and display behavior is transport-neutral.
+// Terminal-class tabs share transport-neutral behavior (keyboard focus,
+// rename, pane counting, close-other-tabs). RemoteDesktop renders its own
+// keyboard owner and Launcher is a dedicated surface, so neither counts.
+pub(in crate::workspace) fn is_terminal_tab_kind(kind: &TabKind) -> bool {
     matches!(
         kind,
-        TabKind::SshTerminal
+        TabKind::SshTerminal | TabKind::Telnet | TabKind::Serial
     )
 }
 
@@ -29,7 +31,10 @@ fn tab_drag_is_horizontal_reorder(delta_x: f32, delta_y: f32) -> bool {
 
 fn tab_drag_is_detach(delta_x: f32, delta_y: f32, tabbar_height: f32) -> bool {
     let threshold = (tabbar_height * 0.72).max(24.0);
-    delta_y > threshold && delta_y.abs() >= delta_x.abs() * 0.85
+    // Direction-neutral: total travel past the threshold detaches, so dragging
+    // up toward the titlebar works like dragging down. The axis ratio still
+    // keeps purely horizontal drags on the reorder gesture.
+    delta_x.hypot(delta_y) > threshold && delta_y.abs() >= delta_x.abs() * 0.85
 }
 
 // Pointer hit-testing returns a slot in the pre-removal strip. Moving right
@@ -60,6 +65,23 @@ fn focus_terminal_node_projection(
     // remains exclusively driven by registry and NodeRouter events.
     *active_node_id = Some(node_id.clone());
     expanded_node_ids.insert(node_id.clone());
+}
+
+fn ssh_node_id_for_terminal_session(
+    session_id: TerminalSessionId,
+    runtime_node_id: Option<NodeId>,
+    ssh_nodes: &HashMap<NodeId, WorkspaceSshNode>,
+) -> Option<NodeId> {
+    runtime_node_id.or_else(|| {
+        // The workspace mirror is only a transition fallback. NodeRouter still
+        // owns the transport; the mirror keeps tab-target resolution stable
+        // until a newly mounted terminal registration reaches the runtime.
+        ssh_nodes.iter().find_map(|(node_id, node)| {
+            node.terminal_ids
+                .contains(&session_id)
+                .then(|| node_id.clone())
+        })
+    })
 }
 
 impl WorkspaceApp {
@@ -224,31 +246,6 @@ impl WorkspaceApp {
                     }
                 }
             }
-            Some(TabKind::Ide) => {
-                self.active_surface = ActiveSurface::Terminal;
-                if let Some(active_tab_id) = self.active_tab_id(cx)
-                    && let Some(node_id) = self.ide_workspace.read(cx).node_for_tab(active_tab_id)
-                {
-                    self.active_ssh_node_id = Some(node_id.clone());
-                    self.expanded_ssh_nodes.insert(node_id.clone());
-                }
-            }
-            Some(TabKind::SessionManager) => {
-                self.active_surface = ActiveSurface::Terminal;
-                self.active_sidebar_section = SidebarSection::Connections;
-            }
-            Some(TabKind::Runtime) => {
-                self.active_surface = ActiveSurface::Terminal;
-            }
-            Some(TabKind::ConnectionPool) => {
-                self.active_surface = ActiveSurface::Terminal;
-            }
-            Some(TabKind::Topology) => {
-                self.active_surface = ActiveSurface::Terminal;
-            }
-            Some(TabKind::NotificationCenter) => {
-                self.active_surface = ActiveSurface::Terminal;
-            }
             Some(TabKind::RemoteDesktop) => {
                 self.active_surface = ActiveSurface::Terminal;
             }
@@ -256,16 +253,106 @@ impl WorkspaceApp {
                 self.active_surface = ActiveSurface::Terminal;
             }
         }
-        if let Some(session_id) = self.active_terminal_session_id(cx)
-            && let Some(node_id) = self
-                .workspace_runtime
-                .read(cx)
-                .ssh_terminal_node_id(session_id)
-        {
+        // Resolve the node from the active tab's own sessions instead of the
+        // transient active-pane id: during a multi-tab switch the newly active
+        // pane may not have been mounted yet, which previously left Host Tools
+        // pinned to the previous host.
+        if let Some(node_id) = self.active_tab_ssh_node_id(cx) {
             self.active_ssh_node_id = Some(node_id.clone());
             self.expanded_ssh_nodes.insert(node_id.clone());
+        } else if let Some(active_tab) = self.active_tab(cx) {
+            // Utility tabs without an SSH node must not keep the previous
+            // terminal's node highlighted as if it were still selected.
+            if !matches!(
+                active_tab.kind,
+                TabKind::SshTerminal
+                    | TabKind::Telnet
+                    | TabKind::Serial
+                    | TabKind::Sftp
+                    | TabKind::Forwards
+                    | TabKind::RemoteDesktop
+            ) {
+                self.active_ssh_node_id = None;
+            }
+        } else {
+            // No tabs at all: nothing can own the sidebar selection.
+            self.active_ssh_node_id = None;
+        }
+        // A terminal tab retargets the embedded file browser projection. An
+        // SFTP tab already owns its own surface and must not be remounted as the
+        // sidebar merely because both surfaces resolve to the same node.
+        let ssh_terminal_tab_active = self
+            .active_tab(cx)
+            .is_some_and(|tab| is_terminal_tab_kind(&tab.kind));
+        if let Some(node_id) = self.active_ssh_node_id.clone() {
+            if ssh_terminal_tab_active {
+                self.sync_sftp_files_to_active_node(&node_id, cx);
+            }
+            self.sync_host_tools_connection_to_node(&node_id, cx);
         }
         self.activate_embedded_sftp_sidebar_if_visible(cx);
+    }
+
+    fn sync_host_tools_connection_to_node(
+        &mut self,
+        node_id: &NodeId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection_id) = self.node_router.connection_id_for_node(node_id) else {
+            return;
+        };
+        let already_selected = self
+            .host_tools
+            .read(cx)
+            .selected_connection_id()
+            .is_some_and(|selected| selected == connection_id);
+        if already_selected {
+            return;
+        }
+        // Tab switches only retarget the host-tools connection; the regular
+        // lifecycle tick restarts samplers for the new connection. Running the
+        // full select_connection_for_active_tool here would force a profiler
+        // restart on every tab switch, janking the panel and leaving highlight
+        // animation behind.
+        self.host_tools.update(cx, |host_tools, cx| {
+            host_tools.select_connection(
+                connection_id,
+                Some(browser_behavior::BrowserFocusOrigin::Pointer),
+                cx,
+            );
+        });
+        // Only retarget the connection; the periodic lifecycle tick re-samples
+        // for the new connection without forcing a profiler restart here.
+        self.sync_host_tools_lifecycle(cx);
+    }
+
+    /// Returns the SSH node backing the active tab, preferring the active
+    /// pane's session and falling back to any session inside that tab. This
+    /// keeps Host Tools following the visible tab even during multi-tab
+    /// switches when the incoming pane is not mounted yet.
+    fn active_tab_ssh_node_id(&self, cx: &App) -> Option<NodeId> {
+        let active_tab = self.active_tab(cx)?;
+        let node_for_session = |session_id| {
+            ssh_node_id_for_terminal_session(
+                session_id,
+                self.workspace_runtime.read(cx).ssh_terminal_node_id(session_id),
+                &self.ssh_nodes,
+            )
+        };
+        let active_session = active_tab.active_pane_id.and_then(|pane_id| {
+            active_tab
+                .root_pane
+                .as_ref()
+                .and_then(|root| root.session_id_for_pane(pane_id))
+        });
+        if let Some(node_id) = active_session.and_then(node_for_session) {
+            return Some(node_id);
+        }
+        let mut session_ids = Vec::new();
+        if let Some(root_pane) = &active_tab.root_pane {
+            root_pane.collect_session_ids(&mut session_ids);
+        }
+        session_ids.into_iter().find_map(node_for_session)
     }
 
     pub(in crate::workspace) fn focus_active_pane(&mut self, window: &mut Window, cx: &mut App) {
@@ -280,7 +367,6 @@ impl WorkspaceApp {
         }
         self.sync_active_terminal_metadata_context(cx);
         self.sync_active_terminal_recording_elapsed_tick(cx);
-        self.sync_active_privilege_prompt_inline_hint(cx);
     }
 
     fn focus_active_tab_keyboard_owner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -336,8 +422,9 @@ impl WorkspaceApp {
         session_id: TerminalSessionId,
         cx: &mut Context<Self>,
     ) {
-        // This method is also the shared terminal-session close path for local
-        // panes. NodeRouter remains the SSH owner.
+        // This method is the shared terminal-session close path. Local panes
+        // only release their session bookkeeping; the final SSH terminal uses
+        // the user-selected policy below to explicitly tear down its node.
         let forwarding_registry = self.forwarding_service.registry().clone();
         let forwarding_runtime = self.forwarding_runtime.clone();
         let forwarding_session_id = session_id.0.to_string();
@@ -350,10 +437,9 @@ impl WorkspaceApp {
         let node_id = self.workspace_runtime.update(cx, |runtime, _cx| {
             runtime.unregister_ssh_terminal_session(session_id)
         });
-        // Tauri terminal close only removes the terminal/session mapping.
-        // Do not health-probe here: a closed shell channel is not evidence
-        // that the node-owned SSH transport died, and probing on the last
-        // terminal close can incorrectly drive the node into LinkDown.
+        // Never infer a transport failure through a health probe here. The
+        // explicit last-terminal policy below performs the intentional node
+        // disconnect after terminal bookkeeping is complete.
         let mut projection_changed = false;
         for (projected_node_id, node) in &mut self.ssh_nodes {
             if node_id
@@ -376,8 +462,59 @@ impl WorkspaceApp {
                 .ssh_terminal_session_ids_for_node(&node_id)
                 .is_empty()
         {
-            self.close_embedded_sftp_for_node(&node_id, cx);
+            self.force_disconnect_node_after_last_terminal(&node_id, cx);
         }
+    }
+
+    /// The user-selected close policy treats the last SSH terminal as the
+    /// node-session owner: closing it explicitly tears down SFTP, transfers,
+    /// forwarding, and the underlying runtime node together.
+    fn force_disconnect_node_after_last_terminal(
+        &mut self,
+        node_id: &NodeId,
+        cx: &mut Context<Self>,
+    ) {
+        let nodes_to_disconnect = {
+            let mut nodes = self.node_router.subtree_postorder(node_id);
+            if nodes.is_empty() {
+                nodes.push(node_id.clone());
+            }
+            nodes
+        };
+        for affected_node_id in &nodes_to_disconnect {
+            let _ = self.interrupt_sftp_transfers_by_node(
+                affected_node_id,
+                "Connection closed".to_string(),
+                cx,
+            );
+            self.close_embedded_sftp_for_node(affected_node_id, cx);
+            self.forwarding.update(cx, |forwarding, _cx| {
+                forwarding.untrack_port_profiler(affected_node_id);
+            });
+            let forwarding_registry = self.forwarding_service.registry().clone();
+            let forwarding_runtime = self.forwarding_runtime.clone();
+            let forwarding_session_id = self.forwarding_session_id_for_node(affected_node_id);
+            self.release_forwarding_binding_for_node(affected_node_id);
+            forwarding_runtime.spawn(async move {
+                let _ = forwarding_registry.remove(&forwarding_session_id).await;
+            });
+        }
+        let disconnected_nodes = self.workspace_runtime.update(cx, |runtime, cx| {
+            runtime.disconnect_node_runtime_subtree(node_id, cx)
+        });
+        for affected_node_id in &disconnected_nodes {
+            if let Some(node) = self.ssh_nodes.get_mut(affected_node_id) {
+                node.readiness = NodeReadiness::Disconnected;
+                node.terminal_ids.clear();
+            }
+            // The disconnected node can no longer back the sidebar selection;
+            // clearing it retires the yellow highlight with the connection.
+            if self.active_ssh_node_id.as_ref() == Some(affected_node_id) {
+                self.active_ssh_node_id = None;
+            }
+        }
+        self.persist_session_tree_snapshot();
+        cx.notify();
     }
 
     pub(in crate::workspace) fn focus_terminal_session(
@@ -627,6 +764,47 @@ impl WorkspaceApp {
         self.close_tab_at_index(index, window, cx);
     }
 
+    /// Resolves the node session a duplicate of this tab would reopen. Only
+    /// SSH terminal tabs own a restorable node session; other kinds have no
+    /// session-restore path to reuse.
+    pub(in crate::workspace) fn tab_duplicate_source_node(
+        &self,
+        tab_id: TabId,
+        cx: &App,
+    ) -> Option<NodeId> {
+        let tab = self.tab_by_id(tab_id, cx)?;
+        if tab.kind != TabKind::SshTerminal {
+            return None;
+        }
+        let mut session_ids = Vec::new();
+        tab.root_pane
+            .as_ref()?
+            .collect_session_ids(&mut session_ids);
+        session_ids.into_iter().find_map(|session_id| {
+            self.workspace_runtime
+                .read(cx)
+                .ssh_terminal_node_id(session_id)
+        })
+    }
+
+    /// Duplicates a terminal tab by opening a fresh session on the same node
+    /// through the session-restore terminal path.
+    pub(in crate::workspace) fn duplicate_tab(
+        &mut self,
+        tab_id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(node_id) = self.tab_duplicate_source_node(tab_id, cx) else {
+            return false;
+        };
+        let Some(title) = self.tab_by_id(tab_id, cx).map(|tab| tab.title.clone()) else {
+            return false;
+        };
+        self.create_initial_ssh_terminal_tab_for_existing_node(&node_id, None, title, window, cx)
+            .is_ok()
+    }
+
     pub(in crate::workspace) fn request_close_other_tabs_or_active_pane(
         &mut self,
         window: &mut Window,
@@ -655,6 +833,44 @@ impl WorkspaceApp {
             .filter(|tab| tab.id != active_tab_id)
             .map(|tab| tab.id)
             .collect::<Vec<_>>();
+        self.request_close_tab_batch(tab_ids, window, cx);
+    }
+
+    /// Closes every main-window tab to the right of the target's visible slot,
+    /// keeping the target tab and everything before it.
+    pub(in crate::workspace) fn request_close_tabs_right_of(
+        &mut self,
+        tab_id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let outside_main_tabs = self.tab_host.read(cx).outside_main_tab_ids();
+        let Some(visible_index) = self
+            .tabs(cx)
+            .iter()
+            .filter(|tab| !outside_main_tabs.contains(&tab.id))
+            .position(|tab| tab.id == tab_id)
+        else {
+            return;
+        };
+        let tab_ids = self
+            .tabs(cx)
+            .iter()
+            .filter(|tab| !outside_main_tabs.contains(&tab.id))
+            .skip(visible_index + 1)
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>();
+        self.request_close_tab_batch(tab_ids, window, cx);
+    }
+
+    /// Applies the shared close confirmations (SSH and local foreground
+    /// processes) to a batch of tab ids. Empty batches stay a no-op.
+    fn request_close_tab_batch(
+        &mut self,
+        tab_ids: Vec<TabId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if tab_ids.is_empty() {
             return;
         }
@@ -944,7 +1160,7 @@ impl WorkspaceApp {
             next_active_tab_id,
         } = transition;
         self.apply_tab_mount_cleanup(mount_cleanup, Some(window), cx);
-        self.sync_host_tools_lifecycle(false, cx);
+        self.sync_host_tools_lifecycle(cx);
         if self
             .main_window_tabs
             .context_menu
@@ -976,11 +1192,6 @@ impl WorkspaceApp {
                 }
             }
         }
-        self.ide_workspace.update(cx, |workspace, cx| {
-            // The IDE owner records a real project close and releases only this
-            // surface's node consumer; shared node users remain registered.
-            workspace.close_surface(tab.id, ide::IdeSurfaceCloseReason::UserProjectClose, cx);
-        });
         self.forwarding
             .update(cx, |forwarding, _cx| forwarding.unmap_tab(tab.id));
         let mut pane_ids = Vec::new();
@@ -992,6 +1203,7 @@ impl WorkspaceApp {
         for session_id in session_ids {
             self.serial_terminal_configs.remove(&session_id);
             self.telnet_terminal_profile_ids.remove(&session_id);
+            self.serial_terminal_profile_ids.remove(&session_id);
             self.terminal_trigger_saved_connections.remove(&session_id);
             self.clear_terminal_trigger_session_overrides(session_id);
             self.unregister_ssh_terminal_session(session_id, cx);
@@ -1100,9 +1312,6 @@ impl WorkspaceApp {
 
     fn tab_belongs_to_node(&self, tab: &Tab, node_id: &NodeId, cx: &App) -> bool {
         if self.sftp_tab_nodes.get(&tab.id) == Some(node_id) {
-            return true;
-        }
-        if self.ide_workspace.read(cx).node_for_tab(tab.id) == Some(node_id) {
             return true;
         }
         if self.forwarding.read(cx).tab_matches_node(tab.id, node_id) {
@@ -1543,7 +1752,8 @@ mod tests {
         assert!(tab_drag_is_horizontal_reorder(-18.0, 4.0));
         assert!(!tab_drag_is_detach(4.0, 10.0, 36.0));
         assert!(!tab_drag_is_detach(36.0, 30.0, 36.0));
-        assert!(!tab_drag_is_detach(4.0, -36.0, 36.0));
+        // The detach gesture is direction-neutral: upward travel detaches too.
+        assert!(tab_drag_is_detach(4.0, -36.0, 36.0));
         assert!(tab_drag_is_detach(4.0, 32.0, 36.0));
     }
 
@@ -1574,6 +1784,61 @@ mod tests {
         assert_eq!(node.readiness, NodeReadiness::Disconnected);
         assert_eq!(active_node_id, Some(node_id.clone()));
         assert!(expanded_node_ids.contains(&node_id));
+    }
+
+    #[test]
+    fn host_tools_target_follows_each_of_three_tabs_during_runtime_registration() {
+        let first_session = TerminalSessionId(1);
+        let second_session = TerminalSessionId(2);
+        let third_session = TerminalSessionId(3);
+        let first_node = NodeId::new("host-tools-first");
+        let second_node = NodeId::new("host-tools-second");
+        let third_node = NodeId::new("host-tools-third");
+        let config = SshConfig::default();
+        let ssh_nodes = HashMap::from([
+            (
+                first_node.clone(),
+                WorkspaceSshNode::new(
+                    None,
+                    &config,
+                    "First".to_string(),
+                    vec![first_session],
+                    NodeReadiness::Ready,
+                ),
+            ),
+            (
+                second_node.clone(),
+                WorkspaceSshNode::new(
+                    None,
+                    &config,
+                    "Second".to_string(),
+                    vec![second_session],
+                    NodeReadiness::Ready,
+                ),
+            ),
+            (
+                third_node.clone(),
+                WorkspaceSshNode::new(
+                    None,
+                    &config,
+                    "Third".to_string(),
+                    vec![third_session],
+                    NodeReadiness::Ready,
+                ),
+            ),
+        ]);
+
+        for (session_id, expected_node_id) in [
+            (first_session, first_node),
+            (second_session, second_node),
+            (third_session, third_node),
+            (first_session, NodeId::new("host-tools-first")),
+        ] {
+            assert_eq!(
+                ssh_node_id_for_terminal_session(session_id, None, &ssh_nodes),
+                Some(expected_node_id)
+            );
+        }
     }
 
     #[test]

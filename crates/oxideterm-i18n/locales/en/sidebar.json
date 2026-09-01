@@ -4,45 +4,28 @@
       "expand": "Expand Sidebar",
       "collapse": "Collapse Sidebar",
       "new_local_terminal": "New Local Terminal",
-      "open_pylance_guide": "Open Pylance Guide"
+      "new_folder": "New Session Folder",
+      "import_connections": "Import Connections",
+      "export_connections": "Export Connections"
     },
     "panels": {
       "sessions": "Active Sessions",
-      "saved": "Saved Connections",
-      "saved_title": "Saved Connections",
       "sftp": "SFTP",
       "sftp_sessions": "SFTP Sessions",
-      "files": "File Manager",
-      "forwards": "Port Forwarding",
-      "forwards_title": "Port Forwarding",
-      "runtime": "Dashboard",
-      "runtime_description": "Monitor connection usage and topology",
-      "runtime_overview": "Overview",
-      "connection_pool": "Connection Pool",
       "connection_monitor": "Connection Monitor",
-      "connection_matrix": "Connection Matrix",
-      "settings": "Settings",
-      "no_saved_connections": "No saved connections",
-      "no_active_sessions": "No active sessions",
-      "no_connected_sessions": "No connected sessions",
-      "import_tooltip": "Import from .oxide file",
-      "export_tooltip": "Export to .oxide file",
       "host_tools": "Host Tools",
       "host_monitor": "Monitor",
+      "host_files": "Remote Files",
       "gpu": "GPU / NPU",
       "processes": "Processes",
       "services": "Services",
       "logs": "Logs",
-      "tmux": "tmux",
+      "tmux": "Virtual Terminal",
       "docker": "Docker",
-      "tmux_management": "tmux Management",
+      "tmux_management": "Virtual Terminal Management",
       "docker_management": "Docker Management",
-      "session_manager": "Session Manager",
       "open_session_manager": "Open Session Manager",
       "activity": "Activity",
-      "event_log": "Event Log",
-      "notifications": "Notifications",
-      "saved_connections": "Saved Connections",
       "forwarding": "Port Forwarding",
       "ports": "Ports",
       "schedules": "Schedules",
@@ -51,16 +34,9 @@
     },
     "tooltips": {
       "settings": "Settings",
-      "switch_tree": "Switch to Tree View",
-      "switch_focus": "Switch to Focus View",
       "new_connection": "New Connection",
-      "lock_app": "Lock OxideTerm",
-      "setup_app_lock": "Set Up Application Lock",
       "collapse": "Collapse"
     },
-    "active_sessions": "Active Sessions",
-    "no_sessions": "No Sessions",
-    "add_new_connection": "Click + to add a new connection",
     "host_gpu": {
       "count_suffix": "accelerators",
       "refresh_interval": "Updates every 2 seconds",
@@ -127,7 +103,6 @@
         "unknown": "Unknown"
       },
       "actions": {
-        "column": "Actions",
         "term": "End",
         "kill": "Kill",
         "stop": "Pause",
@@ -297,6 +272,15 @@
       "empty": "No logs match",
       "unavailable": "Host logs are not available on this host.",
       "error": "Log command failed: {{error}}",
+      "failure": {
+        "permission_denied": "Permission denied; reading system logs needs root or the systemd-journal group",
+        "journal_unavailable": "No readable system journal files were found",
+        "tool_missing": "The remote host is missing the log tooling",
+        "tool_error": "Remote log command failed; details are withheld",
+        "exit_code": "Remote command exited with code {{code}}",
+        "timeout": "The log command timed out",
+        "connection": "The SSH connection is unavailable for the log command"
+      },
       "capability": {
         "full": "Full support",
         "partial": "Partial support",
@@ -338,6 +322,42 @@
         "follow_opened": "Following {{preset}} logs.",
         "partial_support": "Host logs are partial on {{os}}.",
         "unknown_error": "Unknown error"
+      }
+    },
+    "host_virtual_terminal": {
+      "engines": {
+        "screen": "Screen",
+        "tmux": "tmux"
+      },
+      "both_unavailable": "Neither screen nor tmux is available on this host.",
+      "screen_unavailable": "screen is not available on this host.",
+      "screen_empty": "No Screen sessions are running on this host.",
+      "loading_screen": "Scanning Screen sessions...",
+      "error_screen": "Screen command failed: {{error}}",
+      "actions": {
+        "refresh_screen": "Refresh Screen"
+      },
+      "confirm_screen_action_title": "Confirm Screen action",
+      "tmux_unavailable": "tmux is not available on this host.",
+      "search_screen_placeholder": "Search Screen...",
+      "new_screen_session_title": "New Screen session",
+      "new_screen_session_name": "new session",
+      "screen_attach_title": "Screen: {{name}}",
+      "confirm": {
+        "kill_screen_session_desc": "Kill Screen session {{id}} ({{name}})? All processes in this session will be terminated."
+      },
+      "toast": {
+        "screen_attach_opened": "Attaching to {{name}}.",
+        "new_screen_session_opened": "Opening {{name}}.",
+        "screen_action_succeeded": "Screen action completed for {{target}}."
+      },
+      "input": {
+        "rename_screen_session_title": "Rename Screen session",
+        "rename_screen_session_desc": "Set a new name for Screen session {{target}}.",
+        "rename_screen_session_placeholder": "Session name",
+        "send_screen_command_title": "Send command to Screen session",
+        "send_screen_command_desc": "Send one command followed by Enter to Screen session {{target}}.",
+        "send_screen_command_placeholder": "Command to send"
       }
     },
     "host_tmux": {
@@ -385,8 +405,7 @@
         "cancel": "Cancel",
         "kill_session_desc": "Kill tmux session {{id}} ({{name}})? All windows and panes in this session will be terminated.",
         "kill_window_desc": "Kill tmux window {{target}} in session {{name}}? All panes in this window will be terminated.",
-        "kill_pane_desc": "Kill tmux pane {{target}} in session {{name}}? Its running command will be terminated.",
-        "action_desc": "Run tmux action on {{target}} in session {{name}}?"
+        "kill_pane_desc": "Kill tmux pane {{target}} in session {{name}}? Its running command will be terminated."
       },
       "toast": {
         "snapshot_already_running": "A tmux snapshot is already running.",
@@ -719,7 +738,6 @@
         "inspect_unsupported": "Package details are not supported for {{manager}} yet.",
         "inspect_opened": "Opened details for {{name}}.",
         "copied_name": "Copied {{name}}.",
-        "partial_support": "Package inspection is read-only on {{os}}.",
         "unknown_error": "Unknown package scan error."
       }
     }
@@ -729,56 +747,34 @@
       "no_sessions": "No Sessions",
       "click_to_add": "Click + to add a new connection",
       "actions": {
-        "new_terminal": "New Terminal",
-        "sftp": "SFTP",
-        "port_forwarding": "Port Forwarding",
-        "disconnect": "Disconnect",
-        "reconnect": "Reconnect",
-        "edit_and_reconnect": "Edit & Reconnect",
-        "remove_session": "Remove Session",
-        "cancel_reconnect": "Cancel Reconnect",
-        "drill_in": "Drill In (Next Hop)",
-        "saved_next_hop": "Use Saved Next Hop...",
-        "connect": "Connect",
-        "save_as_connection": "Save as Connection..."
+        "cancel_reconnect": "Cancel Reconnect"
       }
     },
-    "focused_list": {
-      "all_servers": "All Servers",
-      "child": "child",
-      "children": "children",
-      "no_child_nodes": "This node has no child nodes",
-      "no_servers": "No servers yet",
-      "add_by_drilling": "You can add child nodes by drilling down",
-      "click_to_add": "Click + to add a new connection",
-      "terminal": "Terminal #{{number}}",
-      "close_terminal": "Close terminal"
-    },
-    "actions": {
-      "connect": "Connect",
-      "new_terminal": "New Terminal",
-      "sftp_explorer": "SFTP Explorer",
-      "port_forwarding": "Port Forwarding",
-      "disconnect": "Disconnect",
-      "reconnect": "Reconnect",
-      "drill_in": "Drill In (Next Hop)",
-      "saved_next_hop": "Use Saved Next Hop...",
-      "save_as_connection": "Save as Connection..."
-    },
     "saved_next_hop": {
-      "title": "Use Saved Connection as Next Hop",
-      "description": "Choose a saved connection to attach under {{host}}.",
-      "empty": "No saved connections available.",
-      "cancel": "Cancel",
-      "proxy_chain_badge": "{{count}} hops",
-      "parent_not_ready": "Connect the parent node before adding a saved next hop.",
-      "not_found": "Saved connection was not found.",
-      "missing_credentials": "This saved connection is missing credentials needed to connect.",
-      "materialize_failed": "Could not add the saved connection to the session tree."
+      "missing_credentials": "This saved connection is missing credentials needed to connect."
     },
-    "breadcrumb": {
-      "back_to_root": "Back to root view",
-      "all_servers": "All Servers"
+    "context": {
+      "edit": "Edit",
+      "duplicate": "Duplicate",
+      "move_to_folder": "Move to Folder",
+      "delete": "Delete",
+      "rename_folder": "Rename Folder",
+      "delete_folder": "Delete Folder"
+    },
+    "dialog": {
+      "new_folder_title": "New Session Folder",
+      "new_folder_placeholder": "Enter folder name",
+      "move_folder_title": "Move Session to Folder",
+      "no_folder": "No Folder (Root)",
+      "move_success": "Moved to {{group}}",
+      "folder_created": "Created folder {{group}}",
+      "duplicate_success": "Duplicated session {{name}}",
+      "delete_success": "Deleted session {{name}}",
+      "rename_folder_title": "Rename Folder",
+      "delete_folder_title": "Delete Folder",
+      "delete_folder_confirm": "Delete folder \"{{name}}\"? Saved sessions in this folder and its nested folders will be moved to the root.",
+      "folder_renamed": "Renamed folder {{group}}",
+      "folder_deleted": "Deleted folder {{group}}"
     }
   }
 }

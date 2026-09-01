@@ -86,24 +86,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.general.external_connection_uris_hint",
             ],
         ),
-        settings_search_entry(
-            SettingsTab::Portable,
-            0,
-            "settings_view.general.portable_runtime",
-            &[
-                "settings_view.general.portable_runtime_hint",
-                "settings_view.general.portable_biometric",
-            ],
-        ),
-        settings_search_entry(
-            SettingsTab::Portable,
-            0,
-            "settings_view.general.portable_migration",
-            &[
-                "settings_view.general.portable_migration_installed_hint",
-                "settings_view.general.portable_migration_portable_hint",
-            ],
-        ),
         terminal_search_entry(
             TerminalSettingsPage::Display,
             1,
@@ -189,12 +171,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
         terminal_search_entry(
             TerminalSettingsPage::Local,
             3,
-            "settings_view.local_terminal.privilege_credentials",
-            &["settings_view.local_terminal.privilege_credentials_hint"],
-        ),
-        terminal_search_entry(
-            TerminalSettingsPage::Local,
-            4,
             "settings_view.local_terminal.available_shells",
             &["settings_view.local_terminal.select_shell"],
         ),
@@ -228,23 +204,11 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             TerminalSettingsPage::Awareness,
             1,
             "settings_view.terminal.awareness_title",
-            &[
-                "settings_view.terminal.awareness_enabled",
-                "settings_view.connections.shell_integration.mode_label",
-            ],
+            &["settings_view.terminal.awareness_enabled"],
         ),
         terminal_search_entry(
             TerminalSettingsPage::Awareness,
             2,
-            "settings_view.connections.shell_integration.title",
-            &[
-                "settings_view.connections.shell_integration.description",
-                "settings_view.connections.shell_integration.status",
-            ],
-        ),
-        terminal_search_entry(
-            TerminalSettingsPage::Awareness,
-            3,
             "settings_view.terminal.triggers.title",
             &[
                 "settings_view.terminal.triggers.description",
@@ -385,12 +349,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             ],
         ),
         settings_search_entry(
-            SettingsTab::Privilege,
-            0,
-            "settings_view.privilege_credentials.title",
-            &["settings_view.privilege_credentials.description"],
-        ),
-        settings_search_entry(
             SettingsTab::Network,
             0,
             "settings_view.network.shared_proxy",
@@ -425,21 +383,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             2,
             "settings_view.sftp.conflict",
             &["settings_view.sftp.conflict_hint"],
-        ),
-        settings_search_entry(
-            SettingsTab::Ide,
-            0,
-            "settings_view.ide.external_editor",
-            &["settings_view.ide.external_editor_hint"],
-        ),
-        settings_search_entry(
-            SettingsTab::Keybindings,
-            0,
-            "settings_view.keybindings.title",
-            &[
-                "settings_view.keybindings.description",
-                "settings_view.keybindings.search_placeholder",
-            ],
         ),
         settings_search_entry(
             SettingsTab::Help,
@@ -650,9 +593,6 @@ impl WorkspaceApp {
         if tab == SettingsTab::General {
             #[cfg(not(target_os = "macos"))]
             self.refresh_launch_at_login_status(cx);
-        }
-        if tab == SettingsTab::Portable {
-            self.refresh_portable_settings_snapshot(true, cx);
         }
         self.sync_settings_section_list_state(cx);
         self.settings_section_list_state

@@ -10,14 +10,14 @@ struct SftpRemoteLoadState {
 
 impl SftpRemoteLoadState {
     fn request(mut self) -> Self {
-        // A newer request queues behind the one shared in-flight list operation.
+        // A newer request for the current view queues behind its in-flight listing.
         self.loading = true;
         self.pending = true;
         self
     }
 
     fn start(mut self) -> Option<Self> {
-        // SFTP views share one list slot, which keeps stale completions unambiguous.
+        // One remote generation owns at most one visible listing request.
         if self.inflight || !self.pending {
             return None;
         }
@@ -65,6 +65,51 @@ impl SftpWorkspaceEntity {
         self.remote_load_inflight = state.inflight;
     }
 
+    fn current_remote_load_is_inflight(&self) -> bool {
+        self.current_remote_id.as_ref().is_some_and(|remote_id| {
+            self.remote_load_inflight_keys
+                .contains(&(remote_id.clone(), self.view_generation))
+        })
+    }
+
+    fn sync_current_remote_load_state(&mut self) {
+        self.remote_load_inflight = self.current_remote_load_is_inflight();
+        self.remote_loading = self.remote_load_pending || self.remote_load_inflight;
+    }
+
+    /// Clears an optimistic request flag that never became a spawned listing
+    /// (the visibility gate refused it). A live in-flight request is left
+    /// untouched — its worker result still owns the visible state.
+    pub(in crate::workspace::sftp) fn retire_unstarted_remote_request(&mut self) {
+        if self.current_remote_load_is_inflight() {
+            return;
+        }
+        self.remote_loading = false;
+        self.remote_load_pending = false;
+        self.remote_load_inflight = false;
+    }
+
+    fn remember_current_remote_view(&mut self) {
+        let Some(remote_id) = self.current_remote_id.clone() else {
+            return;
+        };
+        self.local_path_by_remote
+            .insert(remote_id.clone(), self.local_path.clone());
+        if !self.remote_path.is_empty() {
+            self.remote_path_by_remote
+                .insert(remote_id.clone(), self.remote_path.clone());
+        }
+        if let Some(path) = self.current_remote_listing_path.take() {
+            self.remote_listing_cache.insert(
+                remote_id,
+                SftpRemoteListingCache {
+                    path,
+                    files: std::mem::take(&mut self.remote_files),
+                },
+            );
+        }
+    }
+
     pub(in crate::workspace::sftp) fn request_remote_load(&mut self) {
         let state = self.remote_load_state().request();
         self.set_remote_load_state(state);
@@ -80,8 +125,13 @@ impl SftpWorkspaceEntity {
         {
             return None;
         }
+        let request_key = (remote_id.clone(), self.view_generation);
+        if self.remote_load_inflight_keys.contains(&request_key) {
+            return None;
+        }
         let started = self.remote_load_state().start()?;
         self.set_remote_load_state(started);
+        self.remote_load_inflight_keys.insert(request_key);
         self.init_error = None;
         Some((self.remote_path.clone(), self.view_generation))
     }
@@ -101,17 +151,14 @@ impl SftpWorkspaceEntity {
             return;
         }
 
-        if let Some(previous_remote_id) = self.current_remote_id.take() {
-            self.local_path_by_remote
-                .insert(previous_remote_id.clone(), self.local_path.clone());
-            if !self.remote_path.is_empty() {
-                self.remote_path_by_remote
-                    .insert(previous_remote_id, self.remote_path.clone());
-            }
-        }
-
+        self.remember_current_remote_view();
+        self.remote_listing_cache.remove(&remote_id);
+        self.current_remote_listing_path = None;
         self.current_remote_id = Some(remote_id.clone());
         self.view_generation = self.view_generation.wrapping_add(1);
+        self.remote_loading = false;
+        self.remote_load_pending = false;
+        self.remote_load_inflight = false;
         let local_path = self
             .local_path_by_remote
             .get(&remote_id)
@@ -133,9 +180,76 @@ impl SftpWorkspaceEntity {
         self.remote_last_selected = None;
         self.remote_path_scroll
             .set_offset(Point::new(px(0.0), px(0.0)));
-        // A request already in flight belongs to the previous generation. Its
-        // completion releases the shared slot before this pending view starts.
+        // Requests from the previous generation remain owned by their workers;
+        // this view tracks only its own pending and in-flight state.
         self.request_remote_load();
+        self.remote_load_retry_count = 0;
+        self.remote_load_retry_task = None;
+        self.init_error = None;
+    }
+
+    pub(in crate::workspace) fn activate_following_view(
+        &mut self,
+        surface_id: SftpSurfaceId,
+        remote_id: SftpRemoteId,
+    ) {
+        self.pair_primary_remote_id = None;
+        self.pair_primary_loading = false;
+        self.current_surface_id = Some(surface_id);
+        if self.current_remote_id.as_ref() == Some(&remote_id) {
+            // A tab focus change never refreshes an already-targeted SFTP view.
+            return;
+        }
+
+        self.remember_current_remote_view();
+        self.current_remote_id = Some(remote_id.clone());
+        self.view_generation = self.view_generation.wrapping_add(1);
+        self.remote_loading = false;
+        self.remote_load_pending = false;
+        self.remote_load_inflight = false;
+        let local_path = self
+            .local_path_by_remote
+            .get(&remote_id)
+            .cloned()
+            .unwrap_or_else(default_download_path);
+        self.apply_local_path(local_path);
+
+        let remembered_remote = self
+            .remote_path_by_remote
+            .get(&remote_id)
+            .cloned()
+            .unwrap_or_default();
+        match self.remote_listing_cache.remove(&remote_id) {
+            Some(cached) if remembered_remote.is_empty() || cached.path == remembered_remote => {
+                self.current_remote_listing_path = Some(cached.path.clone());
+                self.remote_path = cached.path.clone();
+                self.remote_path_input = cached.path;
+                self.remote_files = cached.files;
+                self.remote_loading = false;
+                self.remote_load_pending = false;
+            }
+            Some(cached) => {
+                self.remote_listing_cache.insert(remote_id.clone(), cached);
+                self.current_remote_listing_path = None;
+                self.remote_path = remembered_remote.clone();
+                self.remote_path_input = remembered_remote;
+                self.remote_files.clear();
+                self.request_remote_load();
+            }
+            None => {
+                self.current_remote_listing_path = None;
+                self.remote_path = remembered_remote.clone();
+                self.remote_path_input = remembered_remote;
+                self.remote_files.clear();
+                self.request_remote_load();
+            }
+        }
+        self.remote_selected.clear();
+        self.remote_last_selected = None;
+        self.remote_path_completion.dismiss();
+        self.remote_path_completion_pending_selection = None;
+        self.remote_path_scroll
+            .set_offset(Point::new(px(0.0), px(0.0)));
         self.remote_load_retry_count = 0;
         self.remote_load_retry_task = None;
         self.init_error = None;
@@ -174,18 +288,15 @@ impl SftpWorkspaceEntity {
             return false;
         }
 
-        self.local_path_by_remote
-            .insert(remote_id.clone(), self.local_path.clone());
-        if !self.remote_path.is_empty() {
-            self.remote_path_by_remote
-                .insert(remote_id.clone(), self.remote_path.clone());
-        }
+        self.remember_current_remote_view();
         self.current_surface_id = None;
         self.current_remote_id = None;
         self.pair_primary_remote_id = None;
         self.pair_primary_loading = false;
         self.view_generation = self.view_generation.wrapping_add(1);
+        self.remote_loading = false;
         self.remote_load_pending = false;
+        self.remote_load_inflight = false;
         self.remote_load_retry_count = 0;
         self.remote_load_retry_task = None;
         self.remote_files.clear();
@@ -218,17 +329,75 @@ impl SftpWorkspaceEntity {
         result: Result<RemoteSftpListing, String>,
         cx: &mut Context<Self>,
     ) -> SftpRemoteListOutcome {
-        self.set_remote_load_state(self.remote_load_state().complete());
-        if self.current_surface_id != Some(surface_id)
-            || self.current_remote_id.as_ref() != Some(&remote_id)
-            || self.view_generation != view_generation
-        {
+        self.remote_load_inflight_keys
+            .remove(&(remote_id.clone(), view_generation));
+        let is_current_request = self.current_surface_id == Some(surface_id)
+            && self.current_remote_id.as_ref() == Some(&remote_id)
+            && self.view_generation == view_generation;
+        if !is_current_request {
+            if self.current_remote_id.as_ref() == Some(&remote_id) {
+                // A stale response for the same node may finish after the user
+                // returned to a cached view; only the current generation may
+                // keep that view's spinner active.
+                self.sync_current_remote_load_state();
+                // A generation bump from a tab-focus event can orphan the
+                // initial connect-time listing. When this node's view is idle
+                // and has never been populated, the stale listing is still the
+                // freshest data available — adopt it instead of leaving the
+                // panel stuck on a phantom "empty directory".
+                let stale_but_adoptable = !self.remote_load_inflight
+                    && !self.remote_load_pending
+                    && !self.current_remote_load_is_inflight()
+                    && self.remote_files.is_empty()
+                    && self.init_error.is_none();
+                if stale_but_adoptable {
+                    // Treat the response as current: the arms below populate
+                    // the view and clear the error slot. Retry scheduling uses
+                    // the live generation so a retry revalidates this view.
+                    let live_generation = self.view_generation;
+                    self.set_remote_load_state(self.remote_load_state().complete());
+                    return self.apply_remote_list_payload(
+                        surface_id,
+                        remote_id,
+                        live_generation,
+                        session_id,
+                        path,
+                        result,
+                        cx,
+                    );
+                }
+            }
             return SftpRemoteListOutcome {
                 bind_session: None,
                 load_transfer_state_for: None,
                 changed: true,
             };
         }
+        self.set_remote_load_state(self.remote_load_state().complete());
+        self.apply_remote_list_payload(
+            surface_id,
+            remote_id,
+            view_generation,
+            session_id,
+            path,
+            result,
+            cx,
+        )
+    }
+
+    /// Shared tail of `apply_remote_list`: runs once a response has been
+    /// accepted for the visible view (current generation or adopted stale
+    /// listing) and owns the superseded check plus the Ok/Err application.
+    fn apply_remote_list_payload(
+        &mut self,
+        surface_id: SftpSurfaceId,
+        remote_id: SftpRemoteId,
+        view_generation: u64,
+        session_id: String,
+        path: String,
+        result: Result<RemoteSftpListing, String>,
+        cx: &mut Context<Self>,
+    ) -> SftpRemoteListOutcome {
         if remote_list_result_is_superseded(&path, &self.remote_path, self.remote_load_pending) {
             return SftpRemoteListOutcome {
                 bind_session: None,
@@ -249,6 +418,8 @@ impl SftpWorkspaceEntity {
                 self.remote_load_retry_task = None;
                 self.remote_path.clone_from(&cwd);
                 self.remote_path_input.clone_from(&cwd);
+                self.remote_listing_cache.remove(&remote_id);
+                self.current_remote_listing_path = Some(cwd.clone());
                 self.remote_files = listing.files;
                 self.remote_selected.clear();
                 self.remote_last_selected = None;
@@ -901,15 +1072,19 @@ impl WorkspaceApp {
         self.active_surface = ActiveSurface::Terminal;
         self.active_ssh_node_id = Some(node_id.clone());
         self.activate_sftp_view_for_node(tab_id, &node_id, cx);
-        if let Some(path) = initial_remote_path.filter(|path| !path.trim().is_empty()) {
-            // SFTP keeps its own remembered path, but an explicit open from an
-            // active SSH terminal can use that pane cwd as the initial folder.
+        let should_use_initial_path = self
+            .sftp_view
+            .read(cx)
+            .remote_loading;
+        if should_use_initial_path
+            && let Some(path) = initial_remote_path.filter(|path| !path.trim().is_empty())
+        {
+            // Use the terminal cwd only for a first uncached SFTP view; a
+            // cached view retains the directory chosen by the operator.
             self.set_sftp_path(SftpPane::Remote, path, cx);
         }
-        // Opening the SFTP surface mirrors Tauri's createTab path: it does
-        // not start SSH. The SFTP worker consumes an already-connected node
-        // and reports the router's not-connected error when the node is down.
-        self.request_sftp_remote_load(cx);
+        // activate_sftp_view_for_node starts only an uncached listing. The
+        // worker consumes an already-connected node and never starts SSH.
         cx.notify();
     }
 
@@ -1082,6 +1257,7 @@ impl WorkspaceApp {
         remote_path: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.sftp_manually_closed_node_id = None;
         self.embedded_sftp_node_id = Some(node_id.clone());
         self.active_ssh_node_id = Some(node_id.clone());
         self.expanded_ssh_nodes.insert(node_id.clone());
@@ -1098,6 +1274,77 @@ impl WorkspaceApp {
         // The sidebar is a consumer of the node-owned SFTP channel. Hiding it
         // never releases or disconnects the physical SSH node.
         cx.notify();
+    }
+
+    /// Host Tools entry point: binds the file browser to a node without
+    /// touching the sessions sidebar selection or its section, so opening
+    /// Host Tools never hijacks whatever the operator was navigating.
+    pub(in crate::workspace) fn open_sftp_files_for_node(
+        &mut self,
+        node_id: NodeId,
+        cx: &mut Context<Self>,
+    ) {
+        self.sftp_manually_closed_node_id = None;
+        self.embedded_sftp_node_id = Some(node_id.clone());
+        self.sftp_view.update(cx, |sftp, cx| {
+            sftp.activate_view(SftpSurfaceId::Sidebar, SftpRemoteId::Node(node_id));
+            cx.notify();
+        });
+        self.maybe_start_sftp_remote_load(cx);
+        cx.notify();
+    }
+
+    /// Binds the Host Tools file browser to the node chosen by an explicit
+    /// SSH-connect operation. Loading waits for the ready transition below.
+    pub(in crate::workspace) fn bind_sftp_files_to_connecting_node(
+        &mut self,
+        node_id: NodeId,
+        cx: &mut Context<Self>,
+    ) {
+        // An explicit row connect owns both the terminal and file-browser
+        // target, so the readiness delivery can activate exactly this node.
+        self.sftp_manually_closed_node_id = None;
+        self.active_ssh_node_id = Some(node_id.clone());
+        if self.embedded_sftp_node_id.as_ref() != Some(&node_id) {
+            if let Some(previous_node_id) = self.embedded_sftp_node_id.replace(node_id.clone()) {
+                self.sftp_view.update(cx, |sftp, cx| {
+                    let _ = sftp.deactivate_view(
+                        SftpSurfaceId::Sidebar,
+                        &SftpRemoteId::Node(previous_node_id),
+                        cx,
+                    );
+                    cx.notify();
+                });
+            }
+        }
+        let ready = self
+            .ssh_nodes
+            .get(&node_id)
+            .is_some_and(|node| node.readiness == NodeReadiness::Ready);
+        if ready {
+            self.open_sftp_files_for_node(node_id, cx);
+        }
+        cx.notify();
+    }
+
+    /// Activates the bound SFTP browser only after the explicit SSH connect
+    /// reaches Ready. The active-node check prevents background reconnects
+    /// from stealing the operator's current file browser.
+    pub(in crate::workspace) fn auto_open_sftp_sidebar_for_ready_node(
+        &mut self,
+        node_id: &NodeId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_ssh_node_id.as_ref() != Some(node_id) {
+            return;
+        }
+        if self.sftp_manually_closed_node_id.as_ref() == Some(node_id) {
+            return;
+        }
+        if self.sftp_tab_nodes.values().any(|tab_node| tab_node == node_id) {
+            return;
+        }
+        self.open_sftp_files_for_node(node_id.clone(), cx);
     }
 
     pub(in crate::workspace) fn close_embedded_sftp_for_node(
@@ -1118,12 +1365,13 @@ impl WorkspaceApp {
         {
             self.sftp_presentation_request = None;
         }
+        let remote_id = SftpRemoteId::Node(node_id.clone());
         let deactivated = self.sftp_view.update(cx, |sftp, cx| {
-            sftp.deactivate_view(
-                SftpSurfaceId::Sidebar,
-                &SftpRemoteId::Node(node_id.clone()),
-                cx,
-            )
+            let deactivated = sftp.deactivate_view(SftpSurfaceId::Sidebar, &remote_id, cx);
+            // Explicit view closure drops only its cached listing. NodeRouter
+            // and transfer owners remain alive until an explicit node teardown.
+            sftp.remote_listing_cache.remove(&remote_id);
+            deactivated
         });
         if deactivated {
             self.ime_marked_text = None;
@@ -1133,6 +1381,65 @@ impl WorkspaceApp {
         // their independent ownership until their own lifecycle ends.
         cx.notify();
         true
+    }
+
+    /// Records an explicit X-button close so reopening Host Tools does not
+    /// recreate the SFTP surface until the user chooses reconnect.
+    pub(in crate::workspace) fn close_sftp_files_manually_for_node(
+        &mut self,
+        node_id: &NodeId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.sftp_manually_closed_node_id = Some(node_id.clone());
+        self.close_embedded_sftp_for_node(node_id, cx)
+    }
+
+    pub(in crate::workspace) fn active_visible_ssh_node_id(
+        &self,
+        cx: &App,
+    ) -> Option<NodeId> {
+        let session_id = self.active_terminal_session_id(cx)?;
+        self.workspace_runtime.read(cx).ssh_terminal_node_id(session_id)
+    }
+
+    /// Follows the visible SSH tab by switching only the sidebar projection.
+    /// NodeRouter retains every shared SFTP owner and transfer tasks retain
+    /// their dedicated channels while cached directory state moves on screen.
+    pub(in crate::workspace) fn sync_sftp_files_to_active_node(
+        &mut self,
+        node_id: &NodeId,
+        cx: &mut Context<Self>,
+    ) {
+        let target_remote_id = SftpRemoteId::Node(node_id.clone());
+        let already_bound = self.embedded_sftp_node_id.as_ref() == Some(node_id);
+        let sidebar_projection_active = {
+            let sftp = self.sftp_view.read(cx);
+            sftp.current_surface_id == Some(SftpSurfaceId::Sidebar)
+                && sftp.current_remote_id.as_ref() == Some(&target_remote_id)
+        };
+        if already_bound && sidebar_projection_active {
+            self.maybe_start_sftp_remote_load(cx);
+            return;
+        }
+        self.sftp_manually_closed_node_id = None;
+        if !already_bound
+            && let Some(previous_node_id) = self.embedded_sftp_node_id.replace(node_id.clone())
+        {
+            self.sftp_view.update(cx, |sftp, cx| {
+                let _ = sftp.deactivate_view(
+                    SftpSurfaceId::Sidebar,
+                    &SftpRemoteId::Node(previous_node_id),
+                    cx,
+                );
+            });
+        }
+        self.sftp_view.update(cx, |sftp, cx| {
+            sftp.activate_following_view(SftpSurfaceId::Sidebar, target_remote_id);
+            cx.notify();
+        });
+        // An uncached node loads once; revisiting a cached node performs no I/O.
+        self.maybe_start_sftp_remote_load(cx);
+        cx.notify();
     }
 
     pub(in crate::workspace) fn activate_embedded_sftp_sidebar_if_visible(
@@ -1157,7 +1464,10 @@ impl WorkspaceApp {
         };
         if !already_active {
             self.sftp_view.update(cx, |sftp, cx| {
-                sftp.activate_view(SftpSurfaceId::Sidebar, SftpRemoteId::Node(node_id));
+                sftp.activate_following_view(
+                    SftpSurfaceId::Sidebar,
+                    SftpRemoteId::Node(node_id),
+                );
                 cx.notify();
             });
         }
@@ -1173,7 +1483,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         self.sftp_view.update(cx, |sftp, cx| {
-            sftp.activate_view(
+            sftp.activate_following_view(
                 SftpSurfaceId::Tab(tab_id),
                 SftpRemoteId::Node(node_id.clone()),
             );
@@ -1197,11 +1507,32 @@ impl WorkspaceApp {
             (surface_id, remote_id)
         };
         if !self.sftp_surface_is_visible(surface_id, &remote_id, cx) {
+            // Activation optimistically flagged a load before this gate. If
+            // the request never spawned, retire the flag: otherwise the panel
+            // sits in a phantom loading state that no worker will resolve,
+            // and the next visibility edge retries through this same entry.
+            self.sftp_view
+                .update(cx, |sftp, _cx| sftp.retire_unstarted_remote_request());
             return false;
+        }
+        if let SftpRemoteId::Node(node_id) = &remote_id {
+            let node_ready = self
+                .ssh_nodes
+                .get(node_id)
+                .is_some_and(|node| node.readiness == NodeReadiness::Ready);
+            if !node_ready {
+                // A node that is still connecting cannot serve a listing.
+                // Spawning now would only flash a transient endpoint error;
+                // retire instead — the Ready edge restarts the load.
+                self.sftp_view
+                    .update(cx, |sftp, _cx| sftp.retire_unstarted_remote_request());
+                return false;
+            }
         }
         let Some((path, view_generation)) = self.sftp_view.update(cx, |sftp, _cx| {
             sftp.start_remote_load(surface_id, &remote_id)
         }) else {
+            // A same-generation request is already running: a genuine no-op.
             return false;
         };
         let delivery = self.sftp_view.read(cx).worker_sender();
@@ -1236,7 +1567,15 @@ impl WorkspaceApp {
             let _ = owner_backend.acquire_sftp().await;
         });
         runtime.spawn(async move {
-            let result = load_remote_sftp_listing(backend, &path).await;
+            let result = match tokio::time::timeout(
+                SFTP_REMOTE_LIST_TIMEOUT,
+                load_remote_sftp_listing(backend, &path),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err("SFTP listing timed out".to_string()),
+            };
             let _ = tx.send(SftpWorkerResult::RemoteList {
                 surface_id,
                 remote_id,
@@ -1386,8 +1725,12 @@ impl WorkspaceApp {
                 let Some(node_id) = remote_id.node_id() else {
                     return false;
                 };
-                !self.sidebar_collapsed
-                    && self.effective_sidebar_panel_section() == SidebarSection::Sessions
+                let sessions_sidebar_visible = !self.sidebar_collapsed
+                    && self.effective_sidebar_panel_section() == SidebarSection::Sessions;
+                let host_tools_files_visible = self.context_sidebar_visible()
+                    && self.active_context_sidebar_panel == ContextSidebarPanel::HostTools
+                    && self.host_tools.read(cx).active_tool() == ContextSidebarTool::Files;
+                (sessions_sidebar_visible || host_tools_files_visible)
                     && self.embedded_sftp_node_id.as_ref() == Some(node_id)
             }
         }
@@ -1412,8 +1755,17 @@ impl WorkspaceApp {
         cwd: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let remote_id = SftpRemoteId::Node(node_id.clone());
         self.sftp_view.update(cx, |sftp, cx| {
-            if sftp.current_remote_id.as_ref() != Some(&SftpRemoteId::Node(node_id.clone())) {
+            if !ready {
+                // A real node/session loss invalidates only cached presentation
+                // data; transfer and transport cleanup remains with their owners.
+                sftp.remote_listing_cache.remove(&remote_id);
+                if sftp.current_remote_id.as_ref() == Some(&remote_id) {
+                    sftp.current_remote_listing_path = None;
+                }
+            }
+            if sftp.current_remote_id.as_ref() != Some(&remote_id) {
                 return;
             }
             sftp.apply_router_sftp_ready(ready, cwd);
@@ -1693,6 +2045,42 @@ impl SftpWorkspaceEntity {
 #[cfg(test)]
 mod remote_load_state_tests {
     use super::*;
+    use gpui::TestAppContext;
+
+    fn cached_file(name: &str) -> SftpFileEntry {
+        SftpFileEntry {
+            name: name.to_string(),
+            path: format!("/{name}"),
+            file_type: SftpFileType::File,
+            size: 1,
+            modified: None,
+            permissions: None,
+            owner: None,
+            group: None,
+            is_symlink: false,
+            symlink_target: None,
+        }
+    }
+
+    fn active_transfer(remote_id: SftpRemoteId) -> SftpTransferItem {
+        SftpTransferItem {
+            id: 1,
+            transfer_id: "tab-switch-transfer".to_string(),
+            batch_id: None,
+            remote_id,
+            name: "payload.bin".to_string(),
+            local_path: "/tmp/payload.bin".to_string(),
+            remote_path: "/payload.bin".to_string(),
+            direction: SftpTransferDirection::Upload,
+            protocol: RemoteTransferProtocol::Sftp,
+            size: 1024,
+            transferred: 256,
+            speed: 64,
+            smoothed_speed: 0,
+            state: SftpTransferState::Active,
+            error: None,
+        }
+    }
 
     #[test]
     fn sftp_ready_event_preserves_pending_terminal_cwd() {
@@ -1752,7 +2140,131 @@ mod remote_load_state_tests {
             }
         );
     }
+
+    #[gpui::test]
+    fn switching_three_terminal_hosts_reuses_listings_and_preserves_transfer(
+        cx: &mut TestAppContext,
+    ) {
+        let entity = cx.new(SftpWorkspaceEntity::new);
+        let first = SftpRemoteId::Node(NodeId::new("sftp-first"));
+        let second = SftpRemoteId::Node(NodeId::new("sftp-second"));
+        let third = SftpRemoteId::Node(NodeId::new("sftp-third"));
+
+        entity.update(cx, |sftp, cx| {
+            for (remote_id, path, file_name) in [
+                (first.clone(), "/first", "first.txt"),
+                (second.clone(), "/second", "second.txt"),
+                (third.clone(), "/third", "third.txt"),
+            ] {
+                sftp.remote_path_by_remote
+                    .insert(remote_id.clone(), path.to_string());
+                sftp.remote_listing_cache.insert(
+                    remote_id,
+                    SftpRemoteListingCache {
+                        path: path.to_string(),
+                        files: vec![cached_file(file_name)],
+                    },
+                );
+            }
+            sftp.current_surface_id = Some(SftpSurfaceId::Sidebar);
+            sftp.current_remote_id = Some(first.clone());
+            sftp.current_remote_listing_path = Some("/first".to_string());
+            sftp.remote_path = "/first".to_string();
+            sftp.remote_path_input = sftp.remote_path.clone();
+            sftp.remote_files = vec![cached_file("first.txt")];
+            sftp.transfers.push(active_transfer(first.clone()));
+
+            for (target, expected_path, expected_file) in [
+                (second.clone(), "/second", "second.txt"),
+                (third.clone(), "/third", "third.txt"),
+                (first.clone(), "/first", "first.txt"),
+            ] {
+                let previous = sftp.current_remote_id.clone().unwrap();
+                assert!(sftp.deactivate_view(SftpSurfaceId::Sidebar, &previous, cx));
+                sftp.activate_following_view(SftpSurfaceId::Sidebar, target.clone());
+
+                assert_eq!(sftp.current_remote_id.as_ref(), Some(&target));
+                assert_eq!(sftp.remote_path, expected_path);
+                assert_eq!(sftp.remote_files.len(), 1);
+                assert_eq!(sftp.remote_files[0].name, expected_file);
+                assert!(!sftp.remote_loading);
+                assert!(!sftp.remote_load_pending);
+                assert!(!sftp.remote_load_inflight);
+                assert_eq!(sftp.transfers.len(), 1);
+                assert_eq!(sftp.transfers[0].state, SftpTransferState::Active);
+            }
+        });
+    }
+
+    #[test]
+    fn following_an_uncached_host_queues_only_its_initial_listing() {
+        let mut sftp = SftpWorkspaceEntity::default();
+        let remote_id = SftpRemoteId::Node(NodeId::new("sftp-uncached"));
+
+        sftp.activate_following_view(SftpSurfaceId::Sidebar, remote_id.clone());
+
+        assert_eq!(sftp.current_remote_id.as_ref(), Some(&remote_id));
+        assert!(sftp.remote_loading);
+        assert!(sftp.remote_load_pending);
+        assert!(!sftp.remote_load_inflight);
+    }
+
+    #[test]
+    fn following_same_remote_from_sftp_tab_changes_only_surface_identity() {
+        let mut sftp = SftpWorkspaceEntity::default();
+        let remote_id = SftpRemoteId::Node(NodeId::new("sftp-shared-surface"));
+        sftp.current_surface_id = Some(SftpSurfaceId::Tab(TabId(7)));
+        sftp.current_remote_id = Some(remote_id.clone());
+        sftp.current_remote_listing_path = Some("/shared".to_string());
+        sftp.remote_path = "/shared".to_string();
+        sftp.remote_path_input = sftp.remote_path.clone();
+        sftp.remote_files = vec![cached_file("shared.txt")];
+
+        sftp.activate_following_view(SftpSurfaceId::Sidebar, remote_id.clone());
+
+        assert_eq!(sftp.current_surface_id, Some(SftpSurfaceId::Sidebar));
+        assert_eq!(sftp.current_remote_id.as_ref(), Some(&remote_id));
+        assert_eq!(sftp.remote_files[0].name, "shared.txt");
+        assert!(!sftp.remote_loading);
+        assert!(!sftp.remote_load_pending);
+        assert!(!sftp.remote_load_inflight);
+    }
+
+    #[test]
+    fn cached_view_is_not_wedged_by_another_host_load() {
+        let mut sftp = SftpWorkspaceEntity::default();
+        let first = SftpRemoteId::Node(NodeId::new("sftp-first"));
+        let second = SftpRemoteId::Node(NodeId::new("sftp-second"));
+        let third = SftpRemoteId::Node(NodeId::new("sftp-third"));
+        sftp.current_surface_id = Some(SftpSurfaceId::Sidebar);
+        sftp.current_remote_id = Some(first.clone());
+        sftp.current_remote_listing_path = Some("/first".to_string());
+        sftp.remote_path = "/first".to_string();
+        sftp.remote_path_input = sftp.remote_path.clone();
+        sftp.remote_files = vec![cached_file("first.txt")];
+
+        sftp.activate_following_view(SftpSurfaceId::Sidebar, second.clone());
+        assert!(sftp.start_remote_load(SftpSurfaceId::Sidebar, &second).is_some());
+
+        sftp.activate_following_view(SftpSurfaceId::Sidebar, first.clone());
+        assert_eq!(sftp.remote_files[0].name, "first.txt");
+        assert!(!sftp.remote_loading);
+        assert!(!sftp.remote_load_pending);
+        assert!(!sftp.remote_load_inflight);
+
+        sftp.activate_following_view(SftpSurfaceId::Sidebar, third.clone());
+        assert!(sftp.start_remote_load(SftpSurfaceId::Sidebar, &third).is_some());
+    }
 }
+
+/// Weight of each new raw sample in the displayed-rate average. A small alpha
+/// keeps the queue rate readable while still converging on real throughput.
+const SFTP_TRANSFER_SPEED_EMA_ALPHA: f64 = 0.25;
+/// Bounds the whole remote listing future (channel open, subsystem request,
+/// canonicalize, list, and the recoverable-channel retry). Every await below
+/// it is unbounded, so on a half-open connection the listing would otherwise
+/// hang forever and the in-flight key would keep blocking refresh attempts.
+const SFTP_REMOTE_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn apply_tauri_transfer_progress(
     item: &mut SftpTransferItem,
@@ -1767,6 +2279,15 @@ fn apply_tauri_transfer_progress(
         return false;
     }
 
+    if transferred < item.transferred {
+        // A restarted transfer invalidates the previous rate history.
+        item.smoothed_speed = 0;
+    }
+    if speed > 0 {
+        item.smoothed_speed = (item.smoothed_speed as f64
+            * (1.0 - SFTP_TRANSFER_SPEED_EMA_ALPHA)
+            + speed as f64 * SFTP_TRANSFER_SPEED_EMA_ALPHA) as u64;
+    }
     item.transferred = transferred;
     // Tauri's transferStore.updateProgress preserves the original size for
     // indeterminate tar/streaming progress where total=0; completion arrives
@@ -1828,6 +2349,7 @@ mod tests {
             size: 500,
             transferred: 0,
             speed: 0,
+            smoothed_speed: 0,
             state,
             error: None,
         }
@@ -1866,6 +2388,22 @@ mod tests {
         assert_eq!(item.state, SftpTransferState::Active);
         assert_eq!(item.size, 0);
         assert_eq!(item.transferred, 2048);
+    }
+
+    #[test]
+    fn transfer_progress_smooths_the_displayed_rate_and_resets_on_restart() {
+        let mut item = transfer_item(SftpTransferState::Pending);
+
+        assert!(apply_tauri_transfer_progress(&mut item, 100, 1000, 400));
+        assert_eq!(item.smoothed_speed, 100);
+
+        assert!(apply_tauri_transfer_progress(&mut item, 200, 1000, 200));
+        assert_eq!(item.smoothed_speed, 125);
+
+        // A restarted transfer drops the previous rate history instead of
+        // averaging across the rewind.
+        assert!(apply_tauri_transfer_progress(&mut item, 50, 1000, 800));
+        assert_eq!(item.smoothed_speed, 200);
     }
 
     #[test]

@@ -212,6 +212,7 @@ pub(crate) fn paint_terminal_image(
     image: &TerminalImageLayout,
     origin: gpui::Point<Pixels>,
     metrics: &TerminalMetrics,
+    viewport_bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
     let bounds = Bounds::new(
@@ -233,7 +234,14 @@ pub(crate) fn paint_terminal_image(
     let data = image.image.snapshot.data.as_deref();
     let frame_index =
         terminal_image_frame_index(render_image, data, image.image.animation_started_at);
-    if terminal_image_should_request_frame(render_image, data, image.image.animation_started_at) {
+    // Looping graphics only drive repaints while they are actually on screen
+    // and the window can present frames; offscreen or minimized playback stays
+    // paused instead of burning GPU/CPU on invisible frames.
+    let in_viewport = viewport_bounds.intersects(&bounds);
+    if in_viewport
+        && !window.is_minimized()
+        && terminal_image_should_request_frame(render_image, data, image.image.animation_started_at)
+    {
         window.request_animation_frame();
     }
     let _ = window.paint_image(

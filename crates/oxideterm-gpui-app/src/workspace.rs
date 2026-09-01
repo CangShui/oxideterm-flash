@@ -3,15 +3,13 @@ mod breadcrumb_scroll;
 mod browser_behavior;
 mod command_palette;
 mod connection_monitor;
+mod cloud_sync;
 mod delivery;
 mod detached_tab_window;
-mod file_manager;
 mod forwards;
-mod ide;
 mod ime;
 mod launcher;
 mod new_connection;
-mod notification_center;
 mod onboarding;
 mod overlay;
 mod pane_tree;
@@ -34,7 +32,7 @@ mod root {
 mod selectable_text;
 mod selection_motion;
 mod session_icons;
-mod session_manager;
+mod connection_workspace;
 mod settings;
 mod sftp;
 mod sidebar;
@@ -48,6 +46,7 @@ mod terminal_entity;
 mod terminal_git;
 mod terminal_project;
 mod terminal_triggers_runtime;
+mod ui_palette;
 mod version_migration;
 mod virtual_list;
 mod window_intent;
@@ -82,11 +81,11 @@ use anyhow::Result;
 use gpui::{
     AnchoredPositionMode, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, Bounds,
     ClipboardEntry, ClipboardItem, Context, Corner, CursorStyle, Entity, FocusHandle, Focusable,
-    FollowMode, Image, ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment,
+    Image, ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment,
     ListState, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ObjectFit, ParentElement, PathPromptOptions, Pixels, Point, Render, RenderImage, Rgba,
     ScrollHandle, ScrollWheelEvent, SharedString, Styled, StyledImage, Subscription, Task,
-    TextLayout, Timer, UniformListScrollHandle, Window, anchored, canvas, deferred, div,
+    TextLayout, Timer, Window, anchored, canvas, deferred, div,
     prelude::*, px, relative, rgb, rgba, svg,
 };
 use oxideterm_connection_monitor::{
@@ -101,11 +100,10 @@ use oxideterm_connection_monitor::{
     ResourceFilesystemStatus, ResourceLogEntry, ResourceLogSnapshot, ResourceLogStatus,
     ResourceMetrics, ResourcePackageEntry, ResourcePackageSnapshot, ResourcePackageStatus,
     ResourcePortEntry, ResourcePortSnapshot, ResourcePortStatus, ResourceScheduledTask,
-    ResourceScheduledTaskSnapshot, ResourceScheduledTaskStatus, ResourceService,
-    ResourceServiceStatus, ResourceTmuxPane, ResourceTmuxSession, ResourceTmuxSnapshot,
-    ResourceTmuxStatus, ResourceTmuxWindow, ResourceTopProcess, ScheduledTaskActionKind,
-    ScheduledTaskCapability, ScheduledTaskFilter, ServiceActionKind, ServiceCommandCapability,
-    TmuxActionKind, TmuxCommandCapability, build_docker_action_command,
+    ResourceScheduledTaskSnapshot, ResourceScheduledTaskStatus, ResourceScreenSnapshot,
+    ResourceService, ResourceServiceStatus, ResourceTmuxSnapshot, ResourceTopProcess,
+    ScheduledTaskActionKind, ScheduledTaskCapability, ScheduledTaskFilter, ServiceActionKind,
+    ServiceCommandCapability, VirtualTerminalEngine, build_docker_action_command,
     build_docker_exec_shell_command, build_docker_follow_logs_command, build_docker_logs_command,
     build_filesystem_diagnostic_command, build_filesystem_snapshot_command,
     build_log_follow_command, build_log_snapshot_command, build_package_inspect_command,
@@ -113,29 +111,28 @@ use oxideterm_connection_monitor::{
     build_process_action_command, build_scheduled_task_action_command,
     build_scheduled_task_diagnostic_command, build_scheduled_task_logs_command,
     build_scheduled_task_snapshot_command, build_service_action_command,
-    build_service_follow_logs_command, build_service_logs_command, build_tmux_action_command,
-    build_tmux_attach_command, build_tmux_new_session_command, build_tmux_rename_session_command,
-    build_tmux_rename_window_command, build_tmux_send_pane_command, build_tmux_snapshot_command,
-    compact_monitor_row_signature, compact_monitor_rows, docker_action_succeeded,
-    docker_row_signature, docker_state_label_key, filesystem_attention_label_keys,
-    filesystem_entry_severity, filesystem_filter_label_key, filesystem_kind_label_key,
-    filesystem_read_only_label_key, filesystem_row_signature, format_bytes,
-    gpu_device_row_signature, log_level_label_key, log_preset_label_key, log_row_signature,
-    package_filter_label_key, package_row_signature, package_status_label_key, parse_log_snapshot,
-    parse_package_snapshot, parse_port_snapshot, percent_level, port_endpoint,
-    port_filter_label_key, port_is_risky_exposure, port_row_signature, port_state_label_key,
-    process_display_command, process_display_name, process_row_signature, process_state_label_key,
-    scheduled_task_active_label_key, scheduled_task_enabled_label_key,
-    scheduled_task_filter_label_key, scheduled_task_row_signature, scheduled_task_source_label_key,
-    service_action_succeeded, service_enabled_label_key, service_row_signature,
-    service_state_label_key, start_gpu_sampling_on, tmux_session_row_signature,
-    visible_docker_rows, visible_filesystem_rows, visible_log_rows, visible_package_rows,
-    visible_port_rows, visible_process_rows, visible_scheduled_task_rows, visible_service_rows,
-    visible_tmux_session_rows,
+    build_service_follow_logs_command, build_service_logs_command,
+    build_tmux_rename_session_command, build_tmux_rename_window_command,
+    build_tmux_send_pane_command, compact_monitor_row_signature, compact_monitor_rows,
+    docker_action_succeeded, docker_row_signature, docker_state_label_key,
+    filesystem_attention_label_keys, filesystem_entry_severity, filesystem_filter_label_key,
+    filesystem_kind_label_key, filesystem_read_only_label_key, filesystem_row_signature,
+    format_bytes, gpu_device_row_signature, log_level_label_key, log_preset_label_key,
+    log_row_signature, package_filter_label_key, package_row_signature,
+    package_status_label_key, parse_log_snapshot, parse_package_snapshot, parse_port_snapshot,
+    percent_level, port_endpoint, port_filter_label_key, port_is_risky_exposure,
+    port_row_signature, port_state_label_key, process_display_command, process_display_name,
+    process_row_signature, process_state_label_key, scheduled_task_active_label_key,
+    scheduled_task_enabled_label_key, scheduled_task_filter_label_key,
+    scheduled_task_row_signature, scheduled_task_source_label_key, service_action_succeeded,
+    service_enabled_label_key, service_row_signature, service_state_label_key,
+    start_gpu_sampling_on, visible_docker_rows, visible_filesystem_rows, visible_log_rows,
+    visible_package_rows, visible_port_rows, visible_process_rows, visible_scheduled_task_rows,
+    visible_service_rows,
 };
 use oxideterm_connections::{
-    ConnectionStore, ConnectionTerminalOptions, PrivilegeCredentialKind, SaveConnectionRequest,
-    SavedPrivilegeCredential, SshConfigSyncService,
+    ConnectionStore, ConnectionTerminalOptions, SaveConnectionRequest,
+    SessionExportFormat, SshConfigSyncService,
 };
 use oxideterm_forwarding::{
     ForwardEventDeliverySender, ForwardStatus, ForwardingRegistry, SavedForwardStore,
@@ -146,7 +143,7 @@ use oxideterm_gpui_platform::{
     window_opacity::{apply_window_opacity, normalized_window_opacity},
 };
 use oxideterm_gpui_terminal::{
-    BackgroundImageRenderCache, PrivilegePromptMatch, SemanticShellDialect, SharedTerminalSession,
+    BackgroundImageRenderCache, SemanticShellDialect, SharedTerminalSession,
     TerminalBackgroundFit, TerminalBackgroundPreferences, TerminalBroadcastInputKind,
     TerminalCommandSelectionLabels, TerminalContextAction, TerminalHighlightMatchScope,
     TerminalHighlightRenderMode, TerminalHighlightRule as UiHighlightRule,
@@ -156,32 +153,18 @@ use oxideterm_gpui_terminal::{
     TerminalRecordingState, TerminalRecordingStatus, TerminalSearchStatus,
     TerminalSerialControlLabels, TerminalTrzszLabels, TerminalUiPreferenceOverrides,
     TerminalUiPreferences, TerminalUiTheme, TerminalWorkingDirectorySource,
-    detect_custom_privilege_prompt, resolved_terminal_semantic_scheme,
+    resolved_terminal_semantic_scheme,
 };
 use oxideterm_gpui_ui::scroll::ScrollableElement;
 use oxideterm_gpui_ui::{
     ConfirmDialogAction, ConfirmDialogVariant, ConfirmDialogView, checkbox,
     modal::{popover_backdrop, set_tauri_backdrop_blur_allowed},
-    text_input::{TextInputView, text_input, text_input_anchor_probe},
+    text_input::{TextInputAnchorId, TextInputView, text_input, text_input_anchor_probe},
     toast::{ToastVariant, ToastView, toast_action, toast_close},
     toaster::toaster,
     tooltip::tooltip_content,
 };
 use oxideterm_i18n::{I18n, Locale};
-use oxideterm_ide_fs::NodeAgentIdeFileSystem;
-use oxideterm_notification_center::{
-    ActivityView as WorkspaceActivityView, EventCategory as WorkspaceEventCategory,
-    EventCategoryFilter as WorkspaceEventCategoryFilter, EventLogEntry as WorkspaceEventLogEntry,
-    EventSeverity as WorkspaceEventSeverity, EventSeverityFilter as WorkspaceEventSeverityFilter,
-    NotificationCenterState, NotificationEntry as WorkspaceNotificationEntry,
-    NotificationKind as WorkspaceNotificationKind,
-    NotificationKindFilter as WorkspaceNotificationKindFilter,
-    NotificationScope as WorkspaceNotificationScope,
-    NotificationSeverity as WorkspaceNotificationSeverity,
-    NotificationSeverityFilter as WorkspaceNotificationSeverityFilter,
-    NotificationStatus as WorkspaceNotificationStatus,
-    NotificationStatusFilter as WorkspaceNotificationStatusFilter,
-};
 use oxideterm_render_policy::{
     DetectedGraphics, EffectiveRenderPolicy, RenderProfile, compute_render_policy,
 };
@@ -216,11 +199,11 @@ use oxideterm_ssh::{
     ReconnectForwardRuleSnapshot, ReconnectNodeConnectionSnapshot, ReconnectNodeTerminalSnapshot,
     ReconnectNodeTransferSnapshot, ReconnectOrchestratorStore, ReconnectPhase, ReconnectProgress,
     ReconnectSnapshot, SshAlgorithmDiagnosticKind, SshConfig, SshConnectionHandle,
-    SshConnectionRegistry, SshTransportClient, TerminalEndpoint,
+    SshConnectionRegistry, SshTransportClient, SshTransportError, TerminalEndpoint,
 };
 use oxideterm_ssh_launch::{NativeConnectionLaunch, TemporarySshLaunch, TemporaryTelnetLaunch};
 use oxideterm_terminal::{
-    LocalPtyConfig, RemoteShellIntegrationStatus, SerialSessionConfig, ShellInfo,
+    LocalPtyConfig, SerialSessionConfig, ShellInfo,
     SshSessionConfig, TelnetSessionConfig, TerminalCommandMarkDetectionSource, TerminalCursorShape,
     TerminalLifecycle, scan_shells,
 };
@@ -236,10 +219,9 @@ use oxideterm_workspace::{
 
 use self::actions::SearchBarState;
 use self::connection_monitor::{
-    ConnectionRuntimeSection, HostToolsEntity, HostToolsEvent, HostToolsMessages,
-    HostToolsWindowIntent, HostToolsWindowRequest,
+    HostToolsEntity, HostToolsEvent, HostToolsMessages, HostToolsWindowIntent,
+    HostToolsWindowRequest,
 };
-use self::file_manager::{FileManagerState, FileManagerWorkspaceEvent};
 use self::ime::{
     HostToolsPlainTextImeFrame, TextInputAnchorStore, WorkspaceImeDragSelection,
     WorkspaceImeElement, WorkspaceImeSelection, WorkspaceImeTarget,
@@ -256,11 +238,13 @@ use self::overlay::{
     WorkspaceOverlayEntity, WorkspaceOverlayIntent,
 };
 use self::pane_tree::SplitDrag;
-pub(crate) use self::root::helpers::tokens_from_settings as portable_bootstrap_tokens_from_settings;
 use self::root::state::{ReconnectWorkerResult, WorkspaceSshNode, WorkspaceSshNodeEndpoint};
 use self::root::{background::*, helpers::*};
-use self::session_manager::{SessionManagerState, SessionManagerWorkspaceEvent};
-use self::sidebar::{ActiveSessionSidebarViewMode, SidebarSection};
+use self::connection_workspace::{ConnectionWorkspaceState, ConnectionWorkspaceEvent};
+use self::sidebar::{
+    ActiveSessionContextMenu, ActiveSessionFolderContextMenu, ActiveSessionSidebarViewMode,
+    MoveSessionFolderDialogState, NewSessionFolderDialogState, SidebarSection,
+};
 use self::tabs::{TabRemovalTransition, TerminalLocation};
 use self::terminal_entity::{WorkspaceTerminalEntity, WorkspaceTerminalEvent};
 use self::window_intent::WorkspaceWindowIntentEntity;
@@ -269,10 +253,10 @@ use crate::{
     FindPrev, FontDecrease, FontIncrease, FontReset, GoToTab1, GoToTab2, GoToTab3, GoToTab4,
     GoToTab5, GoToTab6, GoToTab7, GoToTab8, GoToTab9, NewConnection, NewTerminal, NextTab,
     OpenSettings, PaletteBroadcast, PaletteCancelReconnect, PaletteCleanupDead,
-    PaletteDetachTerminal, PaletteDisconnectAll, PaletteEventLog, PaletteHealthCheck,
-    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, ShellLauncher, ShowShortcuts,
+    PaletteDetachTerminal, PaletteDisconnectAll, PaletteHealthCheck,
+    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, ShellLauncher,
     SplitHorizontal, SplitNavLeft, SplitNavRight, SplitVertical, SwitchLocaleChinese,
-    SwitchLocaleEnglish, SwitchLocaleTraditionalChinese, TerminalClearScreen,
+    SwitchLocaleEnglish, TerminalClearScreen,
     TerminalFreeTypeMode, TerminalRecording, ToggleFullscreen, ToggleSidebar, ZenMode,
 };
 use crate::assets::LucideIcon;
@@ -349,12 +333,6 @@ const OXIDE_IMPORT_NAME_GROUP_LIST_OVERSCAN: usize = 6;
 const CONFIRM_DIALOG_FOOTER_ACTIONS: [ConfirmDialogAction; 2] =
     [ConfirmDialogAction::Cancel, ConfirmDialogAction::Confirm];
 
-// Tauri NotificationsPanel uses variable-height grouped rows. Keep the native
-// estimate/overscan as a virtual-list spec instead of a raw overdraw number so
-// notification/event-log surfaces share the same browser virtualizer contract.
-const NOTIFICATION_SIDEBAR_ROW_HEIGHT_ESTIMATE: f32 = 72.0;
-const NOTIFICATION_SIDEBAR_VIRTUAL_OVERSCAN: usize = 10;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ConfirmKeyboardAction {
     Cancel,
@@ -362,12 +340,6 @@ pub(super) enum ConfirmKeyboardAction {
     Handled,
 }
 
-#[derive(Clone, Debug)]
-struct ShortcutsModalState {
-    open: bool,
-    query: String,
-    scroll_handle: UniformListScrollHandle,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TabDragMode {
@@ -536,17 +508,28 @@ pub(crate) struct WorkspaceApp {
     serial_terminal_configs: HashMap<TerminalSessionId, SerialSessionConfig>,
     // A Telnet pane keeps only the stable profile owner needed for toolbar persistence.
     telnet_terminal_profile_ids: HashMap<TerminalSessionId, String>,
+    /// Maps a running serial terminal session back to its saved profile so the
+    /// sidebar can claim the profile's row instead of rendering a duplicate.
+    serial_terminal_profile_ids: HashMap<TerminalSessionId, String>,
     command_palette: Entity<command_palette::CommandPaletteEntity>,
     _command_palette_observation: Subscription,
     version_migration: VersionMigrationState,
     onboarding: OnboardingState,
-    shortcuts_modal: ShortcutsModalState,
     settings_workspace: Entity<settings::SettingsWorkspaceEntity>,
     _settings_workspace_observation: Subscription,
     _settings_workspace_subscription: Subscription,
     segmented_control_user_motion: selection_motion::UserSegmentedControlMotionState,
     split_drag: Option<SplitDrag>,
+    // Last pointer position inside the command palette list; filters out
+    // hover refires caused by keyboard scrolling rows under a still pointer.
+    command_palette_hover_position: Option<gpui::Point<Pixels>>,
+    // Measured cross-axis extents of split group containers, probed each
+    // paint so divider drags divide by the container, not the window.
+    split_group_extents: HashMap<PaneId, f32>,
     sidebar_resizing: bool,
+    // Tracks the Host Tools (context) sidebar drag separately so the shared
+    // cursor-override logic never drives the left sidebar width from it.
+    context_sidebar_resizing: bool,
     embedded_sftp_sidebar_resizing: bool,
     sidebar_resize_hotzone_hovered: bool,
     sidebar_collapsed: bool,
@@ -561,8 +544,19 @@ pub(crate) struct WorkspaceApp {
     active_surface: ActiveSurface,
     active_session_sidebar_view_mode: ActiveSessionSidebarViewMode,
     active_session_sidebar_focused_node_id: Option<NodeId>,
+    active_session_context_menu: Option<ActiveSessionContextMenu>,
+    active_session_folder_context_menu: Option<ActiveSessionFolderContextMenu>,
+    session_folder_delete_pending: Option<String>,
+    move_session_folder_dialog: Option<MoveSessionFolderDialogState>,
+    new_session_folder_dialog: Option<NewSessionFolderDialogState>,
     active_session_sidebar_list_state: ListState,
     active_session_sidebar_list_cache: RefCell<VirtualListSignatureCache>,
+    // The virtual list item callbacks rebuild rows per visible item unless the
+    // container keeps one materialized snapshot per view mode. Rebuilding the
+    // node tree and connection catalog once per frame, not once per row, is the
+    // difference between a smooth scroll and a stalled sidebar.
+    active_session_sidebar_rows_cache:
+        RefCell<Option<(ActiveSessionSidebarViewMode, Vec<crate::workspace::sidebar::ActiveSessionSidebarRow>)>>,
     open_settings_select: Option<SettingsSelect>,
     settings_select_focus_origin: Option<browser_behavior::BrowserFocusOrigin>,
     settings_section_list_state: ListState,
@@ -593,6 +587,12 @@ pub(crate) struct WorkspaceApp {
     // settings virtual list remains the only scroll owner behind it.
     terminal_command_specs_editor_open: bool,
     settings_slider_drag: Option<SettingsSlider>,
+    // Slider drags update live state on every pointer move; the disk write is
+    // coalesced into one save when the drag finishes.
+    settings_save_pending: bool,
+    // Inputs whose current draft failed validation, so the rejection toast
+    // fires once per transition instead of on every keystroke.
+    invalid_settings_input: HashSet<SettingsInput>,
     workspace_input: Entity<ime::WorkspaceInputEntity>,
     _workspace_input_observation: Subscription,
     input_caret: ime::WorkspaceCaretVisibility,
@@ -613,12 +613,12 @@ pub(crate) struct WorkspaceApp {
     forwarding_service: forwards::ForwardingRuntimeService,
     forwarding_runtime: Arc<tokio::runtime::Runtime>,
     sftp_transfer_manager: Arc<SftpTransferManager>,
+    cloud_sync: Option<cloud_sync::CloudSyncRuntime>,
+    cloud_sync_config: Option<cloud_sync::ResolvedCloudSyncConfig>,
+    cloud_sync_status: Option<String>,
+    cloud_sync_delete_prompt: Option<cloud_sync::CloudSyncDeletePrompt>,
     sftp_progress_store: Arc<dyn ProgressStore>,
     node_router: NodeRouter,
-    notification_center: NotificationCenterState,
-    notification_sidebar_list_state: ListState,
-    notification_sidebar_list_cache: RefCell<VirtualListSignatureCache>,
-    event_log_sidebar_scroll_handle: UniformListScrollHandle,
     ssh_nodes: HashMap<NodeId, WorkspaceSshNode>,
     saved_ssh_nodes: HashMap<String, NodeId>,
     expanded_ssh_nodes: HashSet<NodeId>,
@@ -626,18 +626,16 @@ pub(crate) struct WorkspaceApp {
     next_ssh_node_id: u64,
     forwarding: Entity<forwards::ForwardingWorkspaceEntity>,
     _forwarding_subscriptions: Vec<Subscription>,
-    file_manager: Entity<FileManagerState>,
-    _file_manager_observation: Subscription,
-    _file_manager_subscription: Subscription,
     sftp_tab_nodes: HashMap<TabId, NodeId>,
     standalone_sftp_tabs: HashMap<TabId, sftp::StandaloneSftpTabBinding>,
     standalone_sftp_sessions: HashMap<String, sftp::StandaloneSftpRuntime>,
     pending_standalone_sftp_pair_launches:
         HashMap<String, new_connection::PendingStandaloneSftpPairLaunch>,
     embedded_sftp_node_id: Option<NodeId>,
+    // A manual SFTP close suppresses automatic rebinding until the user
+    // presses reconnect or explicitly starts the SSH connection again.
+    sftp_manually_closed_node_id: Option<NodeId>,
     sftp_presentation_request: Option<sftp::SftpPresentationRequest>,
-    ide_workspace: Entity<ide::IdeWorkspaceEntity>,
-    _ide_workspace_subscription: Subscription,
     sftp_view: Entity<sftp::SftpWorkspaceEntity>,
     _sftp_observation: Subscription,
     _sftp_subscription: Subscription,
@@ -655,12 +653,16 @@ pub(crate) struct WorkspaceApp {
     settings_store: SettingsStore,
     pending_window_ui_state: Option<oxideterm_settings::WindowUiState>,
     window_state_save_task: Option<Task<()>>,
+    // Font-size shortcuts fire in bursts; each step applies live while the
+    // disk write coalesces behind this debounce, mirroring window-state saves.
+    pending_terminal_font_size: Option<i64>,
+    terminal_font_size_save_task: Option<Task<()>>,
     connection_store: ConnectionStore,
     // The connection-layer worker owns SSH config parsing and persistence.
     ssh_config_sync_service: Option<SshConfigSyncService>,
-    session_manager: Entity<SessionManagerState>,
-    _session_manager_observation: Subscription,
-    _session_manager_subscription: Subscription,
+    connection_workspace: Entity<ConnectionWorkspaceState>,
+    _connection_workspace_observation: Subscription,
+    _connection_workspace_subscription: Subscription,
     remote_desktop: Entity<remote_desktop::RemoteDesktopWorkspaceEntity>,
     remote_desktop_resize_menu_tab_id: Option<TabId>,
     // Shell discovery spawns helper processes, so the scan is deferred to the

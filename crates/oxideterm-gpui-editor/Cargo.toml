@@ -7,6 +7,9 @@ version.workspace = true
 [features]
 default = []
 
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
 [dependencies]
 gpui.workspace = true
 oxideterm-editor-core = { path = "../oxideterm-editor-core" }

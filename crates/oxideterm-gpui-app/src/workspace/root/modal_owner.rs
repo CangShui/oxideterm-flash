@@ -6,16 +6,11 @@ use super::super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum ActiveTabWindowModalKind {
     SettingsNavigationEditor,
-    KeybindingReset,
     ManagedKey,
-    PortablePassword,
-    SessionManagerGroupManager,
-    SessionManagerDelete,
     ForwardEdit,
     ForwardDelete,
     SftpEditor,
     SftpDialog,
-    FileManagerDialog,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,7 +32,6 @@ pub(in crate::workspace) enum ActiveWindowModalOwner {
     SettingsDataDirectory {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
-    RemoteShellIntegration,
     TerminalTriggerQuickCommand,
     NodeDisconnect {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
@@ -89,7 +83,6 @@ pub(in crate::workspace) enum ActiveWindowModalOwner {
     NativeUpdateReleaseNotes {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
-    Shortcuts,
     MermaidZoom,
 }
 
@@ -104,7 +97,6 @@ impl ActiveWindowModalOwner {
             Self::KeyboardInteractiveChallenge => 4,
             Self::SettingsReset { .. } => 12,
             Self::SettingsDataDirectory { .. } => 13,
-            Self::RemoteShellIntegration => 14,
             Self::TerminalTriggerQuickCommand => 15,
             Self::NodeDisconnect { .. } => 17,
             Self::TabClose { .. } => 18,
@@ -129,7 +121,6 @@ impl ActiveWindowModalOwner {
             Self::Onboarding => 40,
             Self::LegalNotice { .. } => 41,
             Self::NativeUpdateReleaseNotes { .. } => 42,
-            Self::Shortcuts => 43,
             Self::MermaidZoom => 44,
         }
     }
@@ -155,7 +146,6 @@ impl ActiveWindowModalOwner {
             | Self::JumpServer
             | Self::HostKeyChallenge
             | Self::KeyboardInteractiveChallenge
-            | Self::RemoteShellIntegration
             | Self::TerminalTriggerQuickCommand
             | Self::HostDockerLogs
             | Self::HostServiceLogs
@@ -167,7 +157,6 @@ impl ActiveWindowModalOwner {
             | Self::CommandPalette
             | Self::VersionMigration
             | Self::Onboarding
-            | Self::Shortcuts
             | Self::MermaidZoom => oxideterm_gpui_ui::motion::ExitPhase::Visible,
         }
     }
@@ -235,7 +224,6 @@ pub(in crate::workspace) struct ActiveWindowModalProjection {
     pub(in crate::workspace) overlay_confirm: Option<overlay::WorkspaceOverlayConfirmOwnerSnapshot>,
     pub(in crate::workspace) settings_data_directory_phase:
         Option<oxideterm_gpui_ui::motion::ExitPhase>,
-    pub(in crate::workspace) remote_shell_integration_open: bool,
     pub(in crate::workspace) terminal_trigger_quick_command_open: bool,
     pub(in crate::workspace) tab_close_phase: Option<oxideterm_gpui_ui::motion::ExitPhase>,
     pub(in crate::workspace) host_tools_modal:
@@ -251,7 +239,6 @@ pub(in crate::workspace) struct ActiveWindowModalProjection {
     pub(in crate::workspace) command_palette_open: bool,
     pub(in crate::workspace) version_migration_open: bool,
     pub(in crate::workspace) onboarding_open: bool,
-    pub(in crate::workspace) shortcuts_open: bool,
     pub(in crate::workspace) mermaid_zoom_open: bool,
     pub(in crate::workspace) native_update_toast_visible: bool,
 }
@@ -298,9 +285,6 @@ impl ActiveWindowModalProjection {
         let settings_data_owner = self
             .settings_data_directory_phase
             .map(|phase| ActiveWindowModalOwner::SettingsDataDirectory { phase });
-        let remote_shell_owner = self
-            .remote_shell_integration_open
-            .then_some(ActiveWindowModalOwner::RemoteShellIntegration);
         let terminal_trigger_owner = self
             .terminal_trigger_quick_command_open
             .then_some(ActiveWindowModalOwner::TerminalTriggerQuickCommand);
@@ -365,9 +349,6 @@ impl ActiveWindowModalProjection {
             .then_some(ActiveWindowModalOwner::VersionMigration);
         let onboarding_owner = (self.onboarding_open && !self.version_migration_open)
             .then_some(ActiveWindowModalOwner::Onboarding);
-        let shortcuts_owner = self
-            .shortcuts_open
-            .then_some(ActiveWindowModalOwner::Shortcuts);
         let mermaid_owner = self
             .mermaid_zoom_open
             .then_some(ActiveWindowModalOwner::MermaidZoom);
@@ -384,7 +365,6 @@ impl ActiveWindowModalProjection {
             keyboard_interactive_owner,
             overlay_owner,
             settings_data_owner,
-            remote_shell_owner,
             terminal_trigger_owner,
             tab_owner,
             host_tools_owner,
@@ -398,7 +378,6 @@ impl ActiveWindowModalProjection {
             command_palette_owner,
             version_migration_owner,
             onboarding_owner,
-            shortcuts_owner,
             mermaid_owner,
         ]
         .into_iter()
@@ -447,13 +426,13 @@ impl WorkspaceApp {
             )
         };
         let (oxide_import_phase, oxide_export_phase) = {
-            let session_manager = self.session_manager.read(cx);
+            let connection_workspace = self.connection_workspace.read(cx);
             (
-                session_manager
+                connection_workspace
                     .oxide_import_dialog
                     .as_ref()
                     .map(|dialog| dialog.presence.phase()),
-                session_manager
+                connection_workspace
                     .oxide_export_dialog
                     .as_ref()
                     .map(|dialog| dialog.presence.phase()),
@@ -469,10 +448,6 @@ impl WorkspaceApp {
                 .has_keyboard_interactive_challenge(),
             overlay_confirm: self.overlay.read(cx).confirm_owner_snapshot(),
             settings_data_directory_phase,
-            remote_shell_integration_open: self
-                .workspace_runtime
-                .read(cx)
-                .remote_shell_integration_confirm_open(),
             terminal_trigger_quick_command_open: self.terminal_trigger_quick_command_pending(),
             tab_close_phase: self.tab_host.read(cx).close_confirm_phase(),
             host_tools_modal: self.host_tools.read(cx).window_modal_snapshot(),
@@ -486,7 +461,6 @@ impl WorkspaceApp {
             command_palette_open: self.command_palette.read(cx).is_open(),
             version_migration_open: self.version_migration.open,
             onboarding_open: self.onboarding.open,
-            shortcuts_open: self.shortcuts_modal.open,
             mermaid_zoom_open: self.mermaid_zoom.is_some(),
             native_update_toast_visible: self.native_update_notification_open,
         }
@@ -514,40 +488,14 @@ impl WorkspaceApp {
         match active_tab.kind {
             TabKind::Settings => {
                 let settings = self.settings_workspace.read(cx);
-                if settings.portable_password_dialog_open() {
-                    Some(ActiveTabWindowModalSnapshot {
-                        kind: ActiveTabWindowModalKind::PortablePassword,
-                        phase: settings.portable_password_dialog_phase(),
-                    })
-                } else if settings.managed_key_dialog_open() {
+                if settings.managed_key_dialog_open() {
                     Some(ActiveTabWindowModalSnapshot {
                         kind: ActiveTabWindowModalKind::ManagedKey,
                         phase: settings.managed_key_dialog_phase(),
                     })
-                } else if let Some(snapshot) = settings.keybinding_reset_confirm_snapshot() {
-                    Some(ActiveTabWindowModalSnapshot {
-                        kind: ActiveTabWindowModalKind::KeybindingReset,
-                        phase: snapshot.phase,
-                    })
                 } else if settings.navigation_editor_open() {
                     Some(ActiveTabWindowModalSnapshot {
                         kind: ActiveTabWindowModalKind::SettingsNavigationEditor,
-                        phase: visible,
-                    })
-                } else {
-                    None
-                }
-            }
-            TabKind::SessionManager => {
-                let session_manager = self.session_manager.read(cx);
-                if session_manager.delete_confirm.is_some() {
-                    Some(ActiveTabWindowModalSnapshot {
-                        kind: ActiveTabWindowModalKind::SessionManagerDelete,
-                        phase: visible,
-                    })
-                } else if session_manager.show_group_manager {
-                    Some(ActiveTabWindowModalSnapshot {
-                        kind: ActiveTabWindowModalKind::SessionManagerGroupManager,
                         phase: visible,
                     })
                 } else {
@@ -584,12 +532,6 @@ impl WorkspaceApp {
                     phase: sftp.dialog_phase(),
                 })
             }
-            TabKind::FileManager => self.file_manager.read(cx).dialog.is_some().then_some(
-                ActiveTabWindowModalSnapshot {
-                    kind: ActiveTabWindowModalKind::FileManagerDialog,
-                    phase: visible,
-                },
-            ),
             _ => None,
         }
     }
@@ -602,6 +544,73 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.new_session_folder_dialog.is_some() {
+            if event.keystroke.key.as_str() == "escape" {
+                self.close_new_session_folder_dialog();
+                cx.notify();
+                return true;
+            }
+            if event.keystroke.key.as_str() == "enter" {
+                // Enter must run the same confirm path as the mouse button so
+                // a rename dialog actually renames instead of creating.
+                self.confirm_new_session_folder_dialog(cx);
+                return true;
+            }
+            if self.defer_active_ime_key(&event.keystroke, window, cx) {
+                return false;
+            }
+            if self.handle_active_text_input_edit_shortcut(&event.keystroke, cx)
+                || self.handle_active_text_input_delete_selection(&event.keystroke, cx)
+                || self.handle_active_text_input_navigation(&event.keystroke, cx)
+            {
+                return true;
+            }
+            return true;
+        }
+        if self.session_folder_delete_pending.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_delete_session_folder_dialog();
+                    cx.notify();
+                }
+                // Enter confirms destructively, mirroring the dialog's
+                // primary destructive button.
+                "enter" => self.confirm_delete_session_folder_dialog(cx),
+                _ => {}
+            }
+            return true;
+        }
+        if self.move_session_folder_dialog.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_move_session_folder_dialog();
+                    cx.notify();
+                }
+                "enter" => {
+                    // Confirm the currently highlighted option; no Enter
+                    // action exists for a dialog state without a selection.
+                    let selected = self
+                        .move_session_folder_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.selected_group.clone());
+                    if let Some(target) = selected {
+                        self.confirm_move_session_folder_dialog(Some(target), cx);
+                    }
+                }
+                // The option list renders no-folder first and groups after, so
+                // the arrows walk that same order with wraparound. Arrow key
+                // names differ per platform input pipeline, so accept both.
+                "up" | "arrowup" | "left" | "arrowleft" => {
+                    self.move_session_folder_selection(-1, cx)
+                }
+                "down" | "arrowdown" | "right" | "arrowright" => {
+                    self.move_session_folder_selection(1, cx)
+                }
+                _ => {}
+            }
+            return true;
+        }
+
         let Some(owner) = self.active_window_modal_owner(cx) else {
             return false;
         };
@@ -643,9 +652,6 @@ impl WorkspaceApp {
             }
             ActiveWindowModalOwner::SettingsDataDirectory { .. } => {
                 let _ = self.handle_settings_data_directory_confirm_key(event, cx);
-            }
-            ActiveWindowModalOwner::RemoteShellIntegration => {
-                let _ = self.handle_remote_shell_integration_confirm_key(event, cx);
             }
             ActiveWindowModalOwner::TerminalTriggerQuickCommand => {
                 let _ = self.handle_terminal_trigger_quick_command_key(event, cx);
@@ -763,9 +769,6 @@ impl WorkspaceApp {
             ActiveWindowModalOwner::NativeUpdateReleaseNotes { .. } => {
                 let _ = self.handle_native_update_release_notes_key(event, cx);
             }
-            ActiveWindowModalOwner::Shortcuts => {
-                self.handle_shortcuts_modal_key(event, cx);
-            }
             ActiveWindowModalOwner::MermaidZoom => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.mermaid_zoom = None;
@@ -784,38 +787,17 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> bool {
         match kind {
-            ActiveTabWindowModalKind::PortablePassword => {
-                if event.keystroke.key.as_str() == "escape" {
-                    self.close_portable_password_change_dialog(cx);
-                }
-                true
-            }
             ActiveTabWindowModalKind::ManagedKey => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_managed_key_dialog(cx);
                 }
                 true
             }
-            ActiveTabWindowModalKind::KeybindingReset => {
-                self.handle_keybinding_reset_confirm_key(event, window, cx)
-            }
             ActiveTabWindowModalKind::SettingsNavigationEditor => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_settings_navigation_editor(cx);
                 }
                 true
-            }
-            ActiveTabWindowModalKind::SessionManagerGroupManager => {
-                if self.handle_session_manager_basic_dialog_footer_key(event, cx) {
-                    return true;
-                }
-                if event.keystroke.key.as_str() == "escape" {
-                    self.close_session_group_manager(cx);
-                }
-                true
-            }
-            ActiveTabWindowModalKind::SessionManagerDelete => {
-                self.handle_session_manager_delete_confirm_key(event, cx)
             }
             ActiveTabWindowModalKind::ForwardEdit => self.handle_forward_edit_modal_key(event, cx),
             ActiveTabWindowModalKind::ForwardDelete => {
@@ -824,7 +806,6 @@ impl WorkspaceApp {
             ActiveTabWindowModalKind::SftpEditor | ActiveTabWindowModalKind::SftpDialog => {
                 self.handle_sftp_key(event, window, cx)
             }
-            ActiveTabWindowModalKind::FileManagerDialog => self.handle_file_manager_key(event, cx),
         }
     }
 }

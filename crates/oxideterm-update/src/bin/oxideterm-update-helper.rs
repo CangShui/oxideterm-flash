@@ -6,16 +6,7 @@
 fn main() {
     // Keep argument parsing inside the updater crate so the helper binary stays
     // a tiny process boundary around the staged replacement engine.
-    let portable_mode = std::env::args_os()
-        .nth(1)
-        .is_some_and(|argument| argument == "portable");
-    let result = if portable_mode {
-        oxideterm_update::parse_portable_update_helper_options(std::env::args_os())
-            .and_then(oxideterm_update::run_portable_update_helper)
-    } else {
-        run_platform_update_helper()
-    };
-    if let Err(error) = result {
+    if let Err(error) = run_platform_update_helper() {
         eprintln!("{error}");
         std::process::exit(1);
     }

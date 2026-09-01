@@ -4,6 +4,10 @@ use gpui::{
 };
 use oxideterm_theme::ThemeTokens;
 
+// Tauri TooltipContent wraps long labels at max-w-[360px]; native keeps the
+// same ceiling so one-line tooltips cannot overflow the window.
+const TOOLTIP_MAX_WIDTH: f32 = 360.0;
+
 struct TooltipView {
     tokens: ThemeTokens,
     label: String,
@@ -38,8 +42,12 @@ pub fn tooltip_content(
     shortcut: Option<String>,
 ) -> AnyElement {
     let label = label.into();
-    let animation_id = gpui::ElementId::Name(format!("tooltip-enter-{label}").into());
+    // Each tooltip renders from its own view (or a single overlay layer), so
+    // the enter animation id must stay label-independent: deriving it from the
+    // label made same-label tooltips share one animation timeline.
+    let animation_id = "tooltip-enter";
     let tooltip = div()
+        .max_w(px(TOOLTIP_MAX_WIDTH))
         .rounded(px(tokens.radii.xs))
         .border_1()
         .border_color(rgb(tokens.ui.border))
@@ -52,6 +60,7 @@ pub fn tooltip_content(
         .child(
             div()
                 .flex()
+                .min_w(px(0.0))
                 .items_center()
                 .gap(px(tokens.spacing.two))
                 .child(label)
@@ -59,6 +68,7 @@ pub fn tooltip_content(
                     row.child(
                         div()
                             .ml_auto()
+                            .flex_none()
                             .rounded(px(tokens.radii.xs))
                             .border_1()
                             .border_color(rgb(tokens.ui.border))

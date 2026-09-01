@@ -94,8 +94,9 @@ const SFTP_DIFF_VIRTUAL_OVERSCAN: usize = 15; // Diff dialog keeps the same file
 const SFTP_DIFF_LINE_NUMBER_COL: f32 = 48.0; // Tauri w-12
 const SFTP_DIFF_WRAP_COLUMNS: usize = 64; // max-w-5xl split diff leaves roughly this many mono chars per side.
 const SFTP_PREVIEW_FONT_DEFAULT_SIZE: f32 = 32.0; // Tauri FontPreview initial fontSize
-const SFTP_SIZE_COL: f32 = 80.0; // Tauri w-20
-const SFTP_MODIFIED_COL: f32 = 96.0; // Tauri w-24
+const SFTP_SIZE_COL: f32 = 76.0;
+const SFTP_MODIFIED_COL: f32 = 125.0; // "2026-08-29 22:33" needs ~120px at text-xs
+const SFTP_OWNER_COL: f32 = 64.0;
 const SFTP_DIRECTORY_PROGRESS_SAVE_INTERVAL_MS: u64 = 1_000; // Keep resume progress fresh without writing on every file tick.
 const SFTP_DIRECTORY_SPEED_WINDOW: Duration = Duration::from_secs(2); // Smooth bursts from parallel file workers.
 const SFTP_DIRECTORY_SPEED_SAMPLE_INTERVAL: Duration = Duration::from_millis(100); // Keep rolling history bounded at high event rates.
@@ -118,11 +119,13 @@ const SFTP_DRAG_RING_ALPHA: u32 = 0x4d; // Tauri ring-oxide-accent/30
 const SFTP_SELECTED_BG_ALPHA: u32 = 0x33; // Tauri bg-theme-accent/20
 const SFTP_BREADCRUMB_ACTIVE_ALPHA: u32 = 0x4d; // Tauri bg-theme-bg-hover/30
 const SFTP_BREADCRUMB_HOVER_ALPHA: u32 = 0x80; // Tauri hover:bg-theme-bg-hover/50
-const SFTP_FOLDER_BLUE: u32 = 0x60a5fa; // Tauri text-blue-400
-const SFTP_GREEN: u32 = 0x22c55e; // Tauri text-green-500
-const SFTP_YELLOW: u32 = 0xeab308; // Tauri text-yellow-500
-const SFTP_ORANGE: u32 = 0xfb923c; // Tauri text-orange-400
-const SFTP_RED: u32 = 0xf87171; // Tauri text-red-400
+// Feature aliases keep call sites short while owning palette values in one
+// shared module instead of re-declaring raw hex per view.
+const SFTP_FOLDER_BLUE: u32 = ui_palette::BLUE_400;
+const SFTP_GREEN: u32 = ui_palette::GREEN_500;
+const SFTP_YELLOW: u32 = ui_palette::YELLOW_500;
+const SFTP_ORANGE: u32 = ui_palette::ORANGE_400;
+const SFTP_RED: u32 = ui_palette::RED_400;
 const SFTP_DESTRUCTIVE_TEXT: u32 = 0xffffff;
 const SFTP_CONTEXT_MENU_WIDTH: f32 = 180.0; // Tauri min-w-[180px]
 const SFTP_CONTEXT_MENU_MAX_HEIGHT: f32 = 288.0; // 8 items + separators, clamped like fixed portal menu
@@ -242,6 +245,14 @@ pub(super) struct SftpMutationToast {
     success_title: String,
     success_description: Option<String>,
     error_title: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SftpEditorRuntimeSettings {
+    editor_font_size: f32,
+    editor_line_height: f32,
+    word_wrap: bool,
+    background_active: bool,
 }
 
 // Surface identity prevents a hidden tab completion from replacing sidebar state.
@@ -667,6 +678,9 @@ struct SftpTransferItem {
     size: u64,
     transferred: u64,
     speed: u64,
+    // Exponentially smoothed view of `speed`. Raw transport samples are
+    // bursty; the queue renders this stable average instead.
+    smoothed_speed: u64,
     state: SftpTransferState,
     error: Option<String>,
 }
@@ -866,6 +880,9 @@ pub(super) enum SftpDialog {
     NewFolder {
         pane: SftpPane,
     },
+    NewFile {
+        pane: SftpPane,
+    },
     Delete {
         pane: SftpPane,
         files: Vec<String>,
@@ -886,11 +903,6 @@ pub(super) enum SftpDialog {
     EditorCloseConfirm {
         name: String,
     },
-    ExternalEditUploadConfirm {
-        name: String,
-        remote_path: String,
-        temp_path: String,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -901,6 +913,12 @@ struct SftpDrive {
     total_space: u64,
     available_space: u64,
     read_only: bool,
+}
+
+#[derive(Debug)]
+struct SftpRemoteListingCache {
+    path: String,
+    files: Vec<SftpFileEntry>,
 }
 
 pub(super) struct SftpWorkspaceEntity {
@@ -941,6 +959,7 @@ pub(super) struct SftpWorkspaceEntity {
     remote_loading: bool,
     remote_load_pending: bool,
     remote_load_inflight: bool,
+    remote_load_inflight_keys: HashSet<(SftpRemoteId, u64)>,
     remote_load_retry_count: u8,
     remote_load_retry_task: Option<Task<()>>,
     pub(in crate::workspace) current_surface_id: Option<SftpSurfaceId>,
@@ -950,6 +969,8 @@ pub(super) struct SftpWorkspaceEntity {
     local_path_by_remote: HashMap<SftpRemoteId, String>,
     remote_path_by_remote: HashMap<SftpRemoteId, String>,
     remote_home_by_remote: HashMap<SftpRemoteId, String>,
+    remote_listing_cache: HashMap<SftpRemoteId, SftpRemoteListingCache>,
+    current_remote_listing_path: Option<String>,
     view_generation: u64,
     init_error: Option<String>,
     pub(super) focused_input: Option<SftpInput>,
@@ -1062,6 +1083,7 @@ impl Default for SftpWorkspaceEntity {
             remote_loading: false,
             remote_load_pending: false,
             remote_load_inflight: false,
+            remote_load_inflight_keys: HashSet::new(),
             remote_load_retry_count: 0,
             remote_load_retry_task: None,
             current_surface_id: None,
@@ -1071,6 +1093,8 @@ impl Default for SftpWorkspaceEntity {
             local_path_by_remote: HashMap::new(),
             remote_path_by_remote: HashMap::new(),
             remote_home_by_remote: HashMap::new(),
+            remote_listing_cache: HashMap::new(),
+            current_remote_listing_path: None,
             view_generation: 0,
             init_error: None,
             focused_input: None,
@@ -1518,6 +1542,7 @@ mod entity_delivery_tests {
             size: 10,
             transferred: 0,
             speed: 0,
+            smoothed_speed: 0,
             state: SftpTransferState::Pending,
             error: None,
         }
@@ -1621,7 +1646,13 @@ mod entity_delivery_tests {
             sftp.current_surface_id = Some(SftpSurfaceId::Tab(TabId(1)));
             sftp.current_remote_id = Some(SftpRemoteId::Node(NodeId::new("current-node")));
             sftp.view_generation = 2;
+            // A live current-generation request registers both the view flag
+            // and its in-flight key; the stale response must not clobber it.
             sftp.remote_load_inflight = true;
+            sftp.remote_load_inflight_keys.insert((
+                SftpRemoteId::Node(NodeId::new("current-node")),
+                2,
+            ));
         });
         let effect_events = Arc::new(AtomicUsize::new(0));
         let observed_events = effect_events.clone();
@@ -1650,7 +1681,59 @@ mod entity_delivery_tests {
         cx.run_until_parked();
 
         assert_eq!(effect_events.load(Ordering::Acquire), 0);
-        cx.read(|cx| assert!(!entity.read(cx).remote_load_inflight));
+        // The current-generation request keeps its spinner; a stale completion
+        // must neither clobber the view nor clear its in-flight marker.
+        cx.read(|cx| assert!(entity.read(cx).remote_load_inflight));
+    }
+
+    #[gpui::test]
+    fn orphaned_first_listing_adopts_into_idle_empty_view(cx: &mut TestAppContext) {
+        // The connect-time listing can land after a tab-focus event bumped the
+        // view generation. With the view idle and never populated, that stale
+        // listing is the freshest data available and must not be discarded —
+        // discarding it left the panel stuck on a phantom empty directory.
+        let entity = cx.new(SftpWorkspaceEntity::new);
+        entity.update(cx, |sftp, _cx| {
+            sftp.current_surface_id = Some(SftpSurfaceId::Tab(TabId(1)));
+            sftp.current_remote_id = Some(SftpRemoteId::Node(NodeId::new("current-node")));
+            // The focus event bumped the generation past the in-flight request.
+            sftp.view_generation = 2;
+            sftp.remote_load_inflight = false;
+            sftp.remote_load_pending = false;
+        });
+        let effect_events = Arc::new(AtomicUsize::new(0));
+        let observed_events = effect_events.clone();
+        let _subscription = entity.update(cx, |_, cx| {
+            cx.subscribe(&entity, move |_, _, event: &SftpWorkspaceEvent, _cx| {
+                if matches!(event, SftpWorkspaceEvent::WorkerEffectsReady(_)) {
+                    observed_events.fetch_add(1, Ordering::AcqRel);
+                }
+            })
+        });
+        let sender = cx.read(|cx| entity.read(cx).worker_sender());
+
+        sender
+            .send(SftpWorkerResult::RemoteList {
+                surface_id: SftpSurfaceId::Tab(TabId(1)),
+                remote_id: SftpRemoteId::Node(NodeId::new("current-node")),
+                view_generation: 1,
+                session_id: "orphaned-session".to_string(),
+                path: "/root".to_string(),
+                result: Ok(RemoteSftpListing {
+                    cwd: "/root".to_string(),
+                    files: vec![file_entry("orphan.txt")],
+                }),
+            })
+            .expect("orphaned SFTP delivery");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let sftp = entity.read(cx);
+            assert_eq!(sftp.remote_path, "/root");
+            assert_eq!(sftp.remote_files.len(), 1);
+            assert_eq!(sftp.remote_files[0].name, "orphan.txt");
+            assert!(sftp.init_error.is_none());
+        });
     }
 
     #[gpui::test]
@@ -1748,7 +1831,8 @@ use helpers::{
     is_sftp_incomplete_store_compat_error, join_local_path, join_sftp_path, list_local_files,
     load_remote_sftp_completion_listing, load_remote_sftp_listing, load_remote_sftp_preview,
     load_remote_sftp_preview_hex, local_drives, new_sftp_transfer_id,
-    normalize_external_dropped_path, normalize_remote_path, parent_path, preview_content_text,
+    normalize_external_dropped_path, normalize_remote_path, parent_directory_entry,
+    parent_path, preview_content_text,
     refreshed_local_files, remote_directory_prefixes, save_remote_sftp_preview, sftp_bg,
     sftp_border, sftp_card_surface, sftp_conflict_resolution_from_settings, sftp_diff_visual_lines,
     sftp_editor_language, sftp_editor_language_id, sftp_file_name, sftp_hover_bg, sftp_panel_bg,

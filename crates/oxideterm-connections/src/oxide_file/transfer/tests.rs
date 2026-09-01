@@ -4,8 +4,8 @@ mod tests {
     use std::fs;
 
     use crate::{
-        ConnectionTerminalOptions, PrivilegeCredentialKind, SavePrivilegeCredentialRequest,
-        SaveRemoteDesktopProfileRequest, SaveSerialProfileRequest, SaveTelnetProfileRequest,
+        ConnectionTerminalOptions, SaveRemoteDesktopProfileRequest, SaveSerialProfileRequest,
+        SaveTelnetProfileRequest,
         SavedUpstreamProxyProtocol, SerialFlowControl, SerialProfile, SerialProfilesSyncSnapshot,
     };
     use oxideterm_remote_desktop::RemoteDesktopProtocol;
@@ -85,7 +85,6 @@ mod tests {
             icon: Some("server".to_string()),
             tags: vec!["prod".to_string()],
             post_connect_command: None,
-            privilege_credentials: Vec::new(),
         }
     }
 
@@ -635,62 +634,6 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_export_import_restores_privilege_credential_secret() {
-        let mut source = temp_store("privilege-source");
-        source
-            .upsert_imported_connection(saved_connection("conn-1", "Prod"))
-            .unwrap();
-        source
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: Some("sudo-prod".to_string()),
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: Some("deploy".to_string()),
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("sudo-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-
-        let bytes = export_connections_to_oxide(
-            &source,
-            &["conn-1".to_string()],
-            "secret!",
-            OxideExportOptions {
-                include_passwords: true,
-                ..OxideExportOptions::default()
-            },
-        )
-        .unwrap();
-        let mut target = temp_store("privilege-target");
-        apply_oxide_import_with_options(
-            &mut target,
-            &bytes,
-            "secret!",
-            OxideImportOptions {
-                conflict_strategy: ImportConflictStrategy::Replace,
-                ..OxideImportOptions::default()
-            },
-        )
-        .unwrap();
-        let imported = target
-            .connections()
-            .into_iter()
-            .find(|connection| connection.name == "Prod")
-            .unwrap();
-
-        assert_eq!(imported.privilege_credentials.len(), 1);
-        assert_eq!(
-            target
-                .get_privilege_credential_secret(&imported.id, "sudo-prod")
-                .unwrap(),
-            "sudo-secret"
-        );
-    }
-
-    #[test]
     fn managed_key_export_import_restores_managed_key_store_entry() {
         let mut source = temp_store("managed-source");
         let private_key = generated_private_key_text();
@@ -795,9 +738,12 @@ mod tests {
         assert_eq!(result.imported, 1);
         assert!(target.managed_ssh_keys().is_empty());
         let imported = target.connections().first().unwrap();
-        assert!(
-            matches!(&imported.auth, SavedAuth::Key { key_path, .. } if key_path.contains(".ssh/imported"))
-        );
+        assert!(matches!(&imported.auth, SavedAuth::Key { key_path, .. } if
+            // The extracted key must live inside the .ssh/imported directory;
+            // component matching keeps the check separator-agnostic on Windows.
+            std::path::Path::new(key_path)
+                .parent()
+                .is_some_and(|dir| dir.ends_with(".ssh/imported"))));
     }
 
     #[test]
@@ -947,7 +893,6 @@ mod tests {
             upstream_proxy: EncryptedUpstreamProxyPolicy::UseGlobal,
             proxy_chain: Vec::new(),
             forwards: Vec::new(),
-            privilege_credentials: Vec::new(),
         }];
 
         let plans = plan_import(&store, &payload, ImportConflictStrategy::Rename);
@@ -1351,7 +1296,6 @@ mod tests {
             upstream_proxy: EncryptedUpstreamProxyPolicy::UseGlobal,
             proxy_chain: Vec::new(),
             forwards: Vec::new(),
-            privilege_credentials: Vec::new(),
         }
     }
 }

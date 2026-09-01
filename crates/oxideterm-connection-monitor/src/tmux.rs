@@ -7,6 +7,69 @@ use zeroize::Zeroizing;
 use crate::capture::capture_failure_message;
 use crate::shell::{posix_shell_command, powershell_quote, shell_quote};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualTerminalEngine {
+    #[default]
+    Screen,
+    Tmux,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceScreenSession {
+    pub id: String,
+    pub name: String,
+    pub attached: bool,
+    pub created: String,
+    pub activity: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenCommandCapability {
+    #[default]
+    Unknown,
+    Full,
+    Partial,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScreenStatus {
+    #[default]
+    Unknown,
+    Available {
+        capability: ScreenCommandCapability,
+        platform: String,
+        version: String,
+    },
+    Unavailable,
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceScreenSnapshot {
+    pub status: ResourceScreenStatus,
+    pub sessions: Vec<ResourceScreenSession>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScreenActionKind {
+    KillSession { target: String },
+    RenameSession { target: String, name: String },
+    SendSessionCommand { target: String, command: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScreenActionCommand {
+    pub command: String,
+    pub capability: ScreenCommandCapability,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceTmuxSession {
@@ -128,6 +191,10 @@ pub struct TmuxCaptureCommand {
     pub command: String,
     pub capability: TmuxCommandCapability,
 }
+
+const SCREEN_UNAVAILABLE_MARKER: &str = "__OXIDE_SCREEN_UNAVAILABLE__";
+const SCREEN_ERROR_MARKER: &str = "__OXIDE_SCREEN_ERROR__";
+const SCREEN_CAPABILITY_MARKER: &str = "__OXIDE_SCREEN_CAPABILITY__";
 
 const TMUX_UNAVAILABLE_MARKER: &str = "__OXIDE_TMUX_UNAVAILABLE__";
 const TMUX_ERROR_MARKER: &str = "__OXIDE_TMUX_ERROR__";
@@ -388,6 +455,277 @@ pub fn build_tmux_new_session_command(os_type: &str, name: Option<&str>) -> Resu
     }
 }
 
+pub fn build_screen_attach_command(os_type: &str, target: &str) -> Result<String, String> {
+    let target = validated_screen_target(target, "screen session")?;
+    if is_windows_os(os_type) {
+        Ok(format!("screen -x {}", powershell_quote(&target)))
+    } else {
+        Ok(format!("screen -x {}", shell_quote(&target)))
+    }
+}
+
+pub fn build_screen_new_session_command(
+    os_type: &str,
+    name: Option<&str>,
+) -> Result<String, String> {
+    let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+        return Ok("screen".to_string());
+    };
+    let name = validated_screen_target(name, "screen session name")?;
+    if is_windows_os(os_type) {
+        Ok(format!("screen -S {}", powershell_quote(&name)))
+    } else {
+        Ok(format!("screen -S {}", shell_quote(&name)))
+    }
+}
+
+pub fn build_screen_action_command(
+    os_type: &str,
+    action: ScreenActionKind,
+) -> Result<ScreenActionCommand, String> {
+    let command = match action {
+        ScreenActionKind::KillSession { target } => {
+            let target = validated_screen_target(&target, "screen session")?;
+            if is_windows_os(os_type) {
+                format!(
+                    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"screen -S {} -X quit\"",
+                    powershell_quote(&target)
+                )
+            } else {
+                format!("screen -S {} -X quit", shell_quote(&target))
+            }
+        }
+        ScreenActionKind::RenameSession { target, name } => {
+            let target = validated_screen_target(&target, "screen session")?;
+            let name = validated_screen_name(&name, "screen session name")?;
+            if is_windows_os(os_type) {
+                format!(
+                    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"screen -S {} -X sessionname {}\"",
+                    powershell_quote(&target),
+                    powershell_quote(&name)
+                )
+            } else {
+                format!(
+                    "screen -S {} -X sessionname {}",
+                    shell_quote(&target),
+                    shell_quote(&name)
+                )
+            }
+        }
+        ScreenActionKind::SendSessionCommand { target, command } => {
+            let target = validated_screen_target(&target, "screen session")?;
+            let command = validated_screen_send_command(&command)?;
+            if is_windows_os(os_type) {
+                format!(
+                    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"screen -S {} -X stuff `\"{}`\"`r\"",
+                    powershell_quote(&target),
+                    powershell_quote(&command)
+                )
+            } else {
+                format!(
+                    "screen -S {} -X stuff {}\"$(printf '\\r')\"",
+                    shell_quote(&target),
+                    shell_quote(&command)
+                )
+            }
+        }
+    };
+    Ok(ScreenActionCommand {
+        command,
+        capability: ScreenCommandCapability::Unknown,
+    })
+}
+
+pub fn build_screen_rename_session_command(
+    os_type: &str,
+    target: &str,
+    name: &str,
+) -> Result<Zeroizing<String>, String> {
+    let target = validated_screen_target_ref(target, "screen session")?;
+    let name = validated_screen_name_ref(name, "screen session name")?;
+    if is_windows_os(os_type) {
+        Ok(Zeroizing::new(format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"screen -S {} -X sessionname {}\"",
+            powershell_quote(target),
+            powershell_quote(name)
+        )))
+    } else {
+        Ok(Zeroizing::new(format!(
+            "screen -S {} -X sessionname {}",
+            shell_quote(target),
+            shell_quote(name)
+        )))
+    }
+}
+
+pub fn build_screen_send_command(
+    os_type: &str,
+    target: &str,
+    command: &str,
+) -> Result<Zeroizing<String>, String> {
+    let target = validated_screen_target_ref(target, "screen session")?;
+    let command = validated_screen_send_command_ref(command)?;
+    if is_windows_os(os_type) {
+        Ok(Zeroizing::new(format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"screen -S {} -X stuff `\"{}`\"`r\"",
+            powershell_quote(target),
+            powershell_quote(command)
+        )))
+    } else {
+        Ok(Zeroizing::new(format!(
+            "screen -S {} -X stuff {}\"$(printf '\\r')\"",
+            shell_quote(target),
+            shell_quote(command)
+        )))
+    }
+}
+
+pub fn parse_screen_snapshot(output: &str) -> ResourceScreenSnapshot {
+    let Some(section) = extract_section(output, "SCREEN") else {
+        return ResourceScreenSnapshot::default();
+    };
+
+    let mut capability = ScreenCommandCapability::Unknown;
+    let mut platform = "unknown".to_string();
+    let mut version = String::new();
+    let mut sessions = Vec::new();
+
+    for raw_line in section.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == SCREEN_UNAVAILABLE_MARKER {
+            return ResourceScreenSnapshot {
+                status: ResourceScreenStatus::Unavailable,
+                sessions: Vec::new(),
+            };
+        }
+        if let Some(message) = trimmed.strip_prefix(SCREEN_ERROR_MARKER) {
+            return ResourceScreenSnapshot {
+                status: ResourceScreenStatus::Error {
+                    message: clean_marker_message(message, "screen command failed."),
+                },
+                sessions: Vec::new(),
+            };
+        }
+        if let Some((next_capability, next_platform, next_version)) =
+            parse_screen_capability_line(trimmed)
+        {
+            capability = next_capability;
+            platform = next_platform;
+            version = next_version;
+            continue;
+        }
+        if trimmed.starts_with("There are screens on:")
+            || trimmed.starts_with("There is a screen on:")
+            || trimmed.starts_with("No Sockets found")
+            || trimmed.starts_with("No screen session found")
+            || trimmed.contains("Socket in")
+            || trimmed.contains("Sockets in")
+            || trimmed.starts_with("===")
+        {
+            continue;
+        }
+        if let Some(session) = parse_screen_session_line(trimmed) {
+            sessions.push(session);
+        }
+    }
+
+    sessions.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+
+    ResourceScreenSnapshot {
+        status: ResourceScreenStatus::Available {
+            capability,
+            platform,
+            version,
+        },
+        sessions,
+    }
+}
+
+pub fn screen_capture_snapshot(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> ResourceScreenSnapshot {
+    if exit_code == Some(0) {
+        return parse_screen_snapshot(stdout);
+    }
+    if stdout.contains("===SCREEN===") {
+        let snapshot = parse_screen_snapshot(stdout);
+        if !matches!(snapshot.status, ResourceScreenStatus::Unknown) {
+            return snapshot;
+        }
+    }
+    ResourceScreenSnapshot {
+        status: ResourceScreenStatus::Error {
+            message: capture_failure_message(stdout, stderr, exit_code, "Screen command failed."),
+        },
+        sessions: Vec::new(),
+    }
+}
+
+pub fn visible_screen_session_rows(
+    snapshot: &ResourceScreenSnapshot,
+    query: &str,
+) -> Vec<ResourceScreenSession> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return snapshot.sessions.clone();
+    }
+    snapshot
+        .sessions
+        .iter()
+        .filter(|session| {
+            session.id.to_lowercase().contains(&query)
+                || session.name.to_lowercase().contains(&query)
+                || session.created.to_lowercase().contains(&query)
+        })
+        .cloned()
+        .collect()
+}
+
+pub fn screen_session_row_signature(session: &ResourceScreenSession) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    session.id.hash(&mut hasher);
+    session.name.hash(&mut hasher);
+    session.attached.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn screen_action_succeeded(exit_code: Option<i32>) -> bool {
+    exit_code.unwrap_or(0) == 0
+}
+
+pub fn screen_action_success_message(stdout: &str, stderr: &str) -> String {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("screen action completed.")
+        .to_string()
+}
+
+pub fn screen_action_failure_message(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> String {
+    let reason = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("screen action failed.");
+    match exit_code {
+        Some(code) => format!("{reason} (exit {code})"),
+        None => reason.to_string(),
+    }
+}
+
 pub fn parse_tmux_snapshot(output: &str) -> ResourceTmuxSnapshot {
     let Some(section) = extract_section(output, "TMUX") else {
         return ResourceTmuxSnapshot::default();
@@ -557,6 +895,14 @@ pub fn tmux_action_failure_message(stdout: &str, stderr: &str, exit_code: Option
 fn build_unix_tmux_snapshot_command() -> String {
     format!(
         concat!(
+            "echo '===SCREEN==='; ",
+            "if command -v screen >/dev/null 2>&1; then ",
+            "oxide_screen_version=$(screen -v 2>/dev/null | head -n 1 | tr '\\t' ' '); ",
+            "printf '__OXIDE_SCREEN_CAPABILITY__\\tfull\\tscreen_cli\\t%s\\n' \"$oxide_screen_version\"; ",
+            "oxide_screen_sessions=$(screen -ls 2>&1); ",
+            "printf '%s\\n' \"$oxide_screen_sessions\"; ",
+            "else echo '__OXIDE_SCREEN_UNAVAILABLE__'; fi; ",
+            "echo '===SCREEN_END==='; ",
             "echo '===TMUX==='; ",
             "if command -v tmux >/dev/null 2>&1; then ",
             "oxide_tmux_version=$(tmux -V 2>/dev/null | head -n 1 | tr '\\t' ' '); ",
@@ -588,6 +934,14 @@ fn build_unix_tmux_snapshot_command() -> String {
 
 fn build_windows_tmux_snapshot_command() -> String {
     let script = concat!(
+        "Write-Output '===SCREEN===';",
+        "if(Get-Command screen -ErrorAction SilentlyContinue){",
+        "$sversion=(& screen -v 2>$null|Select-Object -First 1);",
+        "Write-Output ('__OXIDE_SCREEN_CAPABILITY__'+[char]9+'unknown'+[char]9+'windows_screen'+[char]9+$sversion);",
+        "$ssessions=& screen -ls 2>&1;",
+        "$ssessions|ForEach-Object{Write-Output $_};",
+        "}else{Write-Output '__OXIDE_SCREEN_UNAVAILABLE__'};",
+        "Write-Output '===SCREEN_END===';",
         "Write-Output '===TMUX===';",
         "if(Get-Command tmux -ErrorAction SilentlyContinue){",
         "$version=(& tmux -V 2>$null|Select-Object -First 1);",
@@ -611,6 +965,122 @@ fn build_windows_tmux_snapshot_command() -> String {
         "Write-Output '===TMUX_END===';"
     );
     format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
+}
+
+fn parse_screen_capability_line(line: &str) -> Option<(ScreenCommandCapability, String, String)> {
+    let payload = line.strip_prefix(SCREEN_CAPABILITY_MARKER)?;
+    let parts = payload
+        .trim_start_matches('\t')
+        .split('\t')
+        .collect::<Vec<_>>();
+    let capability = match parts.first().copied().unwrap_or("unknown") {
+        "full" => ScreenCommandCapability::Full,
+        "partial" => ScreenCommandCapability::Partial,
+        _ => ScreenCommandCapability::Unknown,
+    };
+    Some((
+        capability,
+        parts
+            .get(1)
+            .copied()
+            .unwrap_or("unknown")
+            .trim()
+            .to_string(),
+        parts.get(2).copied().unwrap_or_default().trim().to_string(),
+    ))
+}
+
+fn parse_screen_session_line(line: &str) -> Option<ResourceScreenSession> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let first = parts[0];
+    if first.starts_with('(') || first.starts_with('#') {
+        return None;
+    }
+    let id = first.to_string();
+    let name = id
+        .split_once('.')
+        .map(|(_, n)| n.to_string())
+        .unwrap_or_else(|| id.clone());
+    let attached = line.to_lowercase().contains("attached");
+
+    let mut created = String::new();
+    let mut rest = if line.len() >= first.len() {
+        &line[first.len()..]
+    } else {
+        ""
+    };
+    while let Some(start) = rest.find('(') {
+        if let Some(end) = rest[start + 1..].find(')') {
+            let inside = &rest[start + 1..start + 1 + end];
+            let lower = inside.to_lowercase();
+            if !lower.contains("attached") && !lower.contains("detached") && !lower.contains("dead")
+            {
+                created = inside.trim().to_string();
+            }
+            rest = &rest[start + 1 + end + 1..];
+        } else {
+            break;
+        }
+    }
+
+    Some(ResourceScreenSession {
+        id,
+        name,
+        attached,
+        created,
+        activity: String::new(),
+    })
+}
+
+fn validated_screen_target(value: &str, label: &str) -> Result<String, String> {
+    validated_screen_target_ref(value, label).map(str::to_string)
+}
+
+fn validated_screen_target_ref<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} cannot be empty."));
+    }
+    if trimmed.len() > 256 {
+        return Err(format!("{label} is too long."));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(format!("{label} contains unsupported control characters."));
+    }
+    Ok(trimmed)
+}
+
+fn validated_screen_name(value: &str, label: &str) -> Result<String, String> {
+    validated_screen_name_ref(value, label).map(str::to_string)
+}
+
+fn validated_screen_name_ref<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    let trimmed = validated_screen_target_ref(value, label)?;
+    if trimmed.contains('\t') || trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(format!("{label} contains unsupported whitespace characters."));
+    }
+    Ok(trimmed)
+}
+
+fn validated_screen_send_command(value: &str) -> Result<String, String> {
+    validated_screen_send_command_ref(value).map(str::to_string)
+}
+
+fn validated_screen_send_command_ref(value: &str) -> Result<&str, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("screen command cannot be empty.".to_string());
+    }
+    if trimmed.len() > 4096 {
+        return Err("screen command is too long.".to_string());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("screen command must be a single printable line.".to_string());
+    }
+    Ok(trimmed)
 }
 
 fn parse_tmux_capability_line(line: &str) -> Option<(TmuxCommandCapability, String, String)> {
@@ -1146,8 +1616,92 @@ mod tests {
 
         assert!(linux.command.starts_with("/bin/sh -c "));
         assert!(linux.command.contains("command -v tmux"));
+        assert!(linux.command.contains("command -v screen"));
         assert_eq!(linux.command, mac.command);
         assert!(windows.command.contains("Get-Command tmux"));
+        assert!(windows.command.contains("Get-Command screen"));
         assert_eq!(linux.capability, TmuxCommandCapability::Unknown);
+    }
+
+    #[test]
+    fn parses_screen_sessions_and_reports_capabilities() {
+        let output = r#"===SCREEN===
+__OXIDE_SCREEN_CAPABILITY__	full	screen_cli	Screen version 4.09.01 (GNU) 20-Aug-23
+There are screens on:
+	10420.demo_session	(2026年08月29日 22时07分20秒)	(Detached)
+	12345.work_term	(05/15/2023 10:20:30 AM)	(Attached)
+2 Sockets in /run/screen/S-root.
+===SCREEN_END===
+"#;
+        let snapshot = parse_screen_snapshot(output);
+        assert_eq!(
+            snapshot.status,
+            ResourceScreenStatus::Available {
+                capability: ScreenCommandCapability::Full,
+                platform: "screen_cli".to_string(),
+                version: "Screen version 4.09.01 (GNU) 20-Aug-23".to_string(),
+            }
+        );
+        assert_eq!(snapshot.sessions.len(), 2);
+        assert_eq!(snapshot.sessions[0].name, "demo_session");
+        assert_eq!(snapshot.sessions[0].id, "10420.demo_session");
+        assert!(!snapshot.sessions[0].attached);
+        assert_eq!(snapshot.sessions[0].created, "2026年08月29日 22时07分20秒");
+        assert_eq!(snapshot.sessions[1].name, "work_term");
+        assert_eq!(snapshot.sessions[1].id, "12345.work_term");
+        assert!(snapshot.sessions[1].attached);
+
+        let filtered = visible_screen_session_rows(&snapshot, "demo");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "10420.demo_session");
+    }
+
+    #[test]
+    fn screen_commands_validate_and_quote() {
+        let attach = build_screen_attach_command("Linux", "1234.session; rm -rf /").unwrap();
+        assert_eq!(attach, "screen -x '1234.session; rm -rf /'");
+
+        let new_session = build_screen_new_session_command("Linux", Some("my'session")).unwrap();
+        assert_eq!(new_session, "screen -S 'my'\"'\"'session'");
+
+        let kill = build_screen_action_command(
+            "Linux",
+            ScreenActionKind::KillSession {
+                target: "100.sess".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(kill.command, "screen -S '100.sess' -X quit");
+
+        let rename = build_screen_action_command(
+            "Linux",
+            ScreenActionKind::RenameSession {
+                target: "100.sess".to_string(),
+                name: "new'name".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rename.command,
+            "screen -S '100.sess' -X sessionname 'new'\"'\"'name'"
+        );
+
+        let send = build_screen_action_command(
+            "Linux",
+            ScreenActionKind::SendSessionCommand {
+                target: "100.sess".to_string(),
+                command: "echo hello".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(send.command.contains("screen -S '100.sess' -X stuff"));
+    }
+
+    #[test]
+    fn screen_not_installed_is_unavailable() {
+        let output = "===SCREEN===\n__OXIDE_SCREEN_UNAVAILABLE__\n===SCREEN_END===\n";
+        let snapshot = parse_screen_snapshot(output);
+        assert_eq!(snapshot.status, ResourceScreenStatus::Unavailable);
+        assert!(snapshot.sessions.is_empty());
     }
 }

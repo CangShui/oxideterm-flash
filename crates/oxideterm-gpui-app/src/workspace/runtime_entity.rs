@@ -3,11 +3,7 @@
 
 use super::new_connection::SshConnectionWorkerResult;
 use super::*;
-use oxideterm_settings::RemoteShellIntegrationMode;
-use oxideterm_ssh::{
-    ManagedKeyResolver, ReconnectForwardRestorePlan, ReconnectIdeSnapshot, ReconnectJob,
-    ReconnectTiming,
-};
+use oxideterm_ssh::{ManagedKeyResolver, ReconnectForwardRestorePlan, ReconnectJob, ReconnectTiming};
 
 const ACTIVE_PROBE_START_DELAY: Duration = Duration::from_millis(530);
 const RECONNECT_DEBOUNCE_DELAY: Duration = Duration::from_millis(500);
@@ -97,12 +93,6 @@ pub(in crate::workspace) enum ReconnectRuntimeEffect {
     SftpTransfersSnapshotted {
         node_id: NodeId,
         entered_grace_period: bool,
-    },
-    RemoteShellIntegrationGateFinished {
-        notice: Option<settings::RemoteShellIntegrationNotice>,
-    },
-    RemoteShellIntegrationMaintenanceFinished {
-        notice: settings::RemoteShellIntegrationNotice,
     },
 }
 
@@ -273,7 +263,7 @@ pub(in crate::workspace) struct WorkspaceRuntimeEntity {
     // Restore bookkeeping survives page changes and is cancelled only by node lifecycle actions.
     pending_reconnect_transfer_resumes: HashMap<NodeId, HashSet<String>>,
     reconnect_transfer_resume_successes: HashMap<NodeId, usize>,
-    pending_ide_restore_transfer_counts: HashMap<NodeId, u32>,
+    pending_reconnect_transfer_counts: HashMap<NodeId, u32>,
     reconnect_forward_restore_totals: HashMap<NodeId, u32>,
     reconnect_forward_restore_tokens: HashMap<NodeId, Arc<AtomicBool>>,
     reconnect_orchestrator: ReconnectOrchestratorStore,
@@ -288,9 +278,60 @@ pub(in crate::workspace) struct WorkspaceRuntimeEntity {
     active_probe_timer_generation: u64,
     active_probe_timer_task: Option<Task<()>>,
     reconnect_grace_probe_tasks: HashMap<NodeId, (String, tokio::task::AbortHandle)>,
-    remote_shell_integration: settings::RemoteShellIntegrationRuntimeState,
-    remote_shell_gate_tasks: HashMap<NodeId, (u64, tokio::task::AbortHandle)>,
-    remote_shell_maintenance_task: Option<(NodeId, u64, tokio::task::AbortHandle)>,
+}
+
+/// Masks credential-shaped key/value fragments (`password=...`,
+/// `passphrase: ...`) so connect failures never echo secrets into monitor
+/// state, orchestrator logs, typed effects, or UI copy.
+fn redact_connection_error(error: &mut String) {
+    const SECRET_KEYS: [&str; 6] = [
+        "password",
+        "passphrase",
+        "secret",
+        "token",
+        "authorization",
+        "private-key",
+    ];
+    const MARKER: &str = "[REDACTED]";
+    let source = std::mem::take(error);
+    let bytes = source.as_bytes();
+    let mut redacted = String::with_capacity(source.len());
+    // One ASCII-prefix scan with a strictly advancing cursor: each match
+    // consumes at least the needle, and non-matches consume one character, so
+    // the pass terminates and can never re-match its own output.
+    let mut cursor = 0usize;
+    'scan: while cursor < bytes.len() {
+        for key in SECRET_KEYS {
+            for separator in [b'=', b':'] {
+                let needle_len = key.len() + 1;
+                if cursor + needle_len <= bytes.len()
+                    && bytes[cursor..cursor + key.len()].eq_ignore_ascii_case(key.as_bytes())
+                    && bytes[cursor + key.len()] == separator
+                {
+                    redacted.push_str(&source[cursor..cursor + needle_len]);
+                    let value_end = bytes[cursor + needle_len..]
+                        .iter()
+                        .position(|byte| {
+                            matches!(byte, b'&' | b',' | b';' | b' ' | b'"' | b'\'')
+                        })
+                        .map(|offset| cursor + needle_len + offset)
+                        .unwrap_or(bytes.len());
+                    redacted.push_str(MARKER);
+                    cursor = value_end;
+                    continue 'scan;
+                }
+            }
+        }
+        // Copy one full character so multi-byte text keeps its boundaries.
+        let char_len = source[cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(1);
+        redacted.push_str(&source[cursor..cursor + char_len]);
+        cursor += char_len;
+    }
+    *error = redacted;
 }
 
 impl WorkspaceRuntimeEntity {
@@ -382,7 +423,7 @@ impl WorkspaceRuntimeEntity {
             reconnect_schedule_tasks: Vec::new(),
             pending_reconnect_transfer_resumes: HashMap::new(),
             reconnect_transfer_resume_successes: HashMap::new(),
-            pending_ide_restore_transfer_counts: HashMap::new(),
+            pending_reconnect_transfer_counts: HashMap::new(),
             reconnect_forward_restore_totals: HashMap::new(),
             reconnect_forward_restore_tokens: HashMap::new(),
             reconnect_orchestrator: ReconnectOrchestratorStore::new(
@@ -400,9 +441,6 @@ impl WorkspaceRuntimeEntity {
             active_probe_timer_generation: 0,
             active_probe_timer_task: None,
             reconnect_grace_probe_tasks: HashMap::new(),
-            remote_shell_integration: settings::RemoteShellIntegrationRuntimeState::default(),
-            remote_shell_gate_tasks: HashMap::new(),
-            remote_shell_maintenance_task: None,
         };
         entity.schedule_worker_delivery(cx);
         entity.schedule_active_probe_after(ACTIVE_PROBE_START_DELAY, cx);
@@ -751,13 +789,6 @@ impl WorkspaceRuntimeEntity {
         self.reconnect_orchestrator.active_progress(&node_id.0)
     }
 
-    pub(in crate::workspace) fn reconnect_ide_snapshot(
-        &self,
-        node_id: &NodeId,
-    ) -> Option<(ReconnectIdeSnapshot, Option<SystemTime>)> {
-        self.reconnect_orchestrator.ide_snapshot(&node_id.0)
-    }
-
     pub(in crate::workspace) fn complete_reconnect_transfer_resume(
         &self,
         node_id: &NodeId,
@@ -772,30 +803,8 @@ impl WorkspaceRuntimeEntity {
             .complete_phase(&node_id.0, result, Some(detail));
         let _ = self
             .reconnect_orchestrator
-            .advance(&node_id.0, ReconnectPhase::RestoreIde);
+            .advance(&node_id.0, ReconnectPhase::Verify);
         true
-    }
-
-    pub(in crate::workspace) fn complete_reconnect_ide_restore(
-        &self,
-        node_id: &NodeId,
-        result: PhaseResult,
-        detail: String,
-    ) -> Option<ReconnectPhaseOutcome> {
-        if !self.reconnect_orchestrator.is_active(&node_id.0) {
-            return None;
-        }
-        let _ = self
-            .reconnect_orchestrator
-            .complete_phase(&node_id.0, result, Some(detail));
-        if result == PhaseResult::Failed {
-            Some(ReconnectPhaseOutcome::Failed)
-        } else {
-            let _ = self
-                .reconnect_orchestrator
-                .advance(&node_id.0, ReconnectPhase::Verify);
-            Some(ReconnectPhaseOutcome::Continue)
-        }
     }
 
     pub(in crate::workspace) fn complete_reconnect_forward_restore(
@@ -1064,13 +1073,6 @@ impl WorkspaceRuntimeEntity {
         // Stop producers and invalidate deferred transitions before touching
         // any node or registry owner they could otherwise reacquire.
         self.shutdown_node_transport_attempts();
-        for (_, (_, abort_handle)) in self.remote_shell_gate_tasks.drain() {
-            abort_handle.abort();
-        }
-        if let Some((_, _, abort_handle)) = self.remote_shell_maintenance_task.take() {
-            abort_handle.abort();
-        }
-        self.remote_shell_integration.cancel_terminal_gates();
         self.reconnect_debounce_generation = self.reconnect_debounce_generation.wrapping_add(1);
         // Runtime shutdown owns cancellation of the pending foreground debounce timer.
         self.reconnect_debounce_task = None;
@@ -1141,206 +1143,6 @@ impl WorkspaceRuntimeEntity {
         }
 
         self.lifecycle = WorkspaceRuntimeLifecycle::Stopped;
-    }
-
-    pub(in crate::workspace) fn configure_remote_shell_integration(
-        &mut self,
-        mode: RemoteShellIntegrationMode,
-        awareness_enabled: bool,
-    ) {
-        self.remote_shell_integration
-            .configure(mode, awareness_enabled);
-        if mode == RemoteShellIntegrationMode::Disabled || !awareness_enabled {
-            for (_, (_, abort_handle)) in self.remote_shell_gate_tasks.drain() {
-                abort_handle.abort();
-            }
-            self.remote_shell_integration.cancel_terminal_gates();
-        }
-    }
-
-    pub(in crate::workspace) fn remote_shell_integration_pending(&self) -> bool {
-        self.remote_shell_integration.pending()
-    }
-
-    pub(in crate::workspace) fn remote_shell_integration_confirm_snapshot(
-        &self,
-    ) -> Option<settings::RemoteShellIntegrationConfirmSnapshot> {
-        self.remote_shell_integration.confirm_snapshot()
-    }
-
-    pub(in crate::workspace) fn remote_shell_integration_confirm_open(&self) -> bool {
-        self.remote_shell_integration.confirm_open()
-    }
-
-    pub(in crate::workspace) fn remote_shell_integration_card_snapshot(
-        &self,
-        node_id: Option<&NodeId>,
-    ) -> settings::RemoteShellIntegrationCardSnapshot {
-        self.remote_shell_integration.card_snapshot(node_id)
-    }
-
-    pub(in crate::workspace) fn open_remote_shell_integration_toolbar_confirm(
-        &mut self,
-        node_id: Option<NodeId>,
-    ) {
-        self.remote_shell_integration.open_toolbar_confirm(node_id);
-    }
-
-    pub(in crate::workspace) fn toggle_remote_shell_integration_prompt_suppression(&mut self) {
-        self.remote_shell_integration.toggle_prompt_suppression();
-    }
-
-    pub(in crate::workspace) fn cancel_remote_shell_integration_confirm(&mut self) -> bool {
-        self.remote_shell_integration.cancel_confirm()
-    }
-
-    pub(in crate::workspace) fn accept_remote_shell_integration_confirm(
-        &mut self,
-    ) -> Option<(NodeId, settings::RemoteShellIntegrationConfirmSource)> {
-        self.remote_shell_integration.accept_confirm()
-    }
-
-    pub(in crate::workspace) fn start_remote_shell_integration_gate(
-        &mut self,
-        node_id: NodeId,
-        force_install: bool,
-    ) -> bool {
-        let Some(generation) = self.remote_shell_integration.begin_terminal_gate(&node_id) else {
-            return false;
-        };
-        let mode = self.remote_shell_integration.deployment_mode();
-        let router = self.node_router.clone();
-        let result_tx = self.reconnect_worker_tx.clone();
-        let task_node_id = node_id.clone();
-        let task = self.task_runtime.spawn(async move {
-            // The node owns this capability check independently from the
-            // terminal pane, matching the IDE Agent deployment lifecycle.
-            let result = async {
-                let resolved = router
-                    .resolve_connection(&task_node_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                // Detection starts only after the first visible Shell request,
-                // preserving PAM, MOTD, and Last login output ordering.
-                let mut remote_env = resolved.handle.remote_env();
-                for _ in 0..80 {
-                    if remote_env.is_some() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    remote_env = resolved.handle.remote_env();
-                }
-                let remote_env = remote_env.ok_or_else(|| {
-                    "remote Shell detection did not finish after the visible terminal opened"
-                        .to_string()
-                })?;
-                let sftp = router
-                    .acquire_sftp(&task_node_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let sftp = sftp.lock().await;
-                let status =
-                    oxideterm_terminal::inspect_remote_shell_integration(&sftp, Some(&remote_env))
-                        .await?;
-                if should_install_remote_shell_integration(force_install, mode, status.state) {
-                    oxideterm_terminal::install_remote_shell_integration(&sftp, Some(&remote_env))
-                        .await
-                        .map(|status| (status, true))
-                } else {
-                    Ok((status, false))
-                }
-            }
-            .await
-            // Delivery exposes only a typed failure category; backend details
-            // never cross into UI state, notifications, or diagnostics.
-            .map_err(|_| ());
-            let _ = result_tx.send(ReconnectWorkerResult::RemoteShellIntegrationGateFinished {
-                node_id: task_node_id,
-                generation,
-                result,
-            });
-        });
-        self.remote_shell_gate_tasks
-            .insert(node_id, (generation, task.abort_handle()));
-        true
-    }
-
-    pub(in crate::workspace) fn start_remote_shell_integration_maintenance(
-        &mut self,
-        action: settings::RemoteShellIntegrationAction,
-        node_id: NodeId,
-    ) -> bool {
-        let Some(generation) = self
-            .remote_shell_integration
-            .begin_maintenance(action, node_id.clone())
-        else {
-            return false;
-        };
-        if let Some((_, _, abort_handle)) = self.remote_shell_maintenance_task.take() {
-            abort_handle.abort();
-        }
-        let router = self.node_router.clone();
-        let result_tx = self.reconnect_worker_tx.clone();
-        let task_node_id = node_id.clone();
-        let task = self.task_runtime.spawn(async move {
-            let result = async {
-                let resolved = router
-                    .resolve_connection(&task_node_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let remote_env = resolved.handle.remote_env();
-                let sftp = router
-                    .acquire_sftp(&task_node_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let sftp = sftp.lock().await;
-                match action {
-                    settings::RemoteShellIntegrationAction::Inspect => {
-                        oxideterm_terminal::inspect_remote_shell_integration(
-                            &sftp,
-                            remote_env.as_ref(),
-                        )
-                        .await
-                    }
-                    settings::RemoteShellIntegrationAction::Install => {
-                        oxideterm_terminal::install_remote_shell_integration(
-                            &sftp,
-                            remote_env.as_ref(),
-                        )
-                        .await
-                    }
-                    settings::RemoteShellIntegrationAction::RemoveReference => {
-                        oxideterm_terminal::remove_remote_shell_integration(
-                            &sftp,
-                            remote_env.as_ref(),
-                            false,
-                        )
-                        .await
-                    }
-                    settings::RemoteShellIntegrationAction::RemoveAll => {
-                        oxideterm_terminal::remove_remote_shell_integration(
-                            &sftp,
-                            remote_env.as_ref(),
-                            true,
-                        )
-                        .await
-                    }
-                }
-            }
-            .await
-            // Maintenance failures follow the same content-free UI boundary.
-            .map_err(|_| ());
-            let _ = result_tx.send(
-                ReconnectWorkerResult::RemoteShellIntegrationMaintenanceFinished {
-                    action,
-                    node_id: task_node_id,
-                    generation,
-                    result,
-                },
-            );
-        });
-        self.remote_shell_maintenance_task = Some((node_id, generation, task.abort_handle()));
-        true
     }
 
     pub(in crate::workspace) fn start_reconnect_grace_probe(
@@ -1648,18 +1450,6 @@ impl WorkspaceRuntimeEntity {
     fn cancel_node_runtime_work(&mut self, node_ids: &[NodeId], cx: &mut Context<Self>) {
         self.cancel_queued_reconnects(node_ids);
         for node_id in node_ids {
-            if let Some((_, abort_handle)) = self.remote_shell_gate_tasks.remove(node_id) {
-                abort_handle.abort();
-            }
-            if self
-                .remote_shell_maintenance_task
-                .as_ref()
-                .is_some_and(|(current, _, _)| current == node_id)
-                && let Some((_, _, abort_handle)) = self.remote_shell_maintenance_task.take()
-            {
-                abort_handle.abort();
-            }
-            self.remote_shell_integration.cancel_node(node_id);
             self.cancel_connection_trace(node_id, cx);
             self.abort_connection_chain_for_node(node_id);
             self.unlock_connecting_node(node_id);
@@ -2217,17 +2007,13 @@ impl WorkspaceRuntimeEntity {
         completions
     }
 
-    pub(in crate::workspace) fn remember_ide_restore_transfer_count(
+    pub(in crate::workspace) fn remember_reconnect_transfer_count(
         &mut self,
         node_id: NodeId,
         restored_transfers: u32,
     ) {
-        self.pending_ide_restore_transfer_counts
+        self.pending_reconnect_transfer_counts
             .insert(node_id, restored_transfers);
-    }
-
-    pub(in crate::workspace) fn clear_ide_restore_transfer_count(&mut self, node_id: &NodeId) {
-        self.pending_ide_restore_transfer_counts.remove(node_id);
     }
 
     pub(in crate::workspace) fn complete_reconnect_restore_counts(
@@ -2239,7 +2025,7 @@ impl WorkspaceRuntimeEntity {
             .remove(node_id)
             .unwrap_or_default();
         let restored_transfers = self
-            .pending_ide_restore_transfer_counts
+            .pending_reconnect_transfer_counts
             .remove(node_id)
             .unwrap_or_default();
         (restored_forwards, restored_transfers)
@@ -2276,7 +2062,7 @@ impl WorkspaceRuntimeEntity {
     pub(in crate::workspace) fn clear_reconnect_restore_state(&mut self, node_id: &NodeId) {
         self.pending_reconnect_transfer_resumes.remove(node_id);
         self.reconnect_transfer_resume_successes.remove(node_id);
-        self.pending_ide_restore_transfer_counts.remove(node_id);
+        self.pending_reconnect_transfer_counts.remove(node_id);
         self.reconnect_forward_restore_totals.remove(node_id);
         self.cancel_forward_restore(node_id);
     }
@@ -2568,10 +2354,14 @@ impl WorkspaceRuntimeEntity {
             ReconnectWorkerResult::NodeConnectFailed {
                 node_id,
                 connection_id,
-                error,
+                mut error,
                 attempt_id,
                 job_id,
             } => {
+                // Connect failures can echo server, shell, or URI credential
+                // forms; redact before the string reaches monitor state, the
+                // orchestrator, typed effects, or any UI surface.
+                redact_connection_error(&mut error);
                 if !self.accept_node_transport_result(
                     &node_id,
                     &connection_id,
@@ -2690,60 +2480,6 @@ impl WorkspaceRuntimeEntity {
                     entered_grace_period,
                 }
             }),
-            ReconnectWorkerResult::RemoteShellIntegrationGateFinished {
-                node_id,
-                generation,
-                result,
-            } => {
-                if self
-                    .remote_shell_gate_tasks
-                    .get(&node_id)
-                    .is_some_and(|(current, _)| *current == generation)
-                {
-                    self.remote_shell_gate_tasks.remove(&node_id);
-                }
-                let outcome = self
-                    .remote_shell_integration
-                    .finish_terminal_gate(node_id, generation, result);
-                match outcome {
-                    settings::RemoteShellIntegrationGateOutcome::Applied => {
-                        Some(ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
-                            notice: None,
-                        })
-                    }
-                    settings::RemoteShellIntegrationGateOutcome::RetryInstall(node_id) => {
-                        self.start_remote_shell_integration_gate(node_id, true);
-                        Some(ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
-                            notice: None,
-                        })
-                    }
-                    settings::RemoteShellIntegrationGateOutcome::Failed => {
-                        Some(ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
-                            notice: Some(settings::RemoteShellIntegrationNotice::Failed),
-                        })
-                    }
-                    settings::RemoteShellIntegrationGateOutcome::Stale => None,
-                }
-            }
-            ReconnectWorkerResult::RemoteShellIntegrationMaintenanceFinished {
-                action,
-                node_id,
-                generation,
-                result,
-            } => {
-                if self
-                    .remote_shell_maintenance_task
-                    .as_ref()
-                    .is_some_and(|(_, current, _)| *current == generation)
-                {
-                    self.remote_shell_maintenance_task = None;
-                }
-                self.remote_shell_integration
-                    .finish_maintenance(action, node_id, generation, result)
-                    .map(|notice| {
-                        ReconnectRuntimeEffect::RemoteShellIntegrationMaintenanceFinished { notice }
-                    })
-            }
         }
     }
 
@@ -2891,16 +2627,6 @@ fn reason_for_runtime_connection_status(status: &str) -> String {
     .to_string()
 }
 
-fn should_install_remote_shell_integration(
-    force_install: bool,
-    mode: RemoteShellIntegrationMode,
-    state: oxideterm_terminal::RemoteShellIntegrationState,
-) -> bool {
-    force_install
-        || (mode == RemoteShellIntegrationMode::Enabled
-            && state != oxideterm_terminal::RemoteShellIntegrationState::Installed)
-}
-
 fn reconnect_error_is_non_retryable(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
@@ -3021,37 +2747,6 @@ mod tests {
     use gpui::TestAppContext;
     use oxideterm_ssh::NodeEventEmitter;
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[test]
-    fn remote_shell_gate_installs_only_when_requested_or_enabled_and_missing() {
-        use oxideterm_terminal::RemoteShellIntegrationState;
-
-        assert!(should_install_remote_shell_integration(
-            true,
-            RemoteShellIntegrationMode::Ask,
-            RemoteShellIntegrationState::Installed,
-        ));
-        assert!(should_install_remote_shell_integration(
-            false,
-            RemoteShellIntegrationMode::Enabled,
-            RemoteShellIntegrationState::NotInstalled,
-        ));
-        assert!(!should_install_remote_shell_integration(
-            false,
-            RemoteShellIntegrationMode::Enabled,
-            RemoteShellIntegrationState::Installed,
-        ));
-        assert!(!should_install_remote_shell_integration(
-            false,
-            RemoteShellIntegrationMode::Ask,
-            RemoteShellIntegrationState::NotInstalled,
-        ));
-        assert!(!should_install_remote_shell_integration(
-            false,
-            RemoteShellIntegrationMode::Disabled,
-            RemoteShellIntegrationState::NotInstalled,
-        ));
-    }
 
     #[test]
     fn reconnect_retry_filter_matches_tauri_non_retryable_errors() {
@@ -4627,7 +4322,7 @@ mod tests {
         let entity = test_runtime_entity(cx);
         entity.update(cx, |entity, _cx| {
             let node_id = NodeId::new("node-a");
-            entity.remember_ide_restore_transfer_count(node_id.clone(), 3);
+            entity.remember_reconnect_transfer_count(node_id.clone(), 3);
             entity.complete_forward_restore(&node_id, 2);
 
             assert_eq!(entity.complete_reconnect_restore_counts(&node_id), (2, 3));
@@ -4641,7 +4336,7 @@ mod tests {
         entity.update(cx, |entity, _cx| {
             let node_id = NodeId::new("node-a");
             let cancellation = entity.begin_forward_restore(&node_id);
-            entity.remember_ide_restore_transfer_count(node_id.clone(), 4);
+            entity.remember_reconnect_transfer_count(node_id.clone(), 4);
             assert!(cancellation.load(Ordering::Acquire));
 
             entity.cancel_queued_reconnects(std::slice::from_ref(&node_id));

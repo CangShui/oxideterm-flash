@@ -60,7 +60,7 @@ pub use oxideterm_sftp::{
 pub use oxideterm_x11_forwarding::{X11ForwardPolicy, X11ForwardTrust};
 pub use reconnect::{
     MAX_RETAINED_RECONNECT_JOBS, PhaseEvent, PhaseResult, ReconnectForwardRestorePlan,
-    ReconnectForwardRule, ReconnectForwardRuleSnapshot, ReconnectIdeSnapshot, ReconnectJob,
+    ReconnectForwardRule, ReconnectForwardRuleSnapshot, ReconnectJob,
     ReconnectNodeConnectionSnapshot, ReconnectNodeTerminalSnapshot, ReconnectNodeTransferSnapshot,
     ReconnectOrchestratorStore, ReconnectPhase, ReconnectProgress, ReconnectSnapshot,
     ReconnectTiming,

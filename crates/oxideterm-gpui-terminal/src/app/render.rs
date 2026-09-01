@@ -1,10 +1,10 @@
 use std::{sync::Arc, time::Instant};
 
 use gpui::{
-    Anchor, AnchoredPositionMode, AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable,
-    FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Render,
-    RenderImage, SharedString, StyledImage, Window, anchored, deferred, div, point, prelude::*, px,
-    rgb, rgba,
+    Anchor, AnchoredPositionMode, AnyElement, App, ClipboardItem, Context, DispatchPhase,
+    FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Render, RenderImage, SharedString, StyledImage, Window, anchored, deferred, div,
+    point, prelude::*, px, rgb, rgba,
 };
 use oxideterm_gpui_ui::context_menu::{
     ContextMenuItemKind, context_menu_action, context_menu_backdrop, context_menu_content,
@@ -283,7 +283,6 @@ impl Render for TerminalPane {
         .semantic_shell(self.preferences.semantic_shell)
         .row_timestamps(row_timestamps)
         .transparent_background(background.is_some() || self.preferences.transparent_background)
-        .ghost_text(self.terminal_ghost_text())
         .viewport_rows(viewport_rows)
         .scrollbar_display_offset(scrollbar_display_offset)
         .scroll_y_offset(smooth_scroll_y_offset)
@@ -300,7 +299,7 @@ impl Render for TerminalPane {
             0.0
         };
 
-        div()
+        let pane_div = div()
             .id("terminal-pane")
             .size_full()
             .relative()
@@ -411,7 +410,26 @@ impl Render for TerminalPane {
                         pane.child(self.render_command_mark_actions(mark, cx))
                     })
                 },
-            )
+            );
+
+        if self.scrollbar_drag.is_some() {
+            // The pane's element handlers only see releases that land inside
+            // it. While a scrollbar drag is active, this window-level listener
+            // guarantees the gesture also ends when the pointer is released
+            // over any other surface, so the thumb cannot stay stuck.
+            let pane = cx.entity().downgrade();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                    let _ = pane.update(cx, |pane, cx| {
+                        if pane.scrollbar_drag.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
+            });
+        }
+
+        pane_div
     }
 }
 

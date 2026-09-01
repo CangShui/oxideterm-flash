@@ -202,18 +202,14 @@ pub fn settings_tab_section_count(
                 5
             }
         }
-        SettingsTab::Portable => 1,
         SettingsTab::Terminal => terminal_settings_section_count(dynamic.terminal_page),
         SettingsTab::Appearance => 4,
         // Reconnect controls share one card and therefore one virtual section.
-        SettingsTab::Connections => 6,
-        SettingsTab::Privilege => 1,
+        SettingsTab::Connections => 5,
         SettingsTab::Network => 2,
         SettingsTab::Sftp => 3,
-        SettingsTab::Ide => 1,
-        SettingsTab::Keybindings => {
-            keybinding_settings_section_count(dynamic.visible_keybinding_scope_count)
-        }
+        SettingsTab::CloudSync => 1,
+        SettingsTab::SessionIO => 2,
         SettingsTab::Help => 6,
     }
 }
@@ -222,33 +218,25 @@ pub fn terminal_settings_section_count(page: TerminalSettingsPage) -> usize {
     let page_cards = match page {
         TerminalSettingsPage::Display => 4,
         TerminalSettingsPage::Input => 1,
-        // The dedicated keybindings page owns shortcut discovery and editing.
-        TerminalSettingsPage::Local => 4,
+        TerminalSettingsPage::Local => 3,
         TerminalSettingsPage::CommandBar => 3,
-        TerminalSettingsPage::Awareness => 3,
+        TerminalSettingsPage::Awareness => 2,
         TerminalSettingsPage::Transfer => 1,
         TerminalSettingsPage::Highlight => 1,
     };
     1 + page_cards
 }
 
-pub fn keybinding_settings_section_count(visible_scope_count: usize) -> usize {
-    1 + visible_scope_count.max(1)
-}
-
 pub fn settings_section_list_identity(
     tab: SettingsTab,
     terminal_page: TerminalSettingsPage,
 ) -> String {
-    // Keybinding filters update row signatures rather than replacing the list;
-    // this keeps the toolbar-mounted selection animation alive.
     format!("{tab:?}:{terminal_page:?}")
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct SettingsDynamicSectionCounts {
     pub terminal_page: TerminalSettingsPage,
-    pub visible_keybinding_scope_count: usize,
 }
 
 #[cfg(test)]
@@ -296,10 +284,10 @@ mod tests {
         let original_first_group = layout.groups()[0].clone();
 
         layout.add_group();
-        assert_eq!(layout.group_count(), 6);
+        assert_eq!(layout.group_count(), 5);
         assert!(layout.move_group_to_end(0));
         assert_eq!(layout.groups().last(), Some(&original_first_group));
-        assert!(layout.remove_empty_group(4));
-        assert_eq!(layout.group_count(), 5);
+        assert!(layout.remove_empty_group(3));
+        assert_eq!(layout.group_count(), 4);
     }
 }

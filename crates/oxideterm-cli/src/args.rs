@@ -12,7 +12,6 @@ mod connections;
 mod diagnostics;
 mod forwards;
 mod oxide;
-mod portable;
 mod quick_commands;
 mod secrets;
 mod settings;
@@ -27,7 +26,6 @@ pub use connections::*;
 pub use diagnostics::*;
 pub use forwards::*;
 pub use oxide::*;
-pub use portable::*;
 pub use quick_commands::*;
 pub use secrets::*;
 pub use settings::*;
@@ -44,7 +42,7 @@ use crate::uri::ConnectionUriArgs;
     long_about = "oxideterm-flash headless management CLI for settings, saved connections, portable .oxide bundles, backups, and support diagnostics."
 )]
 #[command(
-    after_help = "Examples:\n  oxideterm doctor --strict\n  oxideterm settings validate --strict --json\n  oxideterm connections search prod\n  oxideterm backup create --output ./oxideterm-backup.json --json\n  oxideterm oxide export ./profile.oxide --connection prod --password-stdin\n  oxideterm portable status --json\n  oxideterm completion zsh > ~/.zfunc/_oxideterm"
+    after_help = "Examples:\n  oxideterm doctor --strict\n  oxideterm settings validate --strict --json\n  oxideterm connections search prod\n  oxideterm backup create --output ./oxideterm-backup.json --json\n  oxideterm oxide export ./profile.oxide --connection prod --password-stdin\n  oxideterm completion zsh > ~/.zfunc/_oxideterm"
 )]
 pub struct Cli {
     #[arg(
@@ -124,7 +122,6 @@ fn normalize_command_output_format(command: &mut Command) {
             QuickCommandsAction::Import(args) => normalize_write_args(&mut args.write),
             QuickCommandsAction::Show(_) => {}
         },
-        Command::Portable(_) => {}
         Command::Secrets(_) => {}
         Command::Backup(command) => match &mut command.action {
             BackupAction::Preview(args) | BackupAction::List(args) => normalize_json_args(args),
@@ -184,8 +181,6 @@ pub enum Command {
     #[command(name = "quick-commands")]
     #[command(about = "Inspect and manage terminal Quick Commands")]
     QuickCommands(QuickCommandsCommand),
-    #[command(about = "Inspect and unlock the portable runtime")]
-    Portable(PortableCommand),
     #[command(about = "Inspect and manage keychain-backed secrets")]
     Secrets(SecretsCommand),
     #[command(about = "Validate, import, and export portable .oxide bundles")]

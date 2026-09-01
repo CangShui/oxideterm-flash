@@ -253,7 +253,10 @@ impl WorkspaceApp {
                         SFTP_ICON_MD,
                         rgb(theme.text_muted),
                     ))
-                    .child(format_conflict_modified(modified)),
+                    .child(format_conflict_modified(
+                        modified,
+                        &self.i18n.t("sftp.conflict.unknown_modified"),
+                    )),
             )
             .into_any_element()
     }

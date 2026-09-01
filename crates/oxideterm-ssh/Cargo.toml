@@ -11,7 +11,6 @@ dirs.workspace = true
 oxideterm-backend-classification = { path = "../oxideterm-backend-classification" }
 oxideterm-connection-monitor = { path = "../oxideterm-connection-monitor" }
 oxideterm-connections = { path = "../oxideterm-connections" }
-oxideterm-portable-runtime = { path = "../oxideterm-portable-runtime" }
 oxideterm-sftp = { path = "../oxideterm-sftp" }
 oxideterm-topology = { path = "../oxideterm-topology" }
 oxideterm-x11-forwarding = { path = "../oxideterm-x11-forwarding" }

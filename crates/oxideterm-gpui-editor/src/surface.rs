@@ -1,7 +1,13 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ops::Range,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use gpui::{
     AnyElement, App, Bounds, Context, Div, Element, ElementId, ElementInputHandler, Entity,
@@ -19,6 +25,9 @@ use oxideterm_theme::ThemeTokens;
 use crate::{
     EditorAppearance, EditorMetrics, EditorSettings, EditorViewport, metrics::editor_code_font,
 };
+
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
 
 mod commands;
 mod coords;
@@ -40,6 +49,36 @@ pub type ModifiedWordClickCallback =
     Box<dyn FnMut(String, &mut Window, &mut Context<TextEditorView>) -> Result<(), String>>;
 
 const EDITOR_CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
+/// The editor mirrors the OS caret cadence where the platform exposes one so
+/// it does not blink at a different rate than native text fields. Returns
+/// `None` when the caret must stay solid: Windows reports INFINITE once the
+/// user disabled caret blinking system-wide.
+fn system_caret_blink_interval() -> Option<Duration> {
+    #[cfg(windows)]
+    {
+        static CACHED: OnceLock<Option<Duration>> = OnceLock::new();
+        *CACHED.get_or_init(|| match unsafe { GetCaretBlinkTime() } {
+            // A zero return means the call failed; keep the historical cadence.
+            0 => Some(EDITOR_CARET_BLINK_INTERVAL),
+            u32::MAX => None,
+            blink_ms => Some(Duration::from_millis(u64::from(blink_ms))),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Some(EDITOR_CARET_BLINK_INTERVAL)
+    }
+}
+
+/// Reduced-motion tokens and render policies that force instant transitions
+/// keep the caret solid: blinking is continuous motion those settings exist to
+/// suppress.
+fn caret_blink_interval_for(tokens: &ThemeTokens) -> Option<Duration> {
+    (tokens.motion.enabled && tokens.motion.spatial_enabled)
+        .then(system_caret_blink_interval)
+        .flatten()
+}
 
 /// Controls whether the editor owns a full document surface or sits inside an
 /// existing input row whose surrounding component already provides chrome.
@@ -307,6 +346,8 @@ pub struct TextEditorView {
     context_menu_labels: EditorContextMenuLabels,
     caret_visible: bool,
     caret_blink_focused: bool,
+    // `None` keeps the caret solid; `Some` is the toggle cadence of the loop.
+    caret_blink_interval: Option<Duration>,
     caret_blink_generation: u64,
     caret_blink_task: Option<Task<()>>,
 }
@@ -352,6 +393,7 @@ impl TextEditorView {
             context_menu_labels: EditorContextMenuLabels::default(),
             caret_visible: true,
             caret_blink_focused: false,
+            caret_blink_interval: caret_blink_interval_for(tokens),
             caret_blink_generation: 0,
             caret_blink_task: None,
         }
@@ -386,11 +428,16 @@ impl TextEditorView {
     fn restart_caret_blink(&mut self, cx: &mut Context<Self>) {
         self.caret_blink_generation = self.caret_blink_generation.wrapping_add(1);
         self.caret_blink_task = None;
+        let Some(blink_interval) = self.caret_blink_interval else {
+            // A solid caret must not schedule blink wakeups or repaints.
+            self.caret_visible = true;
+            return;
+        };
         self.caret_visible = true;
         let generation = self.caret_blink_generation;
         self.caret_blink_task = Some(cx.spawn(async move |editor, cx| {
             loop {
-                Timer::after(EDITOR_CARET_BLINK_INTERVAL).await;
+                Timer::after(blink_interval).await;
                 let should_continue = editor
                     .update(cx, |editor, cx| {
                         if editor.caret_blink_generation != generation
@@ -561,6 +608,14 @@ impl TextEditorView {
         self.settings.soft_wrap = word_wrap;
         self.viewport
             .clamp(self.document_row_count(), self.metrics.line_height);
+        // A settings-driven motion change re-anchors the running blink loop so
+        // it adopts the new cadence (or a solid caret) without waiting for the
+        // next focus or caret move.
+        let blink_interval = caret_blink_interval_for(tokens);
+        if self.caret_blink_interval != blink_interval {
+            self.caret_blink_interval = blink_interval;
+            self.restart_caret_blink_if_focused(cx);
+        }
         cx.notify();
     }
 

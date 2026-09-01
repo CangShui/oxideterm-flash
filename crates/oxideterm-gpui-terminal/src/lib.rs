@@ -3,7 +3,6 @@ mod background_cache;
 mod command_facts;
 mod image_budget;
 mod modem_worker;
-mod privilege_prompt;
 pub mod terminal_ui;
 mod terminal_view;
 mod trzsz_worker;
@@ -23,10 +22,6 @@ pub use command_facts::{
 pub use oxideterm_terminal::TerminalOutputProcessor;
 pub use oxideterm_terminal_recording::{TerminalRecordingState, TerminalRecordingStatus};
 pub use oxideterm_terminal_semantic::SemanticShellDialect;
-pub use privilege_prompt::{
-    PrivilegePromptConfidence, PrivilegePromptMatch, PrivilegePromptSnapshot,
-    detect_custom_privilege_prompt, detect_privilege_prompt,
-};
 pub use terminal_ui::{
     TerminalBackgroundFit, TerminalBackgroundPreferences, TerminalCommandSelectionLabels,
     TerminalHighlightMatchScope, TerminalHighlightRenderMode, TerminalHighlightRule,

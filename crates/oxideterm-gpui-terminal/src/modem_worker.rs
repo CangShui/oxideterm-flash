@@ -36,7 +36,24 @@ pub(crate) enum ModemWorkerEvent {
     Progress(ModemWorkerProgress),
     Completed,
     Cancelled,
-    Failed(String),
+    Failed(ModemWorkerFailure),
+}
+
+/// Worker failures are reported as kinds, not display strings: the pane maps
+/// each kind to a localized label, and raw protocol or IO detail never becomes
+/// user-facing copy.
+#[derive(Clone, Debug)]
+pub(crate) enum ModemWorkerFailure {
+    /// The prompt selection does not match the requested transfer direction.
+    InvalidSelection,
+    /// A local file name could not be turned into a safe transfer target.
+    InvalidFileName,
+    /// The peer negotiated the opposite transfer direction.
+    WrongDirection,
+    /// The worker thread disappeared before reporting a result.
+    WorkerStopped,
+    /// Protocol or filesystem failure; the detail stays diagnostic-only.
+    Transfer(String),
 }
 
 #[derive(Clone, Debug)]
@@ -66,7 +83,7 @@ pub(crate) fn run_modem_worker_job(
 
 enum ModemWorkerError {
     Cancelled,
-    Failed(String),
+    Failed(ModemWorkerFailure),
 }
 
 fn run_modem_worker_job_inner(
@@ -86,9 +103,7 @@ fn run_modem_worker_job_inner(
         (ModemTransferDirection::Upload, ModemPromptSelection::UploadFiles(paths)) => {
             run_upload(job, &paths, event_tx)
         }
-        _ => Err(ModemWorkerError::Failed(
-            "Invalid file selection for modem transfer".to_string(),
-        )),
+        _ => Err(ModemWorkerError::Failed(ModemWorkerFailure::InvalidSelection)),
     }
 }
 
@@ -135,9 +150,7 @@ fn run_download(
             .map_err(worker_error)?;
         }
         DetectedModemProtocol::XymodemNegotiation => {
-            return Err(ModemWorkerError::Failed(
-                "The remote side is waiting for an X/YMODEM upload, not a download.".to_string(),
-            ));
+            return Err(ModemWorkerError::Failed(ModemWorkerFailure::WrongDirection));
         }
     }
     downloads.commit(root).map_err(worker_error)?;
@@ -234,7 +247,7 @@ fn local_file_name(path: &Path) -> Result<String, ModemWorkerError> {
         // The filesystem path remains lossless; only the protocol metadata is
         // converted because classic modem filename fields are byte strings.
         .map(|name| name.to_string_lossy().into_owned())
-        .ok_or_else(|| ModemWorkerError::Failed("Invalid local file name".to_string()))
+        .ok_or_else(|| ModemWorkerError::Failed(ModemWorkerFailure::InvalidFileName))
 }
 
 #[derive(Clone, Default)]
@@ -366,13 +379,13 @@ fn duplicate_download_name(file_name: &str, index: usize) -> String {
 }
 
 fn failed(error: impl std::fmt::Display) -> ModemWorkerError {
-    ModemWorkerError::Failed(error.to_string())
+    ModemWorkerError::Failed(ModemWorkerFailure::Transfer(error.to_string()))
 }
 
 fn worker_error(error: ModemTransferError) -> ModemWorkerError {
     match error {
         ModemTransferError::Cancelled => ModemWorkerError::Cancelled,
-        error => ModemWorkerError::Failed(error.to_string()),
+        error => ModemWorkerError::Failed(ModemWorkerFailure::Transfer(error.to_string())),
     }
 }
 

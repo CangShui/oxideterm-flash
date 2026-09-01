@@ -222,7 +222,9 @@ impl ProfilerRegistry {
     }
 
     /// Start is Tauri-compatible: running profilers are idempotent, while
-    /// stopped/degraded entries are dropped and recreated with empty history.
+    /// stopped/degraded entries are recreated. A frozen (stopped) entry keeps
+    /// its last snapshot so the UI can keep displaying it until the restarted
+    /// sampler delivers fresh metrics.
     pub fn start(&self, connection_id: impl Into<String>) -> bool {
         let connection_id = connection_id.into();
         let mut profilers = lock(&self.profilers);
@@ -235,10 +237,11 @@ impl ProfilerRegistry {
             return false;
         }
 
+        let snapshot = frozen_snapshot_restarted(&profilers, &connection_id);
         profilers.insert(
             connection_id,
             ConnectionProfilerEntry {
-                snapshot: running_snapshot(),
+                snapshot,
                 config: ResourceSamplingConfig::default(),
                 stop_tx: None,
                 task: None,
@@ -325,6 +328,9 @@ impl ProfilerRegistry {
             ) {
                 return false;
             }
+            // Capture the frozen snapshot before the entry is replaced so a
+            // restart after a freeze keeps the last metrics and history.
+            let snapshot = frozen_snapshot_restarted(&profilers, &connection_id);
             if let Some(mut previous) = profilers.remove(&connection_id) {
                 if let Some(stop_tx) = previous.stop_tx.take() {
                     let _ = stop_tx.send(());
@@ -333,7 +339,7 @@ impl ProfilerRegistry {
             profilers.insert(
                 connection_id.clone(),
                 ConnectionProfilerEntry {
-                    snapshot: running_snapshot(),
+                    snapshot,
                     config,
                     stop_tx: Some(stop_tx),
                     task: None,
@@ -367,18 +373,38 @@ impl ProfilerRegistry {
         true
     }
 
+    /// Freeze one profiler: cancel its sampling task but keep the entry with
+    /// its last metrics and history so the UI keeps displaying the frozen
+    /// state until sampling resumes. Visibility changes use this; only real
+    /// connection teardown drops history via `remove`.
     pub fn stop(&self, connection_id: &str) -> bool {
-        let Some(mut entry) = lock(&self.profilers).remove(connection_id) else {
+        let mut profilers = lock(&self.profilers);
+        let Some(entry) = profilers.get_mut(connection_id) else {
+            return false;
+        };
+        if let Some(stop_tx) = entry.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        // Dropping the JoinHandle detaches the task; the stop signal above is
+        // its only cancellation path and the shell close is bounded.
+        entry.task = None;
+        if entry.snapshot.state == ProfilerState::Running {
+            entry.snapshot.state = ProfilerState::Stopped;
+        }
+        true
+    }
+
+    /// Fully drop a profiler entry together with its history. Reserved for
+    /// connection teardown; visibility changes freeze through `stop`.
+    pub fn remove(&self, connection_id: &str) -> bool {
+        let mut profilers = lock(&self.profilers);
+        let Some(mut entry) = profilers.remove(connection_id) else {
             return false;
         };
         if let Some(stop_tx) = entry.stop_tx.take() {
             let _ = stop_tx.send(());
         }
         true
-    }
-
-    pub fn remove(&self, connection_id: &str) -> bool {
-        self.stop(connection_id)
     }
 
     pub fn stop_all(&self) {
@@ -637,6 +663,24 @@ fn running_snapshot() -> ConnectionProfilerSnapshot {
     }
 }
 
+/// Snapshot for a restarted entry: a frozen (stopped) entry keeps its last
+/// metrics and history so its page stays readable until fresh samples arrive;
+/// missing or degraded entries restart with an empty history.
+fn frozen_snapshot_restarted(
+    profilers: &HashMap<String, ConnectionProfilerEntry>,
+    connection_id: &str,
+) -> ConnectionProfilerSnapshot {
+    profilers
+        .get(connection_id)
+        .filter(|entry| entry.snapshot.state == ProfilerState::Stopped)
+        .map(|entry| ConnectionProfilerSnapshot {
+            metrics: entry.snapshot.metrics.clone(),
+            history: entry.snapshot.history.clone(),
+            state: ProfilerState::Running,
+        })
+        .unwrap_or_else(running_snapshot)
+}
+
 fn spawn_profiler_thread<F>(future: F)
 where
     F: Future<Output = ()> + Send + 'static,
@@ -873,6 +917,36 @@ mod tests {
         assert!(registry.start("conn-1"));
         assert!(!registry.start("conn-1"));
         assert_eq!(registry.state("conn-1"), Some(ProfilerState::Running));
+    }
+
+    #[test]
+    fn stop_freezes_history_and_restart_preserves_it() {
+        let registry = ProfilerRegistry::new();
+        registry.start("conn-1");
+        for timestamp_ms in 0..2 {
+            registry.record_metrics(ProfilerUpdate {
+                connection_id: "conn-1".into(),
+                metrics: ResourceMetrics::empty(timestamp_ms, MetricsSource::Full),
+            });
+        }
+
+        // Visibility changes freeze instead of dropping: the page keeps its
+        // last known state while the sampler is paused.
+        assert!(registry.stop("conn-1"));
+        assert_eq!(registry.state("conn-1"), Some(ProfilerState::Stopped));
+        assert_eq!(registry.history("conn-1").len(), 2);
+        assert!(registry.latest("conn-1").is_some());
+
+        // Resuming sampling keeps the frozen data instead of flashing empty.
+        assert!(registry.start("conn-1"));
+        assert_eq!(registry.state("conn-1"), Some(ProfilerState::Running));
+        assert_eq!(registry.history("conn-1").len(), 2);
+        assert!(registry.latest("conn-1").is_some());
+
+        // Only connection teardown drops the entry with its history.
+        assert!(registry.remove("conn-1"));
+        assert_eq!(registry.state("conn-1"), None);
+        assert!(registry.history("conn-1").is_empty());
     }
 
     #[test]

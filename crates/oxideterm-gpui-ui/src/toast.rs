@@ -165,7 +165,10 @@ pub fn toast_close(tokens: &ThemeTokens) -> Div {
             svg()
                 .path("lucide/x.svg")
                 .size(px(tokens.metrics.ui_toast_close_size))
-                // GPUI SVG elements do not inherit the parent text color.
-                .text_color(rgb(tokens.ui.text_muted)),
+                // GPUI SVG paint reads only the element's own style, so the
+                // parent's hover text_color cannot reach it; the hover-aware
+                // color must be attached to the icon itself.
+                .text_color(rgb(tokens.ui.text_muted))
+                .hover(|icon| icon.text_color(rgb(tokens.ui.text))),
         )
 }

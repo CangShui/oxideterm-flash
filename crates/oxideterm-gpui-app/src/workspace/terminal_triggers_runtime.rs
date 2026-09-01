@@ -549,6 +549,7 @@ impl WorkspaceApp {
         Some(
             oxideterm_gpui_ui::confirm::confirm_dialog_with_focus(
                 &self.tokens,
+                "terminal-trigger-risky-quick-command-confirm",
                 ConfirmDialogView {
                     variant: ConfirmDialogVariant::Danger,
                     title: div()

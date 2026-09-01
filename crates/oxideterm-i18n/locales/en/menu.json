@@ -21,9 +21,9 @@
     "window": "Window",
     "next_tab": "Next Tab",
     "previous_tab": "Previous Tab",
-    "language": "Language",
     "settings": "Settings",
-    "view": "View"
+    "view": "View",
+    "select_all": "Select All"
   },
   "app": "oxideterm-flash"
 }

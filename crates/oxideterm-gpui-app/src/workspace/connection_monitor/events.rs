@@ -130,7 +130,7 @@ pub(in crate::workspace) enum HostToolsNotice {
         count: usize,
     },
     LogUnavailable,
-    LogSnapshotFailed,
+    LogSnapshotFailed { reason: String },
     PortSnapshotAlreadyRunning,
     PortConnectionMissing,
     PortPartialSupport {

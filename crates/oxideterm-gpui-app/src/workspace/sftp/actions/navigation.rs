@@ -37,15 +37,6 @@ impl WorkspaceApp {
                 "escape" => {
                     if let Some(SftpDialog::EditorCloseConfirm { name }) = dialog {
                         self.cancel_sftp_editor_close_confirm(name, window, cx);
-                    } else if let Some(SftpDialog::ExternalEditUploadConfirm {
-                        name, ..
-                    }) = &dialog
-                    {
-                        self.discard_external_edit_upload(
-                            name.clone(),
-                            window,
-                            cx,
-                        );
                     } else {
                         self.close_sftp_dialog(cx);
                     }

@@ -13,23 +13,15 @@
     },
     "command_bar": {
       "command": "Command",
-      "command_mode": "Command mode",
       "command_placeholder": "Run commands",
-      "run_command": "Run command",
-      "collapse_input": "Hide command input",
-      "expand_input": "Show command input",
       "local_shell": "Local shell",
       "remote_shell": "Remote shell",
       "all_targets": "All",
-      "recording": "REC",
       "source_runtime": "history",
-      "source_local_history": "local",
-      "source_ai_ledger": "AI",
       "source_history": "history",
       "source_command": "command",
       "source_option": "option",
       "source_path": "path",
-      "source_ai": "AI",
       "group_history": "History",
       "group_command": "Command",
       "group_option": "Option",
@@ -79,7 +71,6 @@
       "deselect_all": "Deselect all",
       "target_count": "Broadcasting"
     },
-    "typeLocal": "Local",
     "typeSsh": "SSH",
     "paste": {
       "title": "Multiple lines detected ({{count}} lines)",
@@ -93,7 +84,6 @@
       "copy": "Copy",
       "copy_title": "Copy command output",
       "copy_command": "Copy command",
-      "send_to_ai": "Send to OxideSens",
       "fill_command_bar": "Fill command bar",
       "insert_selection_into_command": "Insert selection here",
       "replace_command_with_selection": "Replace command with selection",
@@ -102,7 +92,8 @@
       "select_command": "Select command",
       "previous_command": "Previous command",
       "next_command": "Next command",
-      "clear_screen": "Clear screen"
+      "clear_screen": "Clear screen",
+      "copied_confirmation": "Copied to clipboard"
     },
     "modem": {
       "binary_transfer": "Binary transfer",
@@ -111,7 +102,17 @@
       "ymodem_upload": "YMODEM upload",
       "ymodem_receive": "YMODEM receive",
       "zmodem_upload": "ZMODEM upload",
-      "zmodem_receive": "ZMODEM receive"
+      "zmodem_receive": "ZMODEM receive",
+      "select_upload_files_title": "Select files for the modem transfer",
+      "select_download_directory_title": "Select download location",
+      "completed_title": "Modem transfer completed",
+      "cancelled_title": "Modem transfer cancelled",
+      "failed_title": "Modem transfer failed",
+      "connection_lost_title": "Modem transfer interrupted by connection loss",
+      "invalid_selection": "The selected paths do not match the requested modem transfer.",
+      "invalid_file_name": "A local file name could not be used for this modem transfer.",
+      "wrong_direction": "The remote side is waiting for an X/YMODEM upload, not a download.",
+      "worker_stopped": "The modem worker stopped unexpectedly."
     },
     "serial_control": {
       "serial": "Serial",
@@ -217,12 +218,8 @@
     },
     "quick_commands": {
       "title": "Quick Commands",
-      "open": "Quick Commands",
-      "close": "Close Quick Commands",
       "search_placeholder": "Search quick commands...",
       "add": "Add",
-      "edit": "Edit",
-      "delete": "Delete",
       "run": "Run",
       "save": "Save",
       "cancel": "Cancel",
@@ -237,17 +234,13 @@
       "confirm_risky_description": "This command may be destructive or sensitive. Run: {{command}}",
       "toast_executed": "Quick command sent",
       "add_group": "Add group",
-      "edit_group": "Edit group",
-      "delete_group": "Delete group",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
-      "icon_terminal": "Terminal",
-      "icon_server": "Server",
-      "icon_folder": "Folder",
       "icon_docker": "Docker",
-      "icon_zap": "Custom",
-      "pin": "Keep open",
-      "unpin": "Close after run"
+      "icon_folder": "Folder",
+      "icon_server": "Server",
+      "icon_terminal": "Terminal",
+      "icon_zap": "Custom"
     },
     "cwd": {
       "search_directories": "Search files and directories...",
@@ -258,7 +251,6 @@
       "parent_directory": ".. (Parent Directory)",
       "enter_directory": "Enter directory",
       "go_to_path": "Go to path",
-      "inferred": "inferred",
       "scope_local": "Local",
       "scope_ssh": "SSH",
       "source_process": "Process",
@@ -270,9 +262,7 @@
       "host": "Host",
       "switch_to_directory": "Switch to this directory",
       "copy_path": "Copy path",
-      "open_file_manager": "Open in File Manager",
-      "open_sftp": "Open in SFTP",
-      "open_ide": "Open in IDE"
+      "open_sftp": "Open in SFTP"
     },
     "project": {
       "search_tasks": "Search project tasks...",
@@ -319,18 +309,14 @@
       "action_commit": "Commit",
       "commit_message_placeholder": "Commit message...",
       "action_amend": "Amend",
-      "action_ai_commit_message": "AI Msg",
       "action_rebase": "Rebase",
       "action_rebase_pull": "Rebase Pull",
       "action_conflict_files": "Conflicts",
       "action_continue": "Continue",
       "action_abort": "Abort",
       "action_skip": "Skip",
-      "checkout_success": "Switched to {{branch}}",
       "checkout_failed": "Could not switch to {{branch}}",
-      "section_commit": "Commit",
       "section_history": "History",
-      "section_refs": "Refs",
       "section_more": "More",
       "group_repository": "Repository",
       "group_advanced": "Advanced",
@@ -356,7 +342,6 @@
       "group_conflicts": "Conflicts",
       "group_staged": "Staged",
       "group_modified": "Changes",
-      "group_untracked": "Untracked",
       "clean_title": "Working tree clean",
       "clean_description": "No local changes in this repository.",
       "path_action_stage": "Stage",
@@ -371,42 +356,14 @@
       "path_state_untracked": "U",
       "path_state_conflict": "C"
     },
-    "privilege_helper": {
-      "fill": "Fill password",
-      "filling": "Filling...",
-      "fill_title": "Fill {{label}}",
-      "enter_fill": "Enter to fill",
-      "enter_fill_title": "Press Enter or click to fill {{label}}",
-      "inline_fill_hint": "Press Enter to use saved privilege credential",
-      "load_failed": "Could not load privilege credential",
-      "send_failed": "Could not send privilege credential",
-      "manage": "Privilege credentials",
-      "manage_title": "Open privilege credential settings for this scope",
-      "local_manage_unavailable": "Local shell privilege credential management is not available yet."
-    }
+    "split": {
+      "ssh_unsupported": "Split panes are not available for SSH terminal tabs."
+    },
+    "font_size_unit": "px"
   },
   "search": {
     "placeholder": "Search",
-    "previous": "prev",
-    "next": "next",
-    "close": "x",
     "no_results": "No results",
     "visible_terminal_hint": "Search the visible terminal scrollback."
-  },
-  "workspace": {
-    "new_local_terminal": "New Local Terminal"
-  },
-  "local_shell": {
-    "toast": {
-      "detached": "Session backgrounded",
-      "detached_desc": "{{shell}} is running in the background",
-      "attached": "Session resumed"
-    },
-    "background": {
-      "title": "Background Sessions",
-      "lines": "lines",
-      "resume": "Resume",
-      "kill": "Kill"
-    }
   }
 }

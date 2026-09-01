@@ -527,6 +527,7 @@ impl HostToolsEntity {
         };
 
         div()
+            .id(format!("host-docker-row-{}", container.id))
             .w_full()
             .min_w_0()
             .border_b_1()

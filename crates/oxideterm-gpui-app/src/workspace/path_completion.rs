@@ -9,7 +9,6 @@ const PATH_COMPLETION_HOVER_ALPHA: u32 = 0x99;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PathCompletionOwner {
-    FileManager,
     SftpLocal,
     SftpRemote,
 }
@@ -17,9 +16,6 @@ pub(super) enum PathCompletionOwner {
 impl PathCompletionOwner {
     fn ime_target(self) -> WorkspaceImeTarget {
         match self {
-            Self::FileManager => {
-                WorkspaceImeTarget::FileManager(file_manager::FileManagerInput::Path)
-            }
             Self::SftpLocal => WorkspaceImeTarget::Sftp(sftp::SftpInput::LocalPath),
             Self::SftpRemote => WorkspaceImeTarget::Sftp(sftp::SftpInput::RemotePath),
         }
@@ -27,7 +23,6 @@ impl PathCompletionOwner {
 
     fn popup_id(self) -> &'static str {
         match self {
-            Self::FileManager => "file-manager-path-completion",
             Self::SftpLocal => "sftp-local-path-completion",
             Self::SftpRemote => "sftp-remote-path-completion",
         }
@@ -378,9 +373,6 @@ impl WorkspaceApp {
 
     fn path_completion_is_visible(&self, owner: PathCompletionOwner, cx: &App) -> bool {
         match owner {
-            PathCompletionOwner::FileManager => {
-                self.file_manager.read(cx).path_completion.is_visible()
-            }
             PathCompletionOwner::SftpLocal => {
                 self.sftp_view.read(cx).local_path_completion.is_visible()
             }
@@ -396,15 +388,6 @@ impl WorkspaceApp {
         cx: &App,
     ) -> (bool, usize, ScrollHandle, Vec<PathCompletionCandidate>) {
         match owner {
-            PathCompletionOwner::FileManager => {
-                let state = &self.file_manager.read(cx).path_completion;
-                (
-                    state.is_visible(),
-                    state.selected_index(),
-                    state.scroll_handle.clone(),
-                    state.suggestions().to_vec(),
-                )
-            }
             PathCompletionOwner::SftpLocal => {
                 let sftp = self.sftp_view.read(cx);
                 let state = &sftp.local_path_completion;
@@ -435,7 +418,6 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         match owner {
-            PathCompletionOwner::FileManager => self.accept_file_manager_path_completion(index, cx),
             PathCompletionOwner::SftpLocal => {
                 self.accept_sftp_path_completion(sftp::SftpPane::Local, index, cx)
             }

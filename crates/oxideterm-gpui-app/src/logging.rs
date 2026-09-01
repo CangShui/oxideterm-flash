@@ -13,8 +13,10 @@ const LOG_FILE_NAME: &str = "oxideterm-native.log";
 const LEGACY_LOG_FILE_PREFIX: &str = "oxideterm-native.";
 const MAX_LOG_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const OVERSIZED_LOG_ENTRY_MARKER: &[u8] = b"[oversized log entry omitted]\n";
-const DEFAULT_LOG_FILTER: &str = "warn,oxideterm_gpui_app=info,oxideterm_ssh=info";
-const DEBUG_LOG_FILTER: &str = "warn,oxideterm_gpui_app=debug,oxideterm_ssh=debug,gpui=info";
+const DEFAULT_LOG_FILTER: &str =
+    "warn,oxideterm_gpui_app=info,oxideterm_gpui_terminal=info,oxideterm_ssh=info";
+const DEBUG_LOG_FILTER: &str =
+    "warn,oxideterm_gpui_app=debug,oxideterm_gpui_terminal=debug,oxideterm_ssh=debug,gpui=info";
 
 struct SizeLimitedLogWriter {
     file: File,
@@ -261,5 +263,11 @@ mod tests {
             std::str::from_utf8(OVERSIZED_LOG_ENTRY_MARKER).unwrap()
         );
         assert!(contents.len() <= 64);
+    }
+
+    #[test]
+    fn file_log_filters_include_terminal_selection_audit_events() {
+        assert!(DEFAULT_LOG_FILTER.contains("oxideterm_gpui_terminal=info"));
+        assert!(DEBUG_LOG_FILTER.contains("oxideterm_gpui_terminal=debug"));
     }
 }

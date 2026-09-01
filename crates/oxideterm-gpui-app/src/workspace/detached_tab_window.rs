@@ -1,4 +1,17 @@
+use std::sync::atomic::AtomicU32;
+
 use super::*;
+
+/// First-frame bootstrap background for detached windows. GPUI draws a newly
+/// opened window synchronously inside the Workspace update that detached it,
+/// so the theme cannot be read from the session entity yet; the token refresh
+/// sites publish the active theme background here instead. Follows the same
+/// cross-surface bootstrap pattern as `set_tauri_backdrop_blur_allowed`.
+static DETACHED_WINDOW_BOOTSTRAP_BACKGROUND: AtomicU32 = AtomicU32::new(0x0b0d12);
+
+pub(in crate::workspace) fn set_detached_window_bootstrap_background(color: u32) {
+    DETACHED_WINDOW_BOOTSTRAP_BACKGROUND.store(color, Ordering::Relaxed);
+}
 
 pub(super) struct DetachedTabWindow {
     session: Entity<WorkspaceApp>,
@@ -112,8 +125,15 @@ impl Render for DetachedTabWindow {
         } else {
             // GPUI draws a newly opened window synchronously. Wait one frame
             // before reading Workspace so creation never re-enters the source
-            // Workspace update that opened this detached window.
-            div().size_full().bg(rgb(0x0b0d12)).into_any_element()
+            // Workspace update that opened this detached window. The bootstrap
+            // color comes from the active theme so light themes do not flash
+            // dark for this frame.
+            div()
+                .size_full()
+                .bg(rgb(
+                    DETACHED_WINDOW_BOOTSTRAP_BACKGROUND.load(Ordering::Relaxed),
+                ))
+                .into_any_element()
         };
 
         div()

@@ -16,7 +16,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::store::{ImportedManagedSshKey, ManagedSshKey, ManagedSshKeyOrigin};
 use crate::{
     AuthType, CONFIG_VERSION, ConnectionOptions, ConnectionStore,
-    RemoteDesktopProfilesSyncSnapshot, SavedAuth, SavedConnection, SavedPrivilegeCredential,
+    RemoteDesktopProfilesSyncSnapshot, SavedAuth, SavedConnection,
     SavedProxyHop, SavedUpstreamProxyAuth, SavedUpstreamProxyConfig, SavedUpstreamProxyPolicy,
     SecretString, SerialProfilesSyncSnapshot, SshAlgorithmPreferences,
     StandaloneSftpProfilesSyncSnapshot, TelnetProfilesSyncSnapshot,
@@ -25,7 +25,7 @@ use crate::{
 use super::{
     EncryptedAuth, EncryptedConnection, EncryptedForward, EncryptedManagedKeyMetadata,
     EncryptedPayload, EncryptedPluginSetting, EncryptedPortableSecret,
-    EncryptedPrivilegeCredential, EncryptedProxyHop, EncryptedUpstreamProxyAuth,
+    EncryptedProxyHop, EncryptedUpstreamProxyAuth,
     EncryptedUpstreamProxyConfig, EncryptedUpstreamProxyPolicy, OxideBatchDecryptionContext,
     OxideBatchEncryptionContext, OxideFile, OxideFileError, OxideMetadata, compute_checksum,
     decrypt_oxide_file_with_context_and_progress, decrypt_oxide_file_with_progress,
@@ -256,7 +256,6 @@ pub struct ImportResultEnvelope {
     pub restored_key_passphrases: usize,
     pub restored_managed_keys: usize,
     pub restored_managed_key_passphrases: usize,
-    pub restored_privilege_credentials: usize,
     pub skipped_sensitive_credentials: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_settings_json: Option<String>,

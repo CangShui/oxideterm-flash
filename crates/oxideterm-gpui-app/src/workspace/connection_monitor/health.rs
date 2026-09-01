@@ -43,17 +43,18 @@ struct HostToolsTabScrollbarGeometry {
 pub(in crate::workspace) fn host_tools_tab_index(tool: ContextSidebarTool) -> usize {
     // Keep indices aligned with the stable render order in the scroll strip.
     match tool {
-        ContextSidebarTool::Monitor => 0,
-        ContextSidebarTool::Gpu => 1,
-        ContextSidebarTool::Processes => 2,
-        ContextSidebarTool::Services => 3,
-        ContextSidebarTool::Logs => 4,
-        ContextSidebarTool::Tmux => 5,
-        ContextSidebarTool::Docker => 6,
-        ContextSidebarTool::Ports => 7,
-        ContextSidebarTool::Schedules => 8,
-        ContextSidebarTool::Filesystems => 9,
-        ContextSidebarTool::Packages => 10,
+        ContextSidebarTool::Files => 0,
+        ContextSidebarTool::Monitor => 1,
+        ContextSidebarTool::Gpu => 2,
+        ContextSidebarTool::Processes => 3,
+        ContextSidebarTool::Services => 4,
+        ContextSidebarTool::Logs => 5,
+        ContextSidebarTool::Tmux => 6,
+        ContextSidebarTool::Docker => 7,
+        ContextSidebarTool::Ports => 8,
+        ContextSidebarTool::Schedules => 9,
+        ContextSidebarTool::Filesystems => 10,
+        ContextSidebarTool::Packages => 11,
     }
 }
 
@@ -63,6 +64,9 @@ impl ContextSidebarTool {
         settings: &oxideterm_settings::HostToolsSettings,
     ) -> bool {
         match self {
+            // The remote file browser needs no sampling daemon; it renders
+            // whenever the host sidebar is visible.
+            Self::Files => true,
             Self::Monitor => settings.monitor_enabled,
             Self::Gpu => settings.gpu_enabled,
             Self::Processes => settings.processes_enabled,
@@ -84,6 +88,7 @@ impl ContextSidebarTool {
     ) {
         // Keep persistence mapping next to the read mapping so new Host Tools cannot drift.
         match self {
+            Self::Files => {}
             Self::Monitor => settings.monitor_enabled = enabled,
             Self::Gpu => settings.gpu_enabled = enabled,
             Self::Processes => settings.processes_enabled = enabled,
@@ -381,6 +386,7 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn render_host_tools_context_panel(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.tokens.ui;
@@ -388,6 +394,7 @@ impl WorkspaceApp {
         let enabled = self.host_tool_monitoring_enabled(active_tool);
         let content = if enabled {
             match active_tool {
+                ContextSidebarTool::Files => self.render_host_tools_files_panel(window, cx),
                 ContextSidebarTool::Monitor => self.render_host_tools_monitor_panel(cx),
                 ContextSidebarTool::Gpu => {
                     let tokens = self.tokens;
@@ -483,6 +490,30 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
+    /// The remote file browser surface reused as the default Host Tools tab.
+    /// It follows the same embedded-SFTP rendering as the sessions sidebar, so
+    /// opening Host Tools after connecting shows the host's files immediately.
+    /// Node binding happens once on panel open or connect — never during
+    /// render — so closing the SSH tab keeps the browser closed instead of
+    /// resurrecting a stale session on the next frame.
+    fn render_host_tools_files_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id("host-tools-files-context-panel")
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(self.render_sftp_sidebar_surface(window, cx))
+            .into_any_element()
+    }
+
     fn render_host_tools_context_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let active_index = host_tools_tab_index(self.host_tools.read(cx).active_tool());
         let tab_scroll_handle = self.host_tools.read(cx).tab_scroll_handle();
@@ -514,6 +545,14 @@ impl WorkspaceApp {
             }));
 
         tabs = tabs
+            .child(self.render_host_tools_context_tab(
+                ContextSidebarTool::Files,
+                LucideIcon::FolderOpen,
+                "sidebar.panels.host_files",
+                true,
+                selection_indicator_visible,
+                cx,
+            ))
             .child(self.render_host_tools_context_tab(
                 ContextSidebarTool::Monitor,
                 LucideIcon::Activity,
@@ -1086,6 +1125,11 @@ impl WorkspaceApp {
                     this.host_tools.update(cx, |host_tools, cx| {
                         host_tools.select_sidebar_tool(tool, cx)
                     });
+                    if tool == ContextSidebarTool::Files {
+                        // Selecting Files is the visibility edge for pending
+                        // SFTP loads queued while another Host Tools page was active.
+                        this.maybe_start_sftp_remote_load(cx);
+                    }
                     cx.stop_propagation();
                 }),
             )

@@ -148,7 +148,14 @@ pub(super) async fn install_local_download(
             tokio::task::spawn_blocking(move || {
                 // A hard link provides an atomic create-if-absent operation for the
                 // staged sibling and cannot replace a file that appeared mid-transfer.
-                std::fs::File::open(&source)?.sync_all()?;
+                // FlushFileBuffers on a read-only handle fails with access denied on
+                // Windows, so the durability flush needs write access to the staged
+                // file before the hard link publishes its final name.
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&source)?
+                    .sync_all()?;
                 std::fs::hard_link(&source, &destination)?;
                 std::fs::remove_file(&source)
             })

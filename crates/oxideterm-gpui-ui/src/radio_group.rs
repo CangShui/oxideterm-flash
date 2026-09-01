@@ -23,7 +23,9 @@ pub fn radio_group_item(tokens: &ThemeTokens, checked: bool, disabled: bool) -> 
                 .bg(if checked {
                     rgb(tokens.ui.accent)
                 } else {
-                    rgb(tokens.ui.bg)
+                    // The idle dot must stay visible on any surface; the page
+                    // background disappears on containers with the same fill.
+                    rgb(tokens.ui.border_strong)
                 }),
         )
 }

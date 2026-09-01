@@ -8,20 +8,16 @@ use super::*;
 
 // Poll interval for detecting external-editor saves on the temp copy.
 const EXTERNAL_EDIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+// Wait for the editor's save sequence to settle before uploading the final bytes.
+const EXTERNAL_EDIT_SAVE_SETTLE: Duration = Duration::from_millis(250);
 // Hard lifetime cap so an abandoned editor session cannot leak a poll task.
 const EXTERNAL_EDIT_MAX_LIFETIME: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 pub(crate) struct ExternalEditSession {
+    backend: SftpRemoteBackend,
     pub remote_path: String,
     pub temp_path: PathBuf,
-}
-
-fn external_edit_temp_path(name: &str) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("oxideterm-external-edit");
-    std::fs::create_dir_all(&dir).map_err(|error| format!("{error}"))?;
-    let unique = uuid::Uuid::new_v4();
-    Ok(dir.join(format!("{unique}-{name}")))
 }
 
 fn file_signature(path: &Path) -> Option<(SystemTime, u64)> {
@@ -75,6 +71,7 @@ impl WorkspaceApp {
         }
         let temp_path = session_dir.join(&name);
         eprintln!("[ext-edit] 3 backend ok, temp: {}", temp_path.display());
+        let session_backend = backend.clone();
         let started = std::time::Instant::now();
 
         // scp_download_file uses tokio::fs internally, so the download must
@@ -155,27 +152,72 @@ impl WorkspaceApp {
             });
 
             eprintln!("[ext-edit] 10 watching for saves");
-            let session = ExternalEditSession { remote_path, temp_path };
-            loop {
+            let session = ExternalEditSession {
+                backend: session_backend,
+                remote_path,
+                temp_path,
+            };
+            'watch: loop {
                 cx.background_executor()
                     .timer(EXTERNAL_EDIT_POLL_INTERVAL)
                     .await;
                 if started.elapsed() > EXTERNAL_EDIT_MAX_LIFETIME {
                     break;
                 }
-                let current = file_signature(&session.temp_path);
-                match (&baseline, &current) {
-                    (Some(previous), Some(now)) if previous != now => {
-                        eprintln!("[ext-edit] 11 save detected, prompting upload");
-                        baseline = current;
-                        this.update(cx, |this, cx| {
-                            this.prompt_external_edit_upload(session.clone(), cx);
-                        })
-                        .ok();
+                let Some(mut stable_signature) = file_signature(&session.temp_path) else {
+                    if baseline.is_none() {
+                        break;
                     }
-                    (None, _) => break,
-                    _ => {}
+                    continue;
+                };
+                if baseline.as_ref() == Some(&stable_signature) {
+                    continue;
                 }
+
+                let stable_signature = loop {
+                    cx.background_executor()
+                        .timer(EXTERNAL_EDIT_SAVE_SETTLE)
+                        .await;
+                    if started.elapsed() > EXTERNAL_EDIT_MAX_LIFETIME {
+                        break 'watch;
+                    }
+                    let Some(next_signature) = file_signature(&session.temp_path) else {
+                        break None;
+                    };
+                    if next_signature == stable_signature {
+                        break Some(stable_signature);
+                    }
+                    stable_signature = next_signature;
+                };
+                let Some(stable_signature) = stable_signature else {
+                    continue;
+                };
+
+                eprintln!("[ext-edit] 11 save detected, uploading");
+                let Some(upload_rx) = this
+                    .update(cx, |this, _cx| this.start_external_edit_upload(&session))
+                    .ok()
+                else {
+                    break;
+                };
+                if let Err(error) = upload_rx
+                    .recv()
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()))
+                {
+                    this.update(cx, |this, cx| {
+                        this.push_sftp_toast(
+                            this.i18n.t("sftp.external_edit.upload_failed"),
+                            Some(error),
+                            TerminalNoticeVariant::Error,
+                            cx,
+                        );
+                    })
+                    .ok();
+                }
+                // Keep the pre-upload signature so edits made during transfer are
+                // observed and uploaded by the next polling cycle.
+                baseline = Some(stable_signature);
             }
             drop(editor);
             // Session ended (uploaded or lifetime cap): reclaim the temp copy.
@@ -186,61 +228,32 @@ impl WorkspaceApp {
         .detach();
     }
 
-    fn prompt_external_edit_upload(&mut self, session: ExternalEditSession, cx: &mut Context<Self>) {
-        let name = session
-            .remote_path
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&session.remote_path)
-            .to_string();
-        self.sftp_view.update(cx, |sftp, cx| {
-            sftp.set_dialog(SftpDialog::ExternalEditUploadConfirm {
-                name,
-                remote_path: session.remote_path.clone(),
-                temp_path: session.temp_path.to_string_lossy().to_string(),
-            });
-            cx.notify();
+    fn start_external_edit_upload(
+        &self,
+        session: &ExternalEditSession,
+    ) -> async_channel::Receiver<Result<(), String>> {
+        let (upload_tx, upload_rx) = async_channel::bounded::<Result<(), String>>(1);
+        let backend = session.backend.clone();
+        let remote_path = session.remote_path.clone();
+        let temp_path = session.temp_path.to_string_lossy().to_string();
+        // The watcher owns the receiver and waits for this one-shot upload result
+        // before polling again, keeping saves ordered and the temp file alive.
+        self.forwarding_runtime.clone().spawn(async move {
+            let result = async {
+                let sftp = backend.acquire_transfer_sftp().await?;
+                sftp.upload_file(&temp_path, &remote_path, "external-edit", None, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            if let Err(error) = &result {
+                eprintln!("[ext-edit] 12 upload failed: {error}");
+            } else {
+                eprintln!("[ext-edit] 12 upload done");
+            }
+            let _ = upload_tx.send(result).await;
         });
-    }
-
-    /// Uploads the edited temp copy back to the original remote path through
-    /// the same remote-mutation channel used by SFTP pane mutations.
-    pub(in crate::workspace::sftp) fn confirm_external_edit_upload(
-        &mut self,
-        _name: String,
-        remote_path: String,
-        temp_path: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_sftp_dialog(cx);
-        let toast = crate::workspace::sftp::SftpMutationToast {
-            success_title: self.i18n.t("sftp.external_edit.upload_success"),
-            success_description: None,
-            error_title: self.i18n.t("sftp.external_edit.upload_failed"),
-        };
-        self.spawn_sftp_pane_remote_mutation(
-            crate::workspace::sftp::SftpPane::Remote,
-            move |sftp| {
-                Box::pin(async move {
-                    sftp.upload_file(&temp_path, &remote_path, "external-edit", None, None)
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                })
-            },
-            Some(toast),
-            cx,
-        );
-    }
-
-    /// Discards the pending upload prompt: the temp copy stays so further
-    /// saves from the still-open editor re-trigger the prompt.
-    pub(in crate::workspace::sftp) fn discard_external_edit_upload(
-        &mut self,
-        _name: String,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_sftp_dialog(cx);
+        upload_rx
     }
 }
