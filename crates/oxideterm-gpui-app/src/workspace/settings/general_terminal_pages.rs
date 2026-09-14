@@ -16,7 +16,7 @@ const TERMINAL_COMMAND_SPECS_EDITOR_MIN_HEIGHT: f32 = 520.0;
 const TERMINAL_COMMAND_SPECS_ACTION_ICON_SIZE: f32 = 12.0;
 
 impl WorkspaceApp {
-        /// Opens a native file picker and applies the chosen executable to the
+    /// Opens a native file picker and applies the chosen executable to the
     /// external-editor setting, so operators do not have to type paths by hand.
     pub(in crate::workspace) fn browse_external_editor_path(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -74,7 +74,7 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
-pub(in crate::workspace) fn settings_general_section(
+    pub(in crate::workspace) fn settings_general_section(
         &self,
         section_index: usize,
         cx: &mut Context<Self>,
@@ -195,8 +195,9 @@ pub(in crate::workspace) fn settings_general_section(
         }
     }
 
-    /// Self-hosted cloud sync: endpoint, room, transport mode, and manual
-    /// push/pull actions. Engine lifecycle is handled by autostart_cloud_sync.
+    /// Self-hosted cloud sync: endpoint, room, transport mode, and a single
+    /// manual "force sync" action that wakes every connected client. Engine
+    /// lifecycle is handled by autostart_cloud_sync.
     pub(in crate::workspace) fn settings_cloud_sync_section(
         &self,
         cx: &mut Context<Self>,
@@ -225,9 +226,12 @@ pub(in crate::workspace) fn settings_general_section(
                         MouseButton::Left,
                         cx.listener(|this, _event, _window, cx| {
                             this.edit_settings(
-                                |settings| settings.cloud_sync.enabled = !settings.cloud_sync.enabled,
+                                |settings| {
+                                    settings.cloud_sync.enabled = !settings.cloud_sync.enabled
+                                },
                                 cx,
                             );
+                            this.autostart_cloud_sync(cx);
                         }),
                     )
                     .into_any_element(),
@@ -263,20 +267,24 @@ pub(in crate::workspace) fn settings_general_section(
             self.setting_row(
                 "settings_view.general.cloudsync.sync_passwords",
                 "settings_view.general.cloudsync.sync_passwords_hint",
-                checkbox(&self.tokens, String::new(), settings.cloud_sync.sync_passwords)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.edit_settings(
-                                |settings| {
-                                    settings.cloud_sync.sync_passwords =
-                                        !settings.cloud_sync.sync_passwords
-                                },
-                                cx,
-                            );
-                        }),
-                    )
-                    .into_any_element(),
+                checkbox(
+                    &self.tokens,
+                    String::new(),
+                    settings.cloud_sync.sync_passwords,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.edit_settings(
+                            |settings| {
+                                settings.cloud_sync.sync_passwords =
+                                    !settings.cloud_sync.sync_passwords
+                            },
+                            cx,
+                        );
+                    }),
+                )
+                .into_any_element(),
                 cx,
             ),
             self.card_separator(),
@@ -300,7 +308,7 @@ pub(in crate::workspace) fn settings_general_section(
                 .items_center()
                 .gap(px(12.0))
                 .child(self.workspace_toolbar_action_button(
-                    self.i18n.t("settings_view.general.cloudsync.push"),
+                    self.i18n.t("settings_view.general.cloudsync.force_sync"),
                     None,
                     ToolbarButtonOptions {
                         button: ButtonOptions {
@@ -312,24 +320,7 @@ pub(in crate::workspace) fn settings_general_section(
                         ..ToolbarButtonOptions::default()
                     },
                     cx.listener(|this, _event, _window, cx| {
-                        this.cloud_sync_broadcast_snapshot(cx);
-                        cx.stop_propagation();
-                    }),
-                ))
-                .child(self.workspace_toolbar_action_button(
-                    self.i18n.t("settings_view.general.cloudsync.pull"),
-                    None,
-                    ToolbarButtonOptions {
-                        button: ButtonOptions {
-                            variant: ButtonVariant::Default,
-                            size: ButtonSize::Default,
-                            radius: ButtonRadius::Md,
-                            disabled: self.cloud_sync.is_none(),
-                        },
-                        ..ToolbarButtonOptions::default()
-                    },
-                    cx.listener(|this, _event, _window, cx| {
-                        this.cloud_sync_request_snapshot();
+                        this.cloud_sync_force_sync(cx);
                         cx.stop_propagation();
                     }),
                 ))
@@ -343,6 +334,55 @@ pub(in crate::workspace) fn settings_general_section(
                         .child(status),
                 )
                 .into_any_element(),
+            self.card_separator(),
+            {
+                let progress = self.cloud_sync_progress.unwrap_or(0.0);
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .rounded(px(self.tokens.radii.sm))
+                            .bg(rgb(self.tokens.ui.bg_hover))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(progress))
+                                    .rounded(px(self.tokens.radii.sm))
+                                    .bg(rgb(self.tokens.ui.accent)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .children(
+                                self.cloud_sync_logs
+                                    .iter()
+                                    .rev()
+                                    .take(3)
+                                    .rev()
+                                    .cloned()
+                                    .map(|entry| {
+                                        div()
+                                            .w_full()
+                                            .min_w(px(0.0))
+                                            .text_size(px(self.tokens.metrics.ui_text_xs))
+                                            .text_color(rgb(self.tokens.ui.text_muted))
+                                            .truncate()
+                                            .child(entry)
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
+            },
         ])
     }
 
@@ -357,17 +397,18 @@ pub(in crate::workspace) fn settings_general_section(
     ) -> AnyElement {
         match section_index {
             0 => {
+                // Dedicated .oxide bundle import card
+                self.session_io_oxide_import_section(cx)
+            }
+            1 => {
                 // Full importer surface moved from the Connections page: source
                 // picker, path selection, preview, and apply stay one surface.
                 let mut importer = self
                     .settings_workspace
                     .read(cx)
                     .connection_import_snapshot();
-                let mut rows = vec![self.connection_import_input_row(
-                    importer.source,
-                    &importer.paths,
-                    cx,
-                )];
+                let mut rows =
+                    vec![self.connection_import_input_row(importer.source, &importer.paths, cx)];
 
                 if let Some(preview) = importer.preview.take() {
                     rows.push(self.connection_import_preview_toolbar(
@@ -392,7 +433,7 @@ pub(in crate::workspace) fn settings_general_section(
                     rows,
                 )
             }
-            1 => {
+            2 => {
                 // Export card: pick a client format then write sessions.
                 let connections = self.connection_store.connections();
                 let count = connections.len();
@@ -456,12 +497,72 @@ pub(in crate::workspace) fn settings_general_section(
         }
     }
 
+    fn session_io_oxide_import_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.connection_section(
+            "settings_view.sessionio.import_oxide",
+            "settings_view.sessionio.import_oxide_hint",
+            vec![
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .child(self.workspace_toolbar_action_button(
+                        self.i18n.t("settings_view.sessionio.import_oxide_button"),
+                        None,
+                        ToolbarButtonOptions {
+                            button: ButtonOptions {
+                                variant: ButtonVariant::Default,
+                                size: ButtonSize::Default,
+                                radius: ButtonRadius::Md,
+                                disabled: false,
+                            },
+                            ..ToolbarButtonOptions::default()
+                        },
+                        cx.listener(|this, _event, _window, cx| {
+                            crate::logging::audit_button_click("sessionio-import-oxide", "settings");
+                            tracing::debug!(
+                                target: "oxideterm::audit",
+                                stage = "sessionio.import.oxide",
+                                result = "opened",
+                                business_impact = "the encrypted .oxide import wizard was opened from Settings",
+                                "设置页已打开 .oxide 导入对话框"
+                            );
+                            this.open_oxide_import_dialog(cx);
+                            cx.stop_propagation();
+                        }),
+                    ))
+                    .into_any_element(),
+            ],
+        )
+    }
+
     fn export_sessions_to_file(&mut self, cx: &mut Context<Self>) {
         use oxideterm_connections::{
-            export_sessions, export_sessions_to_finalshell_directory, suggested_file_name,
-            SessionExportContent,
+            SessionExportContent, SessionExportFormat, export_sessions,
+            export_sessions_to_finalshell_directory, suggested_file_name,
         };
         let format = self.session_export_format(cx);
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "sessionio.export.request",
+            format = ?format,
+            result = "received",
+            "用户触发设置页会话导出"
+        );
+        if format == SessionExportFormat::OxideEncrypted {
+            crate::logging::audit_button_click("sessionio-export-oxide", "settings");
+            tracing::debug!(
+                target: "oxideterm::audit",
+                stage = "sessionio.export.oxide",
+                result = "opened",
+                business_impact = "the encrypted .oxide export wizard was opened from Settings",
+                "设置页已打开 .oxide 导出对话框"
+            );
+            self.open_oxide_export_dialog(cx);
+            return;
+        }
         let connections = self.connection_store.connections().to_vec();
         let directory = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
@@ -484,30 +585,54 @@ pub(in crate::workspace) fn settings_general_section(
                     let Some(target) = paths.into_iter().next() else {
                         return;
                     };
-                    let result =
-                        export_sessions_to_finalshell_directory(&connections, &target)
-                            .map(|count| format!("{} ({count} files)", target.display()));
-                    workspace.update(cx, |workspace, cx| {
+                    let result = export_sessions_to_finalshell_directory(&connections, &target)
+                        .map(|count| format!("{} ({count} files)", target.display()));
+                    let _ = workspace.update(cx, |workspace, cx| {
                         match result {
                             Ok(description) => {
-                                workspace.push_workspace_notice(TerminalNotice {
-                                    title: workspace.i18n.t("settings_view.sessionio.export_done"),
-                                    description: Some(description),
-                                    status_text: None,
-                                    progress: None,
-                                    variant: TerminalNoticeVariant::Success,
-                                }, cx);
+                                tracing::info!(
+                                    target: "oxideterm::audit",
+                                    trace_id,
+                                    stage = "sessionio.export.response",
+                                    format = ?format,
+                                    result = "completed",
+                                    "会话目录导出完成"
+                                );
+                                workspace.push_workspace_notice(
+                                    TerminalNotice {
+                                        title: workspace
+                                            .i18n
+                                            .t("settings_view.sessionio.export_done"),
+                                        description: Some(description),
+                                        status_text: None,
+                                        progress: None,
+                                        variant: TerminalNoticeVariant::Success,
+                                    },
+                                    cx,
+                                );
                             }
                             Err(error) => {
-                                workspace.push_workspace_notice(TerminalNotice {
-                                    title: workspace
-                                        .i18n
-                                        .t("settings_view.sessionio.export_failed"),
-                                    description: Some(format!("{error:#}")),
-                                    status_text: None,
-                                    progress: None,
-                                    variant: TerminalNoticeVariant::Error,
-                                }, cx);
+                                tracing::warn!(
+                                    target: "oxideterm::audit",
+                                    trace_id,
+                                    stage = "sessionio.export.response",
+                                    format = ?format,
+                                    result = "failed",
+                                    error_kind = format!("{error:#}").chars().take(160).collect::<String>(),
+                                    "会话目录导出失败"
+                                );
+                                workspace.push_workspace_notice(
+                                    TerminalNotice {
+                                        title: workspace
+                                            .i18n
+                                            .t("settings_view.sessionio.export_failed"),
+                                        description: Some(format!("{error:#}")),
+                                        status_text: None,
+                                        progress: None,
+                                        variant: TerminalNoticeVariant::Error,
+                                    },
+                                    cx,
+                                );
                             }
                         }
                         let _ = settings_path;
@@ -520,15 +645,37 @@ pub(in crate::workspace) fn settings_general_section(
 
         // File-based formats render once and reuse the same write flow.
         let content = match export_sessions(&connections, format) {
-            Ok(content) => content,
+            Ok(content) => {
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "sessionio.export.content",
+                    format = ?format,
+                    result = "rendered",
+                    "会话导出内容生成完成，等待选择保存路径"
+                );
+                content
+            }
             Err(error) => {
-                self.push_workspace_notice(TerminalNotice {
-                    title: self.i18n.t("settings_view.sessionio.export_failed"),
-                    description: Some(format!("{error:#}")),
-                    status_text: None,
-                    progress: None,
-                    variant: TerminalNoticeVariant::Error,
-                }, cx);
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "sessionio.export.content",
+                    format = ?format,
+                    result = "failed",
+                    error_kind = format!("{error:#}").chars().take(160).collect::<String>(),
+                    "会话导出内容生成失败"
+                );
+                self.push_workspace_notice(
+                    TerminalNotice {
+                        title: self.i18n.t("settings_view.sessionio.export_failed"),
+                        description: Some(format!("{error:#}")),
+                        status_text: None,
+                        progress: None,
+                        variant: TerminalNoticeVariant::Error,
+                    },
+                    cx,
+                );
                 return;
             }
         };
@@ -545,25 +692,50 @@ pub(in crate::workspace) fn settings_general_section(
                         std::fs::write(&path, bytes).map_err(|error| error.to_string())
                     }
                 };
-                workspace.update(cx, |workspace, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
                     match result {
                         Ok(()) => {
-                            workspace.push_workspace_notice(TerminalNotice {
-                                title: workspace.i18n.t("settings_view.sessionio.export_done"),
-                                description: Some(path.display().to_string()),
-                                status_text: None,
-                                progress: None,
-                                variant: TerminalNoticeVariant::Success,
-                            }, cx);
+                            tracing::info!(
+                                target: "oxideterm::audit",
+                                trace_id,
+                                stage = "sessionio.export.response",
+                                format = ?format,
+                                result = "completed",
+                                "会话导出文件已写入磁盘"
+                            );
+                            workspace.push_workspace_notice(
+                                TerminalNotice {
+                                    title: workspace.i18n.t("settings_view.sessionio.export_done"),
+                                    description: Some(path.display().to_string()),
+                                    status_text: None,
+                                    progress: None,
+                                    variant: TerminalNoticeVariant::Success,
+                                },
+                                cx,
+                            );
                         }
                         Err(error) => {
-                            workspace.push_workspace_notice(TerminalNotice {
-                                title: workspace.i18n.t("settings_view.sessionio.export_failed"),
-                                description: Some(error),
-                                status_text: None,
-                                progress: None,
-                                variant: TerminalNoticeVariant::Error,
-                            }, cx);
+                            tracing::warn!(
+                                target: "oxideterm::audit",
+                                trace_id,
+                                stage = "sessionio.export.response",
+                                format = ?format,
+                                result = "failed",
+                                error_kind = error.chars().take(160).collect::<String>(),
+                                "会话导出文件写入失败"
+                            );
+                            workspace.push_workspace_notice(
+                                TerminalNotice {
+                                    title: workspace
+                                        .i18n
+                                        .t("settings_view.sessionio.export_failed"),
+                                    description: Some(error),
+                                    status_text: None,
+                                    progress: None,
+                                    variant: TerminalNoticeVariant::Error,
+                                },
+                                cx,
+                            );
                         }
                     }
                     let _ = settings_path;
@@ -1220,14 +1392,6 @@ pub(in crate::workspace) fn settings_general_section(
                         set_command_bar_project_tasks,
                         cx,
                     ),
-                    self.card_separator(),
-                    self.bool_row(
-                        "settings_view.terminal.command_bar_current_directory_awareness",
-                        "settings_view.terminal.command_bar_current_directory_awareness_hint",
-                        settings.terminal.command_bar.show_current_directory,
-                        set_command_bar_show_current_directory,
-                        cx,
-                    ),
                 ],
             ),
             (TerminalSettingsPage::CommandBar, 1) => self.settings_card(
@@ -1277,18 +1441,6 @@ pub(in crate::workspace) fn settings_general_section(
                     self.terminal_command_specs_editor_row(cx),
                 ],
             ),
-            (TerminalSettingsPage::Awareness, 0) => self.settings_card(
-                "settings_view.terminal.awareness_title",
-                "settings_view.terminal.awareness_description",
-                vec![self.bool_row(
-                    "settings_view.terminal.awareness_enabled",
-                    "settings_view.terminal.awareness_enabled_hint",
-                    settings.terminal.command_bar.current_directory_awareness,
-                    set_command_bar_current_directory_awareness,
-                    cx,
-                )],
-            ),
-            (TerminalSettingsPage::Awareness, 1) => self.terminal_triggers_settings_card(cx),
             (TerminalSettingsPage::Transfer, 0) => self.settings_card(
                 "settings_view.terminal.in_band_transfer.title",
                 "settings_view.terminal.in_band_transfer.runtime_note",

@@ -1,3 +1,5 @@
+use crate::workspace::sftp::helpers::localized_sftp_error_detail;
+
 use super::*;
 
 impl WorkspaceApp {
@@ -18,7 +20,7 @@ impl WorkspaceApp {
         let body = if preview_loading {
             self.render_sftp_preview_text(self.i18n.t("sftp.preview.loading"))
         } else if let Some(error) = preview_error {
-            self.render_sftp_preview_text(error)
+            self.render_sftp_preview_text(localized_sftp_error_detail(&self.i18n, &error))
         } else if let Some(content) = preview_content.as_deref() {
             self.render_sftp_preview_content(content, cx)
         } else {
@@ -174,6 +176,7 @@ impl WorkspaceApp {
             )
         };
         if let Some(message) = save_error {
+            let message = localized_sftp_error_detail(&self.i18n, &message);
             if network_error {
                 let label = if retry_count > 0 {
                     format!("{} ({retry_count})", self.i18n.t("sftp.preview.retry"))

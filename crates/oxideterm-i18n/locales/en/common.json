@@ -149,8 +149,6 @@
     "features_host_tools_description": "Monitor resources and work with processes, services, logs, ports, packages, containers, schedules, and tmux.",
     "features_sftp_title": "Rebuilt SFTP chain",
     "features_sftp_description": "Node-level ownership, parallel queues, archive transfer, short-read recovery, better progress accounting, and resumable stages improve file work.",
-    "features_reconnect_title": "Grace Period reconnect",
-    "features_reconnect_description": "Short network interruptions can recover the original SSH runtime before replacement is attempted.",
     "features_editor_title": "Native files and remote editing",
     "features_editor_description": "Local file management, previews, project trees, safe writes, conflicts, syntax, and workspace restore are integrated.",
     "internal_eyebrow": "PAGE 6 · FOUNDATION",

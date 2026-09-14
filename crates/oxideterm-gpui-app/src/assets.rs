@@ -101,6 +101,7 @@ pub(crate) enum LucideIcon {
     Rocket,
     Save,
     Search,
+    #[allow(dead_code)]
     Scissors,
     Server,
     Settings,
@@ -126,6 +127,7 @@ pub(crate) enum LucideIcon {
 
 impl LucideIcon {
     /// Resolves plugin-facing Lucide names without case or separator sensitivity.
+    #[allow(dead_code)]
     pub(crate) fn from_plugin_name(name: &str) -> Self {
         let normalized = name
             .chars()

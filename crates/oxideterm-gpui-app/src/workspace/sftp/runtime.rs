@@ -321,6 +321,7 @@ impl SftpWorkspaceEntity {
 
     fn apply_remote_list(
         &mut self,
+        trace_id: u64,
         surface_id: SftpSurfaceId,
         remote_id: SftpRemoteId,
         view_generation: u64,
@@ -335,6 +336,16 @@ impl SftpWorkspaceEntity {
             && self.current_remote_id.as_ref() == Some(&remote_id)
             && self.view_generation == view_generation;
         if !is_current_request {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "sftp.list.response",
+                result = "stale",
+                view_generation,
+                current_generation = self.view_generation,
+                business_impact = "the obsolete listing was not allowed to replace the visible remote files",
+                "远程文件列表响应已不再对应当前可见视图"
+            );
             if self.current_remote_id.as_ref() == Some(&remote_id) {
                 // A stale response for the same node may finish after the user
                 // returned to a cached view; only the current generation may
@@ -357,6 +368,7 @@ impl SftpWorkspaceEntity {
                     let live_generation = self.view_generation;
                     self.set_remote_load_state(self.remote_load_state().complete());
                     return self.apply_remote_list_payload(
+                        trace_id,
                         surface_id,
                         remote_id,
                         live_generation,
@@ -375,6 +387,7 @@ impl SftpWorkspaceEntity {
         }
         self.set_remote_load_state(self.remote_load_state().complete());
         self.apply_remote_list_payload(
+            trace_id,
             surface_id,
             remote_id,
             view_generation,
@@ -390,6 +403,7 @@ impl SftpWorkspaceEntity {
     /// listing) and owns the superseded check plus the Ok/Err application.
     fn apply_remote_list_payload(
         &mut self,
+        trace_id: u64,
         surface_id: SftpSurfaceId,
         remote_id: SftpRemoteId,
         view_generation: u64,
@@ -399,6 +413,15 @@ impl SftpWorkspaceEntity {
         cx: &mut Context<Self>,
     ) -> SftpRemoteListOutcome {
         if remote_list_result_is_superseded(&path, &self.remote_path, self.remote_load_pending) {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "sftp.list.response",
+                result = "superseded",
+                path_character_count = path.chars().count(),
+                business_impact = "a newer remote path request remains authoritative",
+                "远程文件列表响应已被更新的请求取代"
+            );
             return SftpRemoteListOutcome {
                 bind_session: None,
                 load_transfer_state_for: None,
@@ -409,6 +432,17 @@ impl SftpWorkspaceEntity {
         match result {
             Ok(listing) => {
                 let cwd = listing.cwd;
+                let entry_count = listing.files.len();
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "sftp.list.response",
+                    result = "completed",
+                    entry_count,
+                    cwd_character_count = cwd.chars().count(),
+                    business_impact = "the visible remote file list can be refreshed",
+                    "远程文件列表加载完成"
+                );
                 self.remote_path_by_remote
                     .insert(remote_id.clone(), cwd.clone());
                 self.remote_home_by_remote
@@ -441,9 +475,32 @@ impl SftpWorkspaceEntity {
                 }
             }
             Err(error) => {
-                if oxideterm_sftp::error_should_retry_initialization(&error)
-                    && self.remote_load_retry_count < 3
-                {
+                let should_retry = oxideterm_sftp::error_should_retry_initialization(&error)
+                    && self.remote_load_retry_count < 3;
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "sftp.list.response",
+                    result = if should_retry { "retry_scheduled" } else { "failed" },
+                    retry_count_before = self.remote_load_retry_count,
+                    error_category = if oxideterm_sftp::error_is_permission_denied(&error) {
+                        "permission_denied"
+                    } else if oxideterm_sftp::error_is_not_found(&error) {
+                        "not_found"
+                    } else if error.contains("timed out") {
+                        "timeout"
+                    } else {
+                        "transport_or_protocol"
+                    },
+                    error_detail = "<redacted>",
+                    business_impact = if should_retry {
+                        "the remote file list remains loading until the bounded retry runs"
+                    } else {
+                        "the remote file list could not be refreshed"
+                    },
+                    "远程文件列表加载失败"
+                );
+                if should_retry {
                     self.remote_load_retry_count += 1;
                     let attempt = self.remote_load_retry_count;
                     self.schedule_remote_load_retry(
@@ -544,6 +601,7 @@ impl SftpWorkspaceEntity {
                 true
             }
             SftpWorkerResult::RemoteList {
+                trace_id,
                 surface_id,
                 remote_id,
                 view_generation,
@@ -552,6 +610,7 @@ impl SftpWorkspaceEntity {
                 result,
             } => {
                 let outcome = self.apply_remote_list(
+                    trace_id,
                     surface_id,
                     remote_id,
                     view_generation,
@@ -645,6 +704,35 @@ impl SftpWorkspaceEntity {
             SftpWorkerResult::TransferProtocolResolved { id, protocol } => {
                 self.apply_transfer_protocol(id, protocol)
             }
+            SftpWorkerResult::RemoteMutationProgress {
+                key,
+                title,
+                completed,
+                total,
+            } => {
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id = %key,
+                    stage = "sftp.remote_operation.progress",
+                    completed,
+                    total,
+                    result = "running",
+                    business_impact = "the requested remote file operation is still in progress",
+                    "远程文件操作进度已送达工作区"
+                );
+                effects.push_back(SftpWorkspaceEffect::PluginProgress {
+                    key,
+                    notice: TerminalNotice {
+                        title,
+                        description: None,
+                        status_text: (total > 0).then(|| format!("{completed} / {total}")),
+                        progress: (total > 0).then(|| (completed as f32 / total as f32 * 100.0).clamp(0.0, 100.0)),
+                        variant: TerminalNoticeVariant::Default,
+                    },
+                    ttl: Duration::from_secs(30),
+                });
+                true
+            }
             SftpWorkerResult::TransferComplete {
                 remote_id,
                 transfer_id,
@@ -728,7 +816,28 @@ impl SftpWorkspaceEntity {
                 refresh_remote,
                 refresh_local,
                 toast,
+                progress_key,
             } => {
+                if let Some(trace_id) = progress_key.as_deref() {
+                    tracing::debug!(
+                        target: "oxideterm::audit",
+                        trace_id,
+                        stage = "sftp.remote_operation.complete",
+                        result = if result.is_ok() { "completed" } else { "failed" },
+                        refresh_remote,
+                        refresh_local,
+                        failure_detail_redacted = result.is_err(),
+                        business_impact = if result.is_ok() {
+                            "the requested remote file operation completed and affected listings will refresh"
+                        } else {
+                            "the requested remote file operation did not complete"
+                        },
+                        "远程文件操作已返回最终结果"
+                    );
+                }
+                if let Some(key) = progress_key {
+                    effects.push_back(SftpWorkspaceEffect::DismissPluginProgress { key });
+                }
                 match result {
                     Ok(()) => {
                         if let Some(toast) = toast {
@@ -826,12 +935,30 @@ impl SftpWorkspaceEntity {
                 result,
             } => self.apply_preview_hex_loaded(generation, &path, result, &error_prefix),
             SftpWorkerResult::PreviewSaved {
+                progress_key,
+                success_title,
+                error_title,
                 generation,
                 path,
                 content,
                 network_error_message,
                 result,
             } => {
+                let save_succeeded = result.is_ok();
+                effects.push_back(SftpWorkspaceEffect::DismissPluginProgress { key: progress_key });
+                effects.push_back(SftpWorkspaceEffect::Toast {
+                    title: if save_succeeded {
+                        success_title
+                    } else {
+                        error_title
+                    },
+                    description: None,
+                    variant: if save_succeeded {
+                        TerminalNoticeVariant::Success
+                    } else {
+                        TerminalNoticeVariant::Error
+                    },
+                });
                 let (changed, refresh_remote) = self.apply_preview_saved(
                     generation,
                     path,
@@ -1072,10 +1199,7 @@ impl WorkspaceApp {
         self.active_surface = ActiveSurface::Terminal;
         self.active_ssh_node_id = Some(node_id.clone());
         self.activate_sftp_view_for_node(tab_id, &node_id, cx);
-        let should_use_initial_path = self
-            .sftp_view
-            .read(cx)
-            .remote_loading;
+        let should_use_initial_path = self.sftp_view.read(cx).remote_loading;
         if should_use_initial_path
             && let Some(path) = initial_remote_path.filter(|path| !path.trim().is_empty())
         {
@@ -1341,7 +1465,11 @@ impl WorkspaceApp {
         if self.sftp_manually_closed_node_id.as_ref() == Some(node_id) {
             return;
         }
-        if self.sftp_tab_nodes.values().any(|tab_node| tab_node == node_id) {
+        if self
+            .sftp_tab_nodes
+            .values()
+            .any(|tab_node| tab_node == node_id)
+        {
             return;
         }
         self.open_sftp_files_for_node(node_id.clone(), cx);
@@ -1394,12 +1522,11 @@ impl WorkspaceApp {
         self.close_embedded_sftp_for_node(node_id, cx)
     }
 
-    pub(in crate::workspace) fn active_visible_ssh_node_id(
-        &self,
-        cx: &App,
-    ) -> Option<NodeId> {
+    pub(in crate::workspace) fn active_visible_ssh_node_id(&self, cx: &App) -> Option<NodeId> {
         let session_id = self.active_terminal_session_id(cx)?;
-        self.workspace_runtime.read(cx).ssh_terminal_node_id(session_id)
+        self.workspace_runtime
+            .read(cx)
+            .ssh_terminal_node_id(session_id)
     }
 
     /// Follows the visible SSH tab by switching only the sidebar projection.
@@ -1464,10 +1591,7 @@ impl WorkspaceApp {
         };
         if !already_active {
             self.sftp_view.update(cx, |sftp, cx| {
-                sftp.activate_following_view(
-                    SftpSurfaceId::Sidebar,
-                    SftpRemoteId::Node(node_id),
-                );
+                sftp.activate_following_view(SftpSurfaceId::Sidebar, SftpRemoteId::Node(node_id));
                 cx.notify();
             });
         }
@@ -1506,6 +1630,7 @@ impl WorkspaceApp {
             };
             (surface_id, remote_id)
         };
+        let trace_id = crate::logging::next_audit_trace_id();
         if !self.sftp_surface_is_visible(surface_id, &remote_id, cx) {
             // Activation optimistically flagged a load before this gate. If
             // the request never spawned, retire the flag: otherwise the panel
@@ -1513,6 +1638,15 @@ impl WorkspaceApp {
             // and the next visibility edge retries through this same entry.
             self.sftp_view
                 .update(cx, |sftp, _cx| sftp.retire_unstarted_remote_request());
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "sftp.list.admission",
+                result = "blocked",
+                reason = "the owning SFTP surface is not visible",
+                business_impact = "the optimistic loading state was retired without starting network work",
+                "远程文件列表请求未进入后端"
+            );
             return false;
         }
         if let SftpRemoteId::Node(node_id) = &remote_id {
@@ -1526,6 +1660,15 @@ impl WorkspaceApp {
                 // retire instead — the Ready edge restarts the load.
                 self.sftp_view
                     .update(cx, |sftp, _cx| sftp.retire_unstarted_remote_request());
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "sftp.list.admission",
+                    result = "blocked",
+                    reason = "the SSH node is not ready",
+                    business_impact = "the Ready lifecycle edge must request the listing again",
+                    "远程文件列表请求未进入后端"
+                );
                 return false;
             }
         }
@@ -1533,25 +1676,70 @@ impl WorkspaceApp {
             sftp.start_remote_load(surface_id, &remote_id)
         }) else {
             // A same-generation request is already running: a genuine no-op.
+            let (pending, inflight, generation) = {
+                let sftp = self.sftp_view.read(cx);
+                (
+                    sftp.remote_load_pending,
+                    sftp.remote_load_inflight,
+                    sftp.view_generation,
+                )
+            };
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "sftp.list.admission",
+                result = "coalesced",
+                pending,
+                inflight,
+                generation,
+                reason = "the current generation already owns a listing request",
+                business_impact = "no duplicate SFTP request was started",
+                "远程文件列表请求已合并到进行中的请求"
+            );
             return false;
         };
         let delivery = self.sftp_view.read(cx).worker_sender();
-        self.spawn_sftp_remote_load(surface_id, remote_id, path, view_generation, delivery);
+        self.spawn_sftp_remote_load(
+            trace_id,
+            surface_id,
+            remote_id,
+            path,
+            view_generation,
+            delivery,
+        );
         true
     }
 
     fn spawn_sftp_remote_load(
         &self,
+        trace_id: u64,
         surface_id: SftpSurfaceId,
         remote_id: SftpRemoteId,
         path: String,
         view_generation: u64,
         tx: delivery::ActiveDeliverySender<SftpWorkerResult>,
     ) {
+        let remote_kind = match &remote_id {
+            SftpRemoteId::Node(_) => "ssh_node",
+            SftpRemoteId::Standalone(_) => "standalone_sftp",
+        };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "sftp.list.request",
+            result = "accepted",
+            remote_kind,
+            view_generation,
+            path_character_count = path.chars().count(),
+            timeout_seconds = SFTP_REMOTE_LIST_TIMEOUT.as_secs(),
+            business_impact = "the remote file view entered its loading state",
+            "远程文件列表请求已进入后端"
+        );
         let session_id = format!("{}:sftp", remote_id.storage_key());
         let runtime = self.forwarding_runtime.clone();
         let Some(backend) = self.sftp_remote_backend(&remote_id) else {
             let _ = tx.send(SftpWorkerResult::RemoteList {
+                trace_id,
                 surface_id,
                 remote_id,
                 view_generation,
@@ -1564,9 +1752,26 @@ impl WorkspaceApp {
         let owner_backend = backend.clone();
         runtime.spawn(async move {
             // The visible surface creates one shared SFTP channel through its explicit owner.
-            let _ = owner_backend.acquire_sftp().await;
+            let started_at = Instant::now();
+            let result = tokio::time::timeout(SFTP_REMOTE_LIST_TIMEOUT, owner_backend.acquire_sftp())
+                .await;
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "sftp.shared_channel",
+                result = match &result {
+                    Ok(Ok(_)) => "ready",
+                    Ok(Err(_)) => "failed",
+                    Err(_) => "timed_out",
+                },
+                duration_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                error_detail = "<redacted>",
+                business_impact = "shared Host Tools SFTP capability initialization reached a bounded result",
+                "共享 SFTP 通道初始化完成"
+            );
         });
         runtime.spawn(async move {
+            let started_at = Instant::now();
             let result = match tokio::time::timeout(
                 SFTP_REMOTE_LIST_TIMEOUT,
                 load_remote_sftp_listing(backend, &path),
@@ -1576,7 +1781,18 @@ impl WorkspaceApp {
                 Ok(result) => result,
                 Err(_) => Err("SFTP listing timed out".to_string()),
             };
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "sftp.list.backend",
+                result = if result.is_ok() { "completed" } else { "failed" },
+                duration_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                error_detail = if result.is_ok() { "none" } else { "<redacted>" },
+                business_impact = "the remote file listing worker delivered a terminal result to the UI owner",
+                "远程文件列表后端任务已结束"
+            );
             let _ = tx.send(SftpWorkerResult::RemoteList {
+                trace_id,
                 surface_id,
                 remote_id,
                 view_generation,
@@ -1637,6 +1853,7 @@ impl WorkspaceApp {
                     view_generation,
                 } => {
                     self.spawn_sftp_remote_load(
+                        crate::logging::next_audit_trace_id(),
                         surface_id,
                         remote_id,
                         path,
@@ -1670,6 +1887,18 @@ impl WorkspaceApp {
                     variant,
                 } => {
                     self.push_sftp_toast(title, description, variant, cx);
+                }
+                SftpWorkspaceEffect::PluginProgress { key, notice, ttl } => {
+                    self.apply_workspace_overlay_intent(
+                        WorkspaceOverlayIntent::PluginProgress { key, notice, ttl },
+                        cx,
+                    );
+                }
+                SftpWorkspaceEffect::DismissPluginProgress { key } => {
+                    self.apply_workspace_overlay_intent(
+                        WorkspaceOverlayIntent::DismissPluginProgress { key },
+                        cx,
+                    );
                 }
                 SftpWorkspaceEffect::ReloadLocalDirectory {
                     view_generation,
@@ -2244,7 +2473,10 @@ mod remote_load_state_tests {
         sftp.remote_files = vec![cached_file("first.txt")];
 
         sftp.activate_following_view(SftpSurfaceId::Sidebar, second.clone());
-        assert!(sftp.start_remote_load(SftpSurfaceId::Sidebar, &second).is_some());
+        assert!(
+            sftp.start_remote_load(SftpSurfaceId::Sidebar, &second)
+                .is_some()
+        );
 
         sftp.activate_following_view(SftpSurfaceId::Sidebar, first.clone());
         assert_eq!(sftp.remote_files[0].name, "first.txt");
@@ -2253,7 +2485,10 @@ mod remote_load_state_tests {
         assert!(!sftp.remote_load_inflight);
 
         sftp.activate_following_view(SftpSurfaceId::Sidebar, third.clone());
-        assert!(sftp.start_remote_load(SftpSurfaceId::Sidebar, &third).is_some());
+        assert!(
+            sftp.start_remote_load(SftpSurfaceId::Sidebar, &third)
+                .is_some()
+        );
     }
 }
 
@@ -2284,8 +2519,7 @@ fn apply_tauri_transfer_progress(
         item.smoothed_speed = 0;
     }
     if speed > 0 {
-        item.smoothed_speed = (item.smoothed_speed as f64
-            * (1.0 - SFTP_TRANSFER_SPEED_EMA_ALPHA)
+        item.smoothed_speed = (item.smoothed_speed as f64 * (1.0 - SFTP_TRANSFER_SPEED_EMA_ALPHA)
             + speed as f64 * SFTP_TRANSFER_SPEED_EMA_ALPHA) as u64;
     }
     item.transferred = transferred;
@@ -2457,6 +2691,9 @@ mod tests {
             "Directory not found: /home/me/missing"
         ));
         assert!(!oxideterm_sftp::error_should_retry_initialization(
+            "SFTP subsystem not available: server disabled subsystem"
+        ));
+        assert!(oxideterm_sftp::error_is_sftp_protocol_unavailable(
             "SFTP subsystem not available: server disabled subsystem"
         ));
     }

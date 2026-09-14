@@ -16,7 +16,6 @@ use oxideterm_ssh::{AuthMethod, ProxyCommandConfig, UpstreamProxyAuth};
 
 use crate::ssh::proxy_command_runtime_policy;
 use crate::{
-    reconnect_max_attempts_from_settings, reconnect_timing_from_settings,
     sftp_runtime_settings_from_settings, terminal_backspace_sequence_from_connection,
     terminal_delete_sequence_from_connection, terminal_encoding_from_connection,
     terminal_encoding_from_settings,
@@ -69,18 +68,10 @@ fn runtime_settings_conversion_clamps_persisted_values() {
     settings.sftp.directory_parallelism = 0;
     settings.sftp.speed_limit_enabled = false;
     settings.sftp.speed_limit_kbps = 4096;
-    settings.reconnect.base_delay_ms = 0;
-    settings.reconnect.max_delay_ms = 0;
-    settings.reconnect.max_attempts = 0;
-
     let sftp = sftp_runtime_settings_from_settings(&settings);
     assert_eq!(sftp.max_concurrent_transfers, 1);
     assert_eq!(sftp.directory_parallelism, 1);
     assert_eq!(sftp.speed_limit_kbps, 0);
-    let reconnect = reconnect_timing_from_settings(&settings);
-    assert_eq!(reconnect.retry_base_delay.as_millis(), 1);
-    assert_eq!(reconnect.retry_max_delay.as_millis(), 1);
-    assert_eq!(reconnect_max_attempts_from_settings(&settings), 1);
     assert_eq!(
         terminal_encoding_from_settings(oxideterm_settings::TerminalEncoding::Gb18030),
         oxideterm_terminal::TerminalEncoding::Gb18030

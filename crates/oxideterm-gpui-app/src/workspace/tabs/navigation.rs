@@ -165,7 +165,25 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "session.tab.activate.request",
+            requested_tab_id = tab_id.0,
+            previous_tab_id = ?self.active_tab_id(cx).map(|id| id.0),
+            result = "received",
+            "用户请求切换到指定标签页"
+        );
         if self.focus_detached_tab_window(tab_id, cx) {
+            tracing::info!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.tab.activate.response",
+                requested_tab_id = tab_id.0,
+                result = "focused_detached_window",
+                "目标标签属于独立窗口，已切换窗口焦点"
+            );
             return;
         }
         if self
@@ -189,7 +207,40 @@ impl WorkspaceApp {
                 .is_some_and(|tab| is_terminal_tab_kind(&tab.kind));
             self.focus_active_tab_keyboard_owner(window, cx);
             self.reveal_active_tab(window, cx);
+            let active_session_id = self.active_terminal_session_id(cx);
+            let active_node_id = active_session_id.and_then(|session_id| {
+                ssh_node_id_for_terminal_session(
+                    session_id,
+                    self.workspace_runtime.read(cx).ssh_terminal_node_id(session_id),
+                    &self.ssh_nodes,
+                )
+            });
+            tracing::info!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.tab.activate.response",
+                requested_tab_id = tab_id.0,
+                active_tab_id = ?self.active_tab_id(cx).map(|id| id.0),
+                active_pane_id = ?self.active_pane_id(cx).map(|id| id.0),
+                active_session_id = ?active_session_id.map(|id| id.0),
+                active_node_id = ?active_node_id.as_ref().map(|id| id.0.as_str()),
+                host_tools_connection_id = ?self.host_tools.read(cx).selected_connection_id(),
+                result = if self.active_tab_id(cx) == Some(tab_id) { "activated" } else { "mismatch" },
+                business_impact = "可在同一条日志中核对可见标签、终端窗格、运行节点和主机工具归属",
+                "标签页切换已完成"
+            );
             cx.notify();
+        } else {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.tab.activate.response",
+                requested_tab_id = tab_id.0,
+                result = "rejected",
+                reason = "主窗口中不存在该标签",
+                business_impact = "原标签保持活动状态",
+                "标签页切换在改变界面前被拒绝"
+            );
         }
     }
 
@@ -261,17 +312,11 @@ impl WorkspaceApp {
             self.active_ssh_node_id = Some(node_id.clone());
             self.expanded_ssh_nodes.insert(node_id.clone());
         } else if let Some(active_tab) = self.active_tab(cx) {
-            // Utility tabs without an SSH node must not keep the previous
-            // terminal's node highlighted as if it were still selected.
-            if !matches!(
-                active_tab.kind,
-                TabKind::SshTerminal
-                    | TabKind::Telnet
-                    | TabKind::Serial
-                    | TabKind::Sftp
-                    | TabKind::Forwards
-                    | TabKind::RemoteDesktop
-            ) {
+            // SFTP and forwarding tabs may have established their owner in the
+            // kind-specific branch above. Every other unresolved tab must clear
+            // the prior SSH owner; retaining it makes Host Tools display the
+            // previous host when terminal registration is delayed or absent.
+            if !matches!(active_tab.kind, TabKind::Sftp | TabKind::Forwards) {
                 self.active_ssh_node_id = None;
             }
         } else {
@@ -289,6 +334,23 @@ impl WorkspaceApp {
                 self.sync_sftp_files_to_active_node(&node_id, cx);
             }
             self.sync_host_tools_connection_to_node(&node_id, cx);
+        } else {
+            let cleared = self.host_tools.update(cx, |host_tools, cx| {
+                host_tools.clear_selected_connection(cx)
+            });
+            if cleared {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id = crate::logging::next_audit_trace_id(),
+                    stage = "session.tab.host_tools",
+                    active_tab_id = ?self.active_tab_id(cx),
+                    result = "cleared",
+                    reason = "当前可见标签无法解析为 SSH 节点",
+                    business_impact = "主机工具已清空，不再显示其他主机残留数据",
+                    "当前标签没有主机工具归属"
+                );
+                self.sync_host_tools_lifecycle(cx);
+            }
         }
         self.activate_embedded_sftp_sidebar_if_visible(cx);
     }
@@ -299,6 +361,22 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let Some(connection_id) = self.node_router.connection_id_for_node(node_id) else {
+            let changed = self.host_tools.update(cx, |host_tools, cx| {
+                host_tools.clear_selected_connection(cx)
+            });
+            if changed {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id = crate::logging::next_audit_trace_id(),
+                    stage = "session.tab.host_tools",
+                    node_id = %node_id.0,
+                    result = "cleared",
+                    reason = "当前标签节点没有活动连接 ID",
+                    business_impact = "主机工具已清空，不再显示上一个标签的数据",
+                    "当前标签无法绑定主机工具连接"
+                );
+                self.sync_host_tools_lifecycle(cx);
+            }
             return;
         };
         let already_selected = self
@@ -309,21 +387,23 @@ impl WorkspaceApp {
         if already_selected {
             return;
         }
-        // Tab switches only retarget the host-tools connection; the regular
-        // lifecycle tick restarts samplers for the new connection. Running the
-        // full select_connection_for_active_tool here would force a profiler
-        // restart on every tab switch, janking the panel and leaving highlight
-        // animation behind.
+        tracing::info!(
+            target: "oxideterm::audit",
+            trace_id = crate::logging::next_audit_trace_id(),
+            stage = "session.tab.host_tools",
+            node_id = %node_id.0,
+            connection_id = %connection_id,
+            result = "retargeted",
+            business_impact = "主机工具将为当前可见终端标签重新启动工具快照",
+            "活动终端标签已切换主机工具归属"
+        );
         self.host_tools.update(cx, |host_tools, cx| {
-            host_tools.select_connection(
+            host_tools.select_connection_for_active_tool(
                 connection_id,
                 Some(browser_behavior::BrowserFocusOrigin::Pointer),
                 cx,
             );
         });
-        // Only retarget the connection; the periodic lifecycle tick re-samples
-        // for the new connection without forcing a profiler restart here.
-        self.sync_host_tools_lifecycle(cx);
     }
 
     /// Returns the SSH node backing the active tab, preferring the active
@@ -579,6 +659,7 @@ impl WorkspaceApp {
         }
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn request_disconnect_ssh_node(
         &mut self,
         node_id: &NodeId,

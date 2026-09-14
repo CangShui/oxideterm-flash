@@ -793,6 +793,22 @@ impl WorkspaceApp {
         launch: SftpTransferLaunch,
         tx: delivery::ActiveDeliverySender<SftpWorkerResult>,
     ) {
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id = crate::logging::next_audit_trace_id(),
+            stage = "sftp.transfer.request",
+            transfer_id = %launch.transfer_id,
+            direction = ?launch.direction,
+            is_directory = launch.is_directory,
+            remote_id = ?launch.remote_id,
+            local_path_character_count = launch.local_path.chars().count(),
+            remote_path_character_count = launch.remote_path.chars().count(),
+            resume_progress = launch.resume_progress.is_some(),
+            protocol_override = ?launch.protocol_override,
+            result = "accepted",
+            business_impact = "远程文件传输任务进入启动流程，路径内容不写入日志",
+            "SFTP 传输任务开始启动"
+        );
         self.spawn_sftp_transfer_task_with_sender(
             launch.id,
             launch.transfer_id,

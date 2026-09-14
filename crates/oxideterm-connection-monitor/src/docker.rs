@@ -85,18 +85,18 @@ const DOCKER_ERROR_MARKER: &str = "__OXIDE_DOCKER_ERROR__";
 const DOCKER_SAMPLE_COMMAND_UNIX: &str = concat!(
     "echo '===DOCKER==='; ",
     "if command -v docker >/dev/null 2>&1; then ",
-    "oxide_docker_ps=$(docker ps -a --no-trunc --format '",
+    "oxide_docker_ps=$(docker ps -a --no-trunc --size=false --format '",
     "{{json .}}",
     "' 2>&1); ",
     "oxide_docker_status=$?; ",
     "if [ \"$oxide_docker_status\" -ne 0 ]; then ",
-    "oxide_docker_ps=$(sudo -n docker ps -a --no-trunc --format '",
+    "oxide_docker_ps=$(sudo -n docker ps -a --no-trunc --size=false --format '",
     "{{json .}}",
     "' 2>&1); ",
     "oxide_docker_status=$?; ",
     "fi; ",
     "if [ \"$oxide_docker_status\" -eq 0 ]; then ",
-    "printf '%s\\n' \"$oxide_docker_ps\" | sed 's/^/PS\\t/'; ",
+    "printf '%s\\n' \"$oxide_docker_ps\" | while IFS= read -r oxide_line; do printf 'PS\\t%s\\n' \"$oxide_line\"; done; ",
     "oxide_docker_ids=$(docker ps -aq --no-trunc 2>/dev/null); ",
     "oxide_docker_ids_status=$?; ",
     "if [ \"$oxide_docker_ids_status\" -ne 0 ]; then ",
@@ -115,7 +115,7 @@ const DOCKER_SAMPLE_COMMAND_UNIX: &str = concat!(
     "oxide_docker_inspect_status=$?; ",
     "fi; ",
     "if [ \"$oxide_docker_inspect_status\" -eq 0 ]; then ",
-    "printf '%s\\n' \"$oxide_docker_inspect\" | sed 's/^/INSPECT\\t/'; ",
+    "printf '%s\\n' \"$oxide_docker_inspect\" | while IFS= read -r oxide_line; do printf 'INSPECT\\t%s\\n' \"$oxide_line\"; done; ",
     "fi; ",
     "fi; ",
     "else ",
@@ -130,7 +130,7 @@ const DOCKER_SAMPLE_COMMAND_UNIX: &str = concat!(
 const DOCKER_SAMPLE_COMMAND_WINDOWS: &str = concat!(
     "Write-Output '===DOCKER===';",
     "if(Get-Command docker -ErrorAction SilentlyContinue){",
-    "$oxideDockerPs=& docker ps -a --no-trunc --format '",
+    "$oxideDockerPs=& docker ps -a --no-trunc --size=false --format '",
     "{{json .}}",
     "' 2>&1;",
     "if($LASTEXITCODE -eq 0){",
@@ -162,6 +162,7 @@ pub fn parse_docker_snapshot(output: &str) -> ResourceDockerSnapshot {
     };
 
     let mut containers = Vec::new();
+    let mut unparsed_rows = 0usize;
     let mut inspect_by_id = HashMap::new();
     for line in section
         .lines()
@@ -188,7 +189,17 @@ pub fn parse_docker_snapshot(output: &str) -> ResourceDockerSnapshot {
         }
         if let Some(container) = parse_docker_container_line(line) {
             containers.push(container);
+        } else if line != "PS" {
+            unparsed_rows += 1;
         }
+    }
+    tracing::debug!(target: "oxideterm::audit", stage = "docker.sample.parse",
+        parsed_rows = containers.len(), unparsed_rows, inspect_rows = inspect_by_id.len(),
+        "Docker 采集解析完成，仅记录数量，不记录容器环境变量或命令输出");
+    if containers.is_empty() && unparsed_rows > 0 {
+        return ResourceDockerSnapshot { status: ResourceDockerStatus::Error {
+            message: "sidebar.host_docker.invalid_output".into(),
+        }, containers };
     }
     apply_docker_inspect_overrides(&mut containers, &inspect_by_id);
 
@@ -472,6 +483,47 @@ fn extract_section<'a>(output: &'a str, name: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn docker_sampling_uses_portable_prefixes_without_sed() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let temp = Temp(std::env::temp_dir().join(format!("docker-sample-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())));
+        std::fs::create_dir(&temp.0).unwrap();
+        let executable = temp.0.join("docker");
+        std::fs::write(&executable, concat!(
+            "#!/bin/sh\n",
+            "case \"$1 $2\" in\n",
+            " 'ps -a') printf '%s\\n' '{\"ID\":\"abc\",\"Names\":\"app\",\"Image\":\"image\",\"State\":\"running\",\"Status\":\"Up\"}' ;;\n",
+            " 'ps -aq') printf '%s\\n' abc ;;\n",
+            " 'inspect --format') printf '%s\\n' '{\"Id\":\"abc\",\"Name\":\"/app\",\"Config\":{\"Image\":\"image\"}}' ;;\n",
+            " *) exit 1 ;;\nesac\n"
+        )).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", docker_sample_command("Linux")])
+            .env("PATH", &temp.0).output().unwrap();
+        assert!(output.status.success());
+        let snapshot = parse_docker_snapshot(std::str::from_utf8(&output.stdout).unwrap());
+        assert_eq!(snapshot.status, ResourceDockerStatus::Available);
+        assert_eq!(snapshot.containers.len(), 1);
+        assert_eq!(snapshot.containers[0].name, "app");
+    }
+
+    #[test]
+    fn docker_invalid_output_is_not_reported_as_an_empty_daemon() {
+        let snapshot = parse_docker_snapshot("===DOCKER===\nPSt{\"ID\":\"abc\"}\n===DOCKER_END===");
+        assert!(matches!(snapshot.status, ResourceDockerStatus::Error { .. }));
+        let empty = parse_docker_snapshot("===DOCKER===\nPS\t\n===DOCKER_END===");
+        assert_eq!(empty.status, ResourceDockerStatus::Available);
+        assert!(empty.containers.is_empty());
+    }
+
     #[test]
     fn docker_parser_reads_container_rows() {
         let output = "===DOCKER===\nabc123def456\tweb\tnginx:alpine\trunning\tUp 2 minutes\t0.0.0.0:80->80/tcp\nfff111eee222\tdb\tpostgres:16\texited\tExited (0) 1 hour ago\t\n===DOCKER_END===";
@@ -601,6 +653,22 @@ mod tests {
 
         assert_eq!(visible_docker_rows(&snapshot.containers, "nginx").len(), 1);
         assert_eq!(visible_docker_rows(&snapshot.containers, "exited").len(), 1);
+    }
+
+    #[test]
+    fn docker_list_queries_explicitly_disable_size_including_sudo_and_windows() {
+        for os in ["Linux", "Windows"] {
+            let command = docker_sample_command(os);
+            let queries = command
+                .split("docker ps -a ")
+                .skip(1)
+                .collect::<Vec<_>>();
+            assert!(!queries.is_empty());
+            for query in queries {
+                let arguments = query.split([';', ')']).next().unwrap();
+                assert!(arguments.contains("--size=false"), "{os}: Docker list must not trigger filesystem size calculation");
+            }
+        }
     }
 
     #[test]

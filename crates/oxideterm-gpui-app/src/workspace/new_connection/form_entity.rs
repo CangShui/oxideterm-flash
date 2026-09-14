@@ -66,6 +66,8 @@ impl ConnectionFormState {
 
     pub(in crate::workspace) fn clear(&mut self) {
         // Dropping the form is the final UI boundary for all draft credentials.
+        let before = self.form.as_ref().map(super::audit::connection_form_audit_snapshot);
+        super::audit::audit_connection_form_transition(before.as_ref(), None);
         self.form = None;
         self.editing_saved_connection_id = None;
         self.editing_saved_connection_connect_after_save_node_id = None;

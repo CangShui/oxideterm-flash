@@ -53,7 +53,7 @@ pub(crate) enum ModemWorkerFailure {
     /// The worker thread disappeared before reporting a result.
     WorkerStopped,
     /// Protocol or filesystem failure; the detail stays diagnostic-only.
-    Transfer(String),
+    Transfer(#[allow(dead_code)] String),
 }
 
 #[derive(Clone, Debug)]

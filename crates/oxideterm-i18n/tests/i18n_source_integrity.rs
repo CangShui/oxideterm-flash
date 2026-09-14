@@ -13,7 +13,7 @@
 //! implements the same rules for manual and CI use.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const REQUIRED_LOCALES: [&str; 2] = ["en", "zh-CN"];
 /// Sentinel exercised by the fallback tests; never a real catalog key.

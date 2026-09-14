@@ -86,6 +86,15 @@ async fn sample_loop(
     mut stop_rx: oneshot::Receiver<()>,
 ) {
     if !gpu_os_supported(&os_type) {
+        tracing::warn!(
+            target: "oxideterm::audit",
+            trace_id = %format!("gpu-{}-{}", connection_id, now_ms()),
+            stage = "gpu.sample.validation",
+            connection_id,
+            os_type,
+            result = "unsupported",
+            "GPU/NPU 采样被拒绝：当前操作系统不在支持范围内"
+        );
         emit_snapshot(
             &update_tx,
             &connection_id,
@@ -102,6 +111,15 @@ async fn sample_loop(
     let mut shell = match open_gpu_shell(sampler.as_ref(), &os_type).await {
         Ok(shell) => shell,
         Err(error) => {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id = %format!("gpu-{}-{}", connection_id, now_ms()),
+                stage = "gpu.sample.channel",
+                connection_id,
+                result = "failed",
+                error_character_count = error.chars().count(),
+                "GPU/NPU 采样通道打开失败，错误正文未写入日志"
+            );
             emit_error(&update_tx, &connection_id, &error);
             return;
         }
@@ -119,6 +137,16 @@ async fn sample_loop(
                 break;
             }
             _ = interval.tick() => {
+                let trace_id = format!("gpu-{}-{}", connection_id, now_ms());
+                let started = std::time::Instant::now();
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "gpu.sample.request",
+                    connection_id,
+                    timeout_seconds = GPU_SAMPLE_TIMEOUT.as_secs(),
+                    "GPU/NPU 采样请求已进入远端工具执行"
+                );
                 match shell
                     .sample_until(
                         &command,
@@ -130,6 +158,19 @@ async fn sample_loop(
                 {
                     Ok(output) => {
                         let snapshot = parse_gpu_snapshot(&output, now_ms());
+                        tracing::info!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "gpu.sample.response",
+                            connection_id,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            status = gpu_status_name(&snapshot.status),
+                            device_count = snapshot.devices.len(),
+                            process_count = snapshot.processes.len(),
+                            output_bytes = output.len(),
+                            result = "completed",
+                            "GPU/NPU 采样完成，已解析设备与进程数量"
+                        );
                         let sampling_complete = matches!(
                             snapshot.status,
                             GpuSnapshotStatus::Unavailable | GpuSnapshotStatus::NoDevices
@@ -143,11 +184,31 @@ async fn sample_loop(
                         }
                     }
                     Err(error) => {
+                        tracing::warn!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "gpu.sample.response",
+                            connection_id,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            error_character_count = error.chars().count(),
+                            likely_timeout = error.to_ascii_lowercase().contains("timeout"),
+                            result = "failed",
+                            "GPU/NPU 采样失败，将重开受连接注册表管理的通道；错误正文未写入日志"
+                        );
                         emit_error(&update_tx, &connection_id, &error);
                         let _ = shell.close().await;
                         match open_gpu_shell(sampler.as_ref(), &os_type).await {
                             Ok(reopened) => shell = reopened,
                             Err(open_error) => {
+                                tracing::warn!(
+                                    target: "oxideterm::audit",
+                                    trace_id,
+                                    stage = "gpu.sample.channel",
+                                    connection_id,
+                                    error_character_count = open_error.chars().count(),
+                                    result = "failed",
+                                    "GPU/NPU 采样通道重开失败，本次页面采样任务停止"
+                                );
                                 emit_error(&update_tx, &connection_id, &open_error);
                                 break;
                             }
@@ -156,6 +217,17 @@ async fn sample_loop(
                 }
             }
         }
+    }
+}
+
+fn gpu_status_name(status: &GpuSnapshotStatus) -> &'static str {
+    match status {
+        GpuSnapshotStatus::Unknown => "unknown",
+        GpuSnapshotStatus::Available => "available",
+        GpuSnapshotStatus::NoDevices => "no_devices",
+        GpuSnapshotStatus::Unavailable => "tool_unavailable",
+        GpuSnapshotStatus::Unsupported => "os_unsupported",
+        GpuSnapshotStatus::Error(_) => "error",
     }
 }
 

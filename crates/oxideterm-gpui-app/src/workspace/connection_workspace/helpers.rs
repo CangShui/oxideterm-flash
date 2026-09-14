@@ -2,18 +2,22 @@ use super::*;
 use crate::workspace::session_icons::default_connection_transport_icon_id;
 
 
+#[allow(dead_code)]
 pub(super) fn theme_bg(color: u32, has_background: bool) -> Rgba {
     color_for_background(color, has_background, BG_ACTIVE_THEME_ALPHA)
 }
 
+#[allow(dead_code)]
 pub(super) fn theme_secondary_bg(color: u32, has_background: bool) -> Rgba {
     theme_bg(color, has_background)
 }
 
+#[allow(dead_code)]
 pub(super) fn theme_hover_bg(color: u32, has_background: bool) -> Rgba {
     color_for_background(color, has_background, BG_ACTIVE_HOVER_ALPHA)
 }
 
+#[allow(dead_code)]
 pub(super) fn theme_row_hover_bg(color: u32, has_background: bool) -> Rgba {
     // Full-width rows need a lower-contrast hover than compact buttons and menus.
     color_for_background_or_alpha(
@@ -28,6 +32,7 @@ pub(super) fn theme_input_bg(color: u32, has_background: bool) -> Rgba {
     color_for_background_or_alpha(color, has_background, BG_ACTIVE_THEME_ALPHA / 2, 0x80)
 }
 
+#[allow(dead_code)]
 pub(super) fn theme_border(color: u32, has_background: bool) -> Rgba {
     color_for_background(color, has_background, BG_ACTIVE_BORDER_ALPHA)
 }
@@ -36,6 +41,7 @@ pub(super) fn theme_border_half(color: u32, has_background: bool) -> Rgba {
     color_for_background_or_alpha(color, has_background, BG_ACTIVE_BORDER_HALF_ALPHA, 0x80)
 }
 
+#[allow(dead_code)]
 pub(super) fn parse_hex_color(value: &str) -> Option<u32> {
     let hex = value.trim().strip_prefix('#')?;
     let expanded;
@@ -103,7 +109,7 @@ pub(in crate::workspace) fn form_from_saved_connection(
     let (auth_tab, password, key_path, managed_key_id, cert_path, passphrase, save_password) =
         match conn.auth.conventional_fallback() {
             SavedAuth::Password {
-                keychain_id,
+                keychain_id: _,
                 plaintext_password,
             } => (
                 SshAuthTab::Password,
@@ -300,6 +306,7 @@ pub(in crate::workspace) fn restore_legacy_jump_host_in_form(
     form.proxy_chain_expanded = true;
 }
 
+#[allow(dead_code)]
 pub(super) fn form_from_standalone_sftp_profile(
     profile: &oxideterm_connections::StandaloneSftpProfile,
 ) -> NewConnectionForm {

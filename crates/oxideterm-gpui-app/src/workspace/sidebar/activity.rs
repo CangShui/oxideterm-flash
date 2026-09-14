@@ -162,7 +162,7 @@ impl WorkspaceApp {
         let tooltip_id = format!("activity-icon-{}", section.as_settings_key());
         let tooltip_id_for_move = tooltip_id.clone();
         let badge_count = 0u32;
-        let badge_is_error = false;
+        let _badge_is_error = false;
         let badge_color = theme.accent;
         let badge_text_color = theme.accent_text;
 

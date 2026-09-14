@@ -84,7 +84,7 @@ russh-sftp = { path = "crates/russh-sftp" }
 edition = "2024"
 license = "GPL-3.0-only"
 publish = false
-version = "1.0.1"
+version = "1.0.2"
 
 [workspace.dependencies]
 accesskit = "0.24.0"

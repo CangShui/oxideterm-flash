@@ -6,6 +6,10 @@
 //! The launcher only needs to enumerate and start distributions; it does not
 //! own any graphics session state, so these helpers stay free of VNC concerns.
 
+// The WSL helpers below are only reachable from the Windows platform layer, so
+// other targets legitimately see them as unused.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 use crate::model::WslDistro;
 
 #[cfg(target_os = "windows")]

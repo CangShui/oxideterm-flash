@@ -22,6 +22,7 @@ struct ConnectionFormModalSnapshot {
     key_path: String,
     managed_key_id: String,
     cert_path: String,
+    #[allow(dead_code)]
     save_password: bool,
     group: String,
     notes: String,

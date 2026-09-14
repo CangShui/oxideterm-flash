@@ -1,3 +1,5 @@
+mod audit;
+pub(super) use audit::audit_sync_document;
 mod entity;
 mod form_entity;
 mod form_state;
@@ -17,7 +19,7 @@ pub(super) use form_state::{
     SavedConnectionPromptAction, SshAuthTab,
     apply_transport_default_icon,
     apply_transport_default_remote_desktop_options,
-    form_from_remote_desktop_profile, form_from_serial_profile, form_from_telnet_profile,
+    form_from_remote_desktop_profile,
     identity_agent_from_form, identity_agent_selector, refresh_connection_timeout_seconds,
     refresh_identity_agent_availability, ssh_auth_tab_from_saved_auth,
     terminal_serial_flow_from_profile, terminal_serial_parity_from_profile,

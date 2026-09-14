@@ -3035,8 +3035,7 @@ impl WorkspaceApp {
             settings.connection_import_status = status;
             cx.notify();
         });
-        if imported > 0 {
-        }
+        if imported > 0 {}
     }
 
     pub(in crate::workspace) fn set_connection_import_source(
@@ -3044,6 +3043,15 @@ impl WorkspaceApp {
         source: ConnectionImportSource,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "settings.import.source",
+            source = ?source,
+            result = "accepted",
+            "用户选择了会话导入来源"
+        );
         self.settings_workspace.update(cx, |settings, cx| {
             settings.set_connection_import_source(source, cx);
         });
@@ -3058,6 +3066,15 @@ impl WorkspaceApp {
         format: SessionExportFormat,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "settings.export.format",
+            format = ?format,
+            result = "accepted",
+            "用户选择了会话导出格式"
+        );
         self.settings_workspace.update(cx, |settings, cx| {
             settings.set_session_export_format(format, cx);
         });
@@ -3069,6 +3086,16 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let source = self.settings_workspace.read(cx).connection_import_source();
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "settings.import.path_picker",
+            source = ?source,
+            directories,
+            result = "opened",
+            "用户请求选择会话导入文件或目录"
+        );
         let multiple = !directories && source != ConnectionImportSource::Termius;
         let prompt_key = if directories {
             "settings_view.connections.importers.choose_directory"
@@ -3100,13 +3127,31 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
         let Some((source, paths)) = self
             .settings_workspace
             .read(cx)
             .connection_import_preview_request()
         else {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "settings.import.preview",
+                result = "rejected",
+                reason = "没有可预览的导入来源或文件",
+                "会话导入预览请求未进入业务逻辑"
+            );
             return;
         };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "settings.import.preview",
+            source = ?source,
+            path_count = paths.len(),
+            result = "received",
+            "会话导入文件已选中，开始解析并生成预览"
+        );
         let existing_names = self
             .connection_store
             .connections()
@@ -3115,11 +3160,32 @@ impl WorkspaceApp {
             .collect::<HashSet<_>>();
         match preview_connection_import(source, &paths, &existing_names) {
             Ok(preview) => {
+                tracing::info!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "settings.import.preview",
+                    source = ?source,
+                    parsed_connection_count = preview.drafts.len(),
+                    importable = preview.importable,
+                    duplicates = preview.duplicates,
+                    warnings = preview.warnings,
+                    result = "completed",
+                    "会话导入预览解析完成"
+                );
                 self.settings_workspace.update(cx, |settings, cx| {
                     settings.apply_connection_import_preview(Ok(preview), cx);
                 });
             }
             Err(error) => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "settings.import.preview",
+                    source = ?source,
+                    result = "failed",
+                    error_kind = format!("{error:#}").chars().take(160).collect::<String>(),
+                    "会话导入预览解析失败"
+                );
                 let status = self
                     .i18n
                     .t("settings_view.connections.importers.preview_failed")
@@ -3155,15 +3221,43 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
         let Some(request) = self
             .settings_workspace
             .read(cx)
             .connection_import_apply_request()
         else {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "settings.import.apply",
+                result = "rejected",
+                reason = "没有可应用的导入预览",
+                "会话导入应用请求未进入业务逻辑"
+            );
             return;
         };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "settings.import.apply",
+            selected_draft_count = request.selected_draft_ids.len(),
+            result = "received",
+            "用户确认应用导入预览，开始写入会话存储"
+        );
         match apply_connection_import(&mut self.connection_store, request) {
             Ok(result) => {
+                tracing::info!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "settings.import.apply",
+                    imported = result.imported,
+                    skipped = result.skipped,
+                    renamed = result.renamed,
+                    error_count = result.errors.len(),
+                    result = "completed",
+                    "会话导入已写入存储"
+                );
                 let mut parts = Vec::new();
                 if result.imported > 0 {
                     parts.push(
@@ -3202,11 +3296,18 @@ impl WorkspaceApp {
                 self.settings_workspace.update(cx, |settings, cx| {
                     settings.set_connection_import_status(Some(status), cx);
                 });
-                if result.imported > 0 {
-                }
+                if result.imported > 0 {}
                 self.preview_settings_connection_import(cx);
             }
             Err(error) => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "settings.import.apply",
+                    result = "failed",
+                    error_kind = format!("{error:#}").chars().take(160).collect::<String>(),
+                    "会话导入写入存储失败"
+                );
                 let status = self
                     .i18n
                     .t("settings_view.connections.importers.apply_failed")
@@ -3284,6 +3385,7 @@ fn connection_import_supports_files(source: ConnectionImportSource) -> bool {
 
 pub(in crate::workspace) fn session_export_format_options() -> &'static [SessionExportFormat] {
     &[
+        SessionExportFormat::OxideEncrypted,
         SessionExportFormat::OxideTermJson,
         SessionExportFormat::SecureCrt,
         SessionExportFormat::Xshell,
@@ -3299,7 +3401,10 @@ pub(in crate::workspace) fn session_export_format_label(
     format: SessionExportFormat,
     i18n: &I18n,
 ) -> String {
-    i18n.t(&format!("settings_view.sessionio.export_format_{}", format.tag()))
+    i18n.t(&format!(
+        "settings_view.sessionio.export_format_{}",
+        format.tag()
+    ))
 }
 
 fn connection_import_supports_directory(source: ConnectionImportSource) -> bool {

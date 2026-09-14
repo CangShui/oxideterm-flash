@@ -49,6 +49,8 @@ pub struct SyncEnvelope {
     pub v: u32,
     pub kind: SyncEnvelopeKind,
     pub device: String,
+    #[serde(default, rename = "traceId", skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
     #[serde(rename = "tsMs")]
     pub ts_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,4 +105,37 @@ fn hex(bytes: &[u8]) -> String {
 
 pub fn new_device_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_envelope_roundtrip_preserves_trace_id() {
+        let envelope = SyncEnvelope {
+            v: SYNC_SCHEMA_VERSION,
+            kind: SyncEnvelopeKind::Snapshot,
+            device: "desktop".to_string(),
+            trace_id: Some("cloud-sync-desktop-42".to_string()),
+            ts_ms: 42,
+            data: Some(serde_json::json!({ "payload": "sealed" })),
+        };
+
+        let encoded = serde_json::to_string(&envelope).expect("serialize envelope");
+        let decoded: SyncEnvelope =
+            serde_json::from_str(&encoded).expect("deserialize envelope");
+
+        assert_eq!(decoded.trace_id.as_deref(), Some("cloud-sync-desktop-42"));
+    }
+
+    #[test]
+    fn legacy_sync_envelope_without_trace_id_remains_readable() {
+        let decoded: SyncEnvelope = serde_json::from_str(
+            r#"{"v":1,"kind":"request","device":"laptop","tsMs":7}"#,
+        )
+        .expect("deserialize legacy envelope");
+
+        assert_eq!(decoded.trace_id, None);
+    }
 }

@@ -109,7 +109,7 @@ fn apply_oxide_import_with_options_inner(
     // Parse and validate every selected profile resource before preparing or
     // committing connections. This keeps a bad late archive section from
     // leaving the connection half of the import on disk.
-    let serial_profiles_snapshot = serial_profiles_json
+    let mut serial_profiles_snapshot = serial_profiles_json
         .as_deref()
         .map(|snapshot_json| {
             serde_json::from_str::<SerialProfilesSyncSnapshot>(snapshot_json).map_err(|error| {
@@ -119,6 +119,11 @@ fn apply_oxide_import_with_options_inner(
             })
         })
         .transpose()?;
+    if let Some(snapshot) = serial_profiles_snapshot.as_mut() {
+        // Portable archives merge their contents; device-local tombstones that
+        // happen to be embedded must not delete profiles on the target device.
+        snapshot.tombstones.clear();
+    }
     if options.import_serial_profiles {
         for profile in serial_profiles_snapshot
             .as_ref()
@@ -132,7 +137,7 @@ fn apply_oxide_import_with_options_inner(
             })?;
         }
     }
-    let telnet_profiles_snapshot = telnet_profiles_json
+    let mut telnet_profiles_snapshot = telnet_profiles_json
         .as_deref()
         .map(|snapshot_json| {
             serde_json::from_str::<TelnetProfilesSyncSnapshot>(snapshot_json).map_err(|error| {
@@ -142,6 +147,9 @@ fn apply_oxide_import_with_options_inner(
             })
         })
         .transpose()?;
+    if let Some(snapshot) = telnet_profiles_snapshot.as_mut() {
+        snapshot.tombstones.clear();
+    }
     if options.import_telnet_profiles {
         for profile in telnet_profiles_snapshot
             .as_ref()
@@ -155,7 +163,7 @@ fn apply_oxide_import_with_options_inner(
             })?;
         }
     }
-    let standalone_sftp_profiles_snapshot = standalone_sftp_profiles_json
+    let mut standalone_sftp_profiles_snapshot = standalone_sftp_profiles_json
         .as_deref()
         .map(|snapshot_json| {
             serde_json::from_str::<StandaloneSftpProfilesSyncSnapshot>(snapshot_json).map_err(
@@ -167,6 +175,9 @@ fn apply_oxide_import_with_options_inner(
             )
         })
         .transpose()?;
+    if let Some(snapshot) = standalone_sftp_profiles_snapshot.as_mut() {
+        snapshot.tombstones.clear();
+    }
     if options.import_standalone_sftp_profiles {
         for profile in standalone_sftp_profiles_snapshot
             .as_ref()
@@ -192,6 +203,9 @@ fn apply_oxide_import_with_options_inner(
             )
         })
         .transpose()?;
+    if let Some(snapshot) = remote_desktop_profiles_snapshot.as_mut() {
+        snapshot.tombstones.clear();
+    }
     if options.import_remote_desktop_profiles {
         for profile in remote_desktop_profiles_snapshot
             .as_ref()
@@ -652,6 +666,7 @@ fn encrypted_connection_to_saved(
     let forward_records = import_forwards(&id, conn.forwards);
     let mut options = conn.options;
     options.jump_host = None;
+    options.normalize_remote_path_favorites();
     let now = Utc::now();
     Ok((
         SavedConnection {
@@ -1094,6 +1109,16 @@ fn merge_options(
     if !imported.terminal.inherits_application_defaults() {
         // Explicit imported host overrides replace the destination defaults as one unit.
         existing.terminal = imported.terminal;
+    }
+    for favorite in imported.remote_path_favorites {
+        if existing
+            .remote_path_favorites
+            .iter()
+            .all(|candidate| candidate.path != favorite.path)
+            && existing.remote_path_favorites.len() < crate::store::MAX_REMOTE_PATH_FAVORITES
+        {
+            existing.remote_path_favorites.push(favorite);
+        }
     }
     if imported_has_proxy_chain {
         existing.jump_host = None;

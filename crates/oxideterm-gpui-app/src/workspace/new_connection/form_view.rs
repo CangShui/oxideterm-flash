@@ -16,14 +16,15 @@ use super::{
         SshAuthFamily, SshAuthTab, SshKeyAuthSource, TELNET_DEFAULT_PORT_TEXT,
         VNC_DEFAULT_PORT_TEXT, apply_remote_desktop_vnc_preference, apply_transport_default_port,
         apply_transport_default_username, auth_family_from_tab, auth_tab_from_key_source,
-        backspace_current_connection_field, clear_connection_selection,
-        clear_current_connection_field, connection_field_is_selected,
+        audit_connection_form_transition, backspace_current_connection_field,
+        clear_connection_selection, clear_current_connection_field, connection_field_is_selected,
         connection_icon_field_visible, connection_secret_field_visible, current_connection_field,
         default_auth_tab_for_family, insert_text_into_current_connection_field,
-        key_source_from_tab, new_connection_form_mode, next_connection_field,
-        next_jump_connection_field, next_standalone_sftp_field, remote_desktop_feature_selected,
-        remote_desktop_feature_supported, remote_desktop_vnc_preference_selected,
-        select_current_connection_field, text_from_keystroke,
+        connection_form_audit_snapshot, key_source_from_tab, new_connection_form_mode,
+        next_connection_field, next_jump_connection_field, next_standalone_sftp_field,
+        remote_desktop_feature_selected, remote_desktop_feature_supported,
+        remote_desktop_vnc_preference_selected, select_current_connection_field,
+        text_from_keystroke,
         toggle_connection_secret_field_visibility, toggle_remote_desktop_feature,
     },
     ssh_flow::SshConnectionIntent,
@@ -187,8 +188,9 @@ impl WorkspaceApp {
             let Some(form) = connection_flow.form.form.as_mut() else {
                 return (ConnectionFormKeyResult::NotHandled, false);
             };
+            let before = connection_form_audit_snapshot(form);
             if !form.field_focused {
-                return match key {
+                let result = match key {
                     "escape" if form.jump_server_form.is_some() => {
                         (ConnectionFormKeyResult::CloseJumpForm, false)
                     }
@@ -204,6 +206,9 @@ impl WorkspaceApp {
                     }
                     _ => (ConnectionFormKeyResult::Handled, false),
                 };
+                let after = connection_form_audit_snapshot(form);
+                audit_connection_form_transition(Some(&before), Some(&after));
+                return result;
             }
 
             let password_uses_saved_value = saved_connection_form_uses_unloaded_secret
@@ -211,12 +216,16 @@ impl WorkspaceApp {
                 && !form.password_loaded;
             if password_uses_saved_value {
                 if uses_text_edit_modifier && key == "v" {
+                    let after = connection_form_audit_snapshot(form);
+                    audit_connection_form_transition(Some(&before), Some(&after));
                     return (ConnectionFormKeyResult::Paste, false);
                 }
                 if text_input.is_some() || key == "space" {
                     // The protected value stays in the keychain; only new input becomes UI-owned.
                     form.password_loaded = true;
                 } else if !matches!(key, "escape" | "enter" | "tab") {
+                    let after = connection_form_audit_snapshot(form);
+                    audit_connection_form_transition(Some(&before), Some(&after));
                     return (ConnectionFormKeyResult::Handled, false);
                 }
             }
@@ -269,16 +278,22 @@ impl WorkspaceApp {
                         form.error = None;
                         show_caret = true;
                     }
-                    "v" => return (ConnectionFormKeyResult::Paste, false),
+                    "v" => {
+                        let after = connection_form_audit_snapshot(form);
+                        audit_connection_form_transition(Some(&before), Some(&after));
+                        return (ConnectionFormKeyResult::Paste, false);
+                    }
                     _ => {}
                 }
                 if show_caret {
                     cx.notify();
                 }
+                let after = connection_form_audit_snapshot(form);
+                audit_connection_form_transition(Some(&before), Some(&after));
                 return (ConnectionFormKeyResult::Handled, show_caret);
             }
 
-            match key {
+            let result = match key {
                 "escape" if form.jump_server_form.is_some() => {
                     (ConnectionFormKeyResult::CloseJumpForm, false)
                 }
@@ -343,7 +358,10 @@ impl WorkspaceApp {
                         (ConnectionFormKeyResult::Handled, false)
                     }
                 }
-            }
+            };
+            let after = connection_form_audit_snapshot(form);
+            audit_connection_form_transition(Some(&before), Some(&after));
+            result
         });
 
         if show_caret {

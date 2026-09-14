@@ -425,7 +425,11 @@ impl WorkspaceApp {
         if editing {
             // The sidebar uses one compact text field instead of the full breadcrumb row.
             // If the draft input is empty, seed it with the current path so it never displays blank.
-            let active_input = if path_input.is_empty() { path } else { path_input };
+            let active_input = if path_input.is_empty() {
+                path
+            } else {
+                path_input
+            };
             path_bar = path_bar
                 .child(self.render_sftp_inline_text(
                     SftpInput::RemotePath,
@@ -1034,44 +1038,18 @@ impl WorkspaceApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.sftp_view.update(cx, |sftp, cx| {
-                        let mut changed = false;
-                        if sftp.active_pane != pane {
-                            sftp.active_pane = pane;
-                            changed = true;
-                        }
-                        if editing || event.click_count >= 2 {
-                            match pane {
-                                SftpPane::Local => {
-                                    if !sftp.editing_local_path {
-                                        sftp.editing_local_path = true;
-                                        changed = true;
-                                    }
-                                    if sftp.local_path_input != sftp.local_path {
-                                        sftp.local_path_input.clone_from(&sftp.local_path);
-                                        changed = true;
-                                    }
-                                }
-                                SftpPane::Remote => {
-                                    if !sftp.editing_remote_path {
-                                        sftp.editing_remote_path = true;
-                                        changed = true;
-                                    }
-                                    if sftp.remote_path_input != sftp.remote_path {
-                                        sftp.remote_path_input.clone_from(&sftp.remote_path);
-                                        changed = true;
-                                    }
-                                }
+                    if pane == SftpPane::Remote || editing || event.click_count >= 2 {
+                        // Remote path favorites are part of the path-input
+                        // experience, so one click opens the editor and its list.
+                        this.start_sftp_path_edit(pane, cx);
+                    } else {
+                        this.sftp_view.update(cx, |sftp, cx| {
+                            if sftp.active_pane != pane {
+                                sftp.active_pane = pane;
+                                cx.notify();
                             }
-                            if sftp.focused_input != Some(input) {
-                                sftp.focused_input = Some(input);
-                                changed = true;
-                            }
-                        }
-                        if changed {
-                            cx.notify();
-                        }
-                    });
+                        });
+                    }
                     cx.stop_propagation();
                 }),
             );

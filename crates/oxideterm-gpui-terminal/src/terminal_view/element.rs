@@ -608,6 +608,7 @@ impl TerminalElement {
         self
     }
 
+    #[allow(dead_code)]
     pub(crate) fn ghost_text(mut self, ghost_text: Option<String>) -> Self {
         self.ghost_text = ghost_text;
         self

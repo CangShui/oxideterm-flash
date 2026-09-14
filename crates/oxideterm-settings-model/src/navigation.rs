@@ -209,7 +209,7 @@ pub fn settings_tab_section_count(
         SettingsTab::Network => 2,
         SettingsTab::Sftp => 3,
         SettingsTab::CloudSync => 1,
-        SettingsTab::SessionIO => 2,
+        SettingsTab::SessionIO => 3,
         SettingsTab::Help => 6,
     }
 }
@@ -220,7 +220,6 @@ pub fn terminal_settings_section_count(page: TerminalSettingsPage) -> usize {
         TerminalSettingsPage::Input => 1,
         TerminalSettingsPage::Local => 3,
         TerminalSettingsPage::CommandBar => 3,
-        TerminalSettingsPage::Awareness => 2,
         TerminalSettingsPage::Transfer => 1,
         TerminalSettingsPage::Highlight => 1,
     };

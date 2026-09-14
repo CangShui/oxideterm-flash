@@ -29,7 +29,6 @@ pub enum TerminalSettingsPage {
     Input,
     Local,
     CommandBar,
-    Awareness,
     Transfer,
     Highlight,
 }
@@ -52,19 +51,10 @@ pub enum SettingsSelect {
     TerminalBackspaceSequence,
     TerminalDeleteSequence,
     TerminalCursorStyle,
-    TerminalTriggerMatchMode,
-    TerminalTriggerAction,
-    TerminalTriggerProcessMode,
-    TerminalTriggerQuickCommand,
-    TerminalTriggerTiming,
-    TerminalTriggerScope,
     CloudSyncMode,
     LocalShell,
     LocalShellSemanticScheme(usize),
     ConnectionIdleTimeout,
-    ReconnectMaxAttempts,
-    ReconnectBaseDelay,
-    ReconnectMaxDelay,
     NetworkApplicationProxyMode,
     NetworkProxyProtocol,
     NetworkProxyAuth,
@@ -119,15 +109,6 @@ pub enum SettingsInput {
     InBandTransferMaxTotalBytes,
     TerminalCommandBarFocusHandoff,
     TerminalCommandSpecsJson,
-    TerminalTriggerName,
-    TerminalTriggerDescription,
-    TerminalTriggerPattern,
-    TerminalTriggerActionValue,
-    TerminalTriggerExecutable,
-    TerminalTriggerArguments,
-    TerminalTriggerWorkingDirectory,
-    TerminalTriggerDelayMs,
-    TerminalTriggerCooldownMs,
     SemanticSchemeName,
     SemanticSchemeRulePattern(usize),
     SemanticSchemeRuleCapture(usize),
@@ -165,7 +146,6 @@ impl TerminalSettingsPage {
             Self::Input,
             Self::Local,
             Self::CommandBar,
-            Self::Awareness,
             Self::Transfer,
             Self::Highlight,
         ]
@@ -177,7 +157,6 @@ impl TerminalSettingsPage {
             Self::Input => "settings_view.terminal.page_input",
             Self::Local => "settings_view.terminal.page_local",
             Self::CommandBar => "settings_view.terminal.page_commandBar",
-            Self::Awareness => "settings_view.terminal.page_awareness",
             Self::Transfer => "settings_view.terminal.page_transfer",
             Self::Highlight => "settings_view.terminal.page_highlight",
         }
@@ -298,7 +277,6 @@ impl SettingsInput {
             self,
             Self::TerminalCommandBarFocusHandoff
                 | Self::TerminalCommandSpecsJson
-                | Self::TerminalTriggerArguments
                 | Self::ManagedKeyPastePrivateKey
         )
     }
@@ -308,7 +286,6 @@ impl SettingsInput {
         // converts them to concrete units at the view boundary.
         match self {
             Self::TerminalCommandBarFocusHandoff | Self::TerminalCommandSpecsJson => 20.0,
-            Self::TerminalTriggerArguments => 20.0,
             Self::ManagedKeyPastePrivateKey => 20.0,
             _ => DEFAULT_SETTINGS_TEXTAREA_LINE_HEIGHT,
         }
@@ -348,15 +325,6 @@ impl SettingsInput {
             Self::InBandTransferMaxTotalBytes => 15,
             Self::TerminalCommandBarFocusHandoff => 16,
             Self::TerminalCommandSpecsJson => 17,
-            Self::TerminalTriggerName => 33_100,
-            Self::TerminalTriggerDescription => 33_101,
-            Self::TerminalTriggerPattern => 33_102,
-            Self::TerminalTriggerActionValue => 33_103,
-            Self::TerminalTriggerExecutable => 33_104,
-            Self::TerminalTriggerArguments => 33_105,
-            Self::TerminalTriggerWorkingDirectory => 33_106,
-            Self::TerminalTriggerDelayMs => 33_107,
-            Self::TerminalTriggerCooldownMs => 33_108,
             Self::SemanticSchemeName => 10_300,
             Self::SemanticSchemeRulePattern(index) => 10_400 + index as u64,
             Self::SemanticSchemeRuleCapture(index) => 10_500 + index as u64,
@@ -379,8 +347,7 @@ impl SettingsInput {
     pub fn is_secret(self) -> bool {
         matches!(
             self,
-            |Self::ManagedKeyFilePassphrase
-                | Self::ManagedKeyPastePrivateKey
+            |Self::ManagedKeyFilePassphrase| Self::ManagedKeyPastePrivateKey
                 | Self::ManagedKeyPastePassphrase
                 | Self::NetworkProxyPassword
         )

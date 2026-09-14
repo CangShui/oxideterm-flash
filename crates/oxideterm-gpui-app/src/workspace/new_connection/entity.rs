@@ -400,11 +400,14 @@ impl ConnectionFlowEntity {
         let Some(form) = self.form.form.as_mut() else {
             return false;
         };
+        let before = super::audit::connection_form_audit_snapshot(form);
         if let Some(pending) = pending {
             form.pending = pending;
         }
         form.success_feedback_message = None;
         form.error = error;
+        let after = super::audit::connection_form_audit_snapshot(form);
+        super::audit::audit_connection_form_transition(Some(&before), Some(&after));
         cx.notify();
         true
     }
@@ -417,9 +420,12 @@ impl ConnectionFlowEntity {
         let Some(form) = self.form.form.as_mut() else {
             return false;
         };
+        let before = super::audit::connection_form_audit_snapshot(form);
         form.pending = false;
         form.error = Some(message.clone());
         form.success_feedback_message = Some(message);
+        let after = super::audit::connection_form_audit_snapshot(form);
+        super::audit::audit_connection_form_transition(Some(&before), Some(&after));
         cx.notify();
         true
     }
@@ -430,6 +436,11 @@ impl ConnectionFlowEntity {
         selection: impl std::future::Future<Output = Option<String>> + 'static,
         cx: &mut Context<Self>,
     ) -> bool {
+        let trace_id = self.form.form.as_ref().map(|form| form.audit_trace_id);
+        tracing::debug!(target: "oxideterm::audit", trace_id,
+            stage = "session.form.path_picker.request", field = ?field,
+            blocked = self.path_picker_task.is_some(),
+            "收到文件选择请求，已有选择窗口时拒绝重复打开");
         if self.path_picker_task.is_some() {
             return false;
         }
@@ -437,6 +448,11 @@ impl ConnectionFlowEntity {
         self.path_picker_task = Some(cx.spawn(async move |connection_flow, cx| {
             let selected_path = selection.await;
             let _ = connection_flow.update(cx, |connection_flow, cx| {
+                tracing::debug!(target: "oxideterm::audit", trace_id,
+                    stage = "session.form.path_picker.response", field = ?field,
+                    selected = selected_path.is_some(),
+                    form_exists = connection_flow.form.form.is_some(),
+                    "文件选择窗口返回，取消或表单已关闭时不改写输入框，路径不写入日志");
                 connection_flow.path_picker_task = None;
                 let Some(path) = selected_path else {
                     return;
@@ -444,6 +460,7 @@ impl ConnectionFlowEntity {
                 let Some(form) = connection_flow.form.form.as_mut() else {
                     return;
                 };
+                let before = super::audit::connection_form_audit_snapshot(form);
                 match field {
                     NewConnectionField::KeyPath => form.key_path = path,
                     NewConnectionField::CertPath => form.cert_path = path,
@@ -465,6 +482,8 @@ impl ConnectionFlowEntity {
                 form.field_focused = true;
                 form.error = None;
                 clear_connection_selection(form);
+                let after = super::audit::connection_form_audit_snapshot(form);
+                super::audit::audit_connection_form_transition(Some(&before), Some(&after));
                 cx.notify();
             });
         }));
@@ -502,8 +521,11 @@ impl ConnectionFlowEntity {
         };
         self.form.jump_server_exit_commits = commit;
         if let Some(form) = self.form.form.as_mut() {
+            let before = super::audit::connection_form_audit_snapshot(form);
             form.field_focused = false;
             form.selected_field = None;
+            let after = super::audit::connection_form_audit_snapshot(form);
+            super::audit::audit_connection_form_transition(Some(&before), Some(&after));
         }
         self.jump_server_exit_task = None;
         if delay.is_zero() {
@@ -527,6 +549,7 @@ impl ConnectionFlowEntity {
         self.jump_server_exit_task = None;
         let commit = std::mem::take(&mut self.form.jump_server_exit_commits);
         if let Some(form) = self.form.form.as_mut() {
+            let before = super::audit::connection_form_audit_snapshot(form);
             if let Some(jump_server) = form.jump_server_form.take() {
                 let edit_index = form.jump_server_edit_index.take();
                 let proxy_hops = match form.jump_server_target {
@@ -560,6 +583,8 @@ impl ConnectionFlowEntity {
             // a lingering Jump* focus would route later Tab or typing into a
             // missing field owner and panic.
             super::form_state::clear_stale_jump_field_focus(form);
+            let after = super::audit::connection_form_audit_snapshot(form);
+            super::audit::audit_connection_form_transition(Some(&before), Some(&after));
         }
         self.form.jump_server_presence.reopen();
         cx.notify();

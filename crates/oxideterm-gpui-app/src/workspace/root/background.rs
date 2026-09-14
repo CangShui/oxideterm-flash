@@ -171,6 +171,7 @@ pub(in crate::workspace) fn default_session_tree_path() -> PathBuf {
         .join("session_tree.json")
 }
 
+#[allow(dead_code)]
 pub(in crate::workspace) fn default_ai_conversations_path() -> PathBuf {
     default_settings_path()
         .parent()

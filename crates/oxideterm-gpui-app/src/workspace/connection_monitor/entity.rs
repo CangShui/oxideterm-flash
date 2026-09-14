@@ -27,6 +27,7 @@ pub(in crate::workspace) struct HostToolsEntity {
     pub(in crate::workspace) ui: HostToolsUiState,
     pub(super) host_process_actions: HostProcessActionsState,
     pub(super) host_docker_operations: HostDockerOperationsState,
+    pub(super) docker_audit_signature: std::cell::Cell<Option<u64>>,
     pub(super) host_services: HostServicesState,
     pub(super) host_tmux: HostTmuxState,
     pub(super) host_gpu: HostGpuViewState,
@@ -68,6 +69,7 @@ pub(in crate::workspace) struct HostToolsEntity {
 }
 
 impl HostToolsEntity {
+    #[allow(dead_code)]
     pub(in crate::workspace) fn execute_ai_action(
         &mut self,
         connection_id: String,
@@ -315,6 +317,7 @@ impl HostToolsEntity {
             ui: HostToolsUiState::new(),
             host_process_actions: HostProcessActionsState::new(),
             host_docker_operations: HostDockerOperationsState::new(),
+            docker_audit_signature: std::cell::Cell::new(None),
             host_services: HostServicesState::new(),
             host_tmux: HostTmuxState::new(),
             host_gpu: HostGpuViewState::new(gpu_update_tx),
@@ -1237,6 +1240,20 @@ impl HostToolsEntity {
         selected
     }
 
+    pub(in crate::workspace) fn clear_selected_connection(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.selected_connection_id.take().is_some();
+        self.selector_open = false;
+        self.selector_highlighted_index = None;
+        self.selector_focus_origin = None;
+        if changed {
+            cx.notify();
+        }
+        changed
+    }
+
     pub(in crate::workspace) fn ensure_selected_connection(
         &mut self,
         live_connection_ids: &[String],
@@ -1542,6 +1559,24 @@ mod tests {
     };
     use oxideterm_ssh::{RemoteEnvInfo, SshCommandOutput};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[gpui::test]
+    fn clearing_unresolved_tab_owner_removes_previous_host_tools_connection(
+        cx: &mut TestAppContext,
+    ) {
+        let registry = SshConnectionRegistry::new(ConnectionPoolConfig::default());
+        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::unbounded_channel();
+        let entity =
+            cx.new(|cx| HostToolsEntity::new(profiler_update_tx, profiler_update_rx, registry, cx));
+
+        entity.update(cx, |entity, cx| {
+            entity.select_connection("previous-host".to_string(), None, cx);
+            assert_eq!(entity.selected_connection_id(), Some("previous-host"));
+            assert!(entity.clear_selected_connection(cx));
+            assert_eq!(entity.selected_connection_id(), None);
+            assert!(!entity.clear_selected_connection(cx));
+        });
+    }
 
     struct VisibilityCountingSampler {
         shell_open_count: Arc<AtomicUsize>,

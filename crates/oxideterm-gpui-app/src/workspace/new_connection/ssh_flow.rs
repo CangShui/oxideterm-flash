@@ -19,7 +19,7 @@ use oxideterm_remote_desktop::{
 use oxideterm_ssh::{
     AuthMethod, ConnectionConsumer, HostKeyStatus, KeyboardInteractivePromptRequest,
     KeyboardInteractiveResponses, NativeSessionTreeConnectAction, NativeSessionTreeConnectEndpoint,
-    NativeSessionTreeConnectPlan, NativeSessionTreeConnectStep, NodeId, NodeReadiness,
+    NativeSessionTreeConnectPlan, NativeSessionTreeConnectStep, NodeId,
     NodeTreeExpansion, ProxyHopConfig, SshConfig, SshPromptError, SshPromptHandler,
     SshTransportClient, UpstreamProxyAuth, UpstreamProxyConfig, UpstreamProxyProtocol,
     X11ForwardPolicy, X11ForwardTrust, check_host_key_with_route,
@@ -33,8 +33,9 @@ use super::{
         NewConnectionForm, NewConnectionFormMode, NewConnectionProxyHop,
         NewConnectionSubmitAction, NewConnectionTransport, NewConnectionUpstreamProxyAuth,
         NewConnectionUpstreamProxyPolicy, SavedConnectionPromptAction, SshAuthTab,
-        StandaloneSftpSecondaryForm, connection_timeout_drafts_valid, identity_agent_from_form,
-        identity_agent_selector, ssh_auth_tab_from_saved_auth,
+        StandaloneSftpSecondaryForm, audit_connection_form_transition,
+        connection_timeout_drafts_valid, connection_form_audit_snapshot,
+        identity_agent_from_form, identity_agent_selector, ssh_auth_tab_from_saved_auth,
     },
     host_key_dialog::HostKeyChallenge,
 };
@@ -339,13 +340,32 @@ impl WorkspaceApp {
     }
 
     /// Applies one UI transition inside the form entity and schedules its repaint.
+    #[track_caller]
     pub(in crate::workspace) fn update_connection_form_state<R>(
         &self,
         cx: &mut App,
         update: impl FnOnce(&mut super::ConnectionFormState) -> R,
     ) -> R {
+        let caller = std::panic::Location::caller();
         self.connection_flow.update(cx, |connection_flow, cx| {
+            tracing::debug!(target: "oxideterm::audit",
+                trace_id = connection_flow.form.form.as_ref().map(|form| form.audit_trace_id),
+                stage = "session.form.operation", source_file = caller.file(), source_line = caller.line(),
+                selected_control = ?connection_flow.form.open_select,
+                mode = ?connection_flow.form.mode(),
+                "会话表单操作到达，包括不改变字段值的重复点击或选择");
+            let before = connection_flow
+                .form
+                .form
+                .as_ref()
+                .map(connection_form_audit_snapshot);
             let result = update(&mut connection_flow.form);
+            let after = connection_flow
+                .form
+                .form
+                .as_ref()
+                .map(connection_form_audit_snapshot);
+            audit_connection_form_transition(before.as_ref(), after.as_ref());
             cx.notify();
             result
         })
@@ -362,7 +382,10 @@ impl WorkspaceApp {
             cx.notify();
             form
         });
+        let before = form.as_ref().map(connection_form_audit_snapshot);
         let result = update(self, form.as_mut(), cx);
+        let after = form.as_ref().map(connection_form_audit_snapshot);
+        audit_connection_form_transition(before.as_ref(), after.as_ref());
         self.connection_flow.update(cx, |connection_flow, cx| {
             debug_assert!(
                 connection_flow.form.form.is_none(),

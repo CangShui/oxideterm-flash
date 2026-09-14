@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(dead_code)]
 pub(in crate::workspace) fn active_session_readiness(
     readiness: &NodeReadiness,
 ) -> ActiveSessionReadiness {

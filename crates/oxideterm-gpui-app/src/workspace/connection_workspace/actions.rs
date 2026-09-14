@@ -1,6 +1,6 @@
 use super::*;
 use crate::workspace::new_connection::{
-    NewConnectionTransport, terminal_serial_flow_from_profile, terminal_serial_parity_from_profile,
+    terminal_serial_flow_from_profile, terminal_serial_parity_from_profile,
 };
 use oxideterm_gpui_terminal::TerminalNoticeVariant;
 use oxideterm_remote_desktop::{

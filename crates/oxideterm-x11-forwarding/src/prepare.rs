@@ -3,7 +3,7 @@
 
 use std::{
     fmt,
-    path::{Path, PathBuf},
+    path::Path,
     process::Stdio,
     time::Duration,
 };

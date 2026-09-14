@@ -237,12 +237,10 @@ fn sanitize_component(component: &str) -> Result<String, TrzszError> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use tempfile::tempdir;
 
     use super::{
-        build_download_target_path, sanitize_download_rel_path, validate_download_target_path,
+        build_download_target_path, sanitize_download_rel_path,
     };
 
     #[test]

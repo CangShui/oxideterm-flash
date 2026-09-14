@@ -56,9 +56,13 @@ const BG_ACTIVE_ROW_HOVER_ALPHA: u32 = 0x4d; // Keep full-width row hover quiete
 const ROW_HOVER_ALPHA: u32 = 0x66; // Plain-theme rows use the same restrained hierarchy as image-backed rows.
 const BG_ACTIVE_BORDER_ALPHA: u32 = 0xbf; // Tauri border 75%
 const BG_ACTIVE_BORDER_HALF_ALPHA: u32 = 0x60; // Tauri border/50 after active border mix
+#[allow(dead_code)]
 const MANAGER_GRID_ESTIMATED_ROW_HEIGHT: f32 = 84.0;
+#[allow(dead_code)]
 const MANAGER_LIST_ESTIMATED_ROW_HEIGHT: f32 = 57.0;
+#[allow(dead_code)]
 const MANAGER_TREE_ESTIMATED_ROW_HEIGHT: f32 = 52.0;
+#[allow(dead_code)]
 const MANAGER_MAIN_VIEW_OVERSCAN: usize = 6;
 const OXIDE_APP_SETTINGS_SECTIONS: &[&str] = ALL_OXIDE_SETTINGS_SECTIONS;
 const OXIDE_MODAL_WIDTH: f32 = 672.0; // Tauri max-w-2xl
@@ -649,4 +653,3 @@ pub(in crate::workspace) use self::helpers::{
 
 #[cfg(test)]
 mod tests;
-

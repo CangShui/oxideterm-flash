@@ -19,9 +19,7 @@ use zeroize::Zeroizing;
 
 use oxideterm_cloud_sync::crypto::{decrypt_snapshot, derive_snapshot_key, encrypt_snapshot};
 
-/// Default endpoint matches the repository's deployed Cloudflare Worker.
-pub(crate) const DEFAULT_CLOUD_SYNC_SERVER: &str =
-    "https://ditto-cloud-sync.cangshui.workers.dev";
+pub(crate) const DEFAULT_CLOUD_SYNC_SERVER: &str = "";
 
 const ENV_SYNC_JOIN: &str = "OXIDETERM_SYNC_JOIN";
 const ENV_SYNC_URL: &str = "OXIDETERM_SYNC_URL";
@@ -31,6 +29,19 @@ const ENV_SYNC_DEVICE: &str = "OXIDETERM_SYNC_DEVICE";
 const ENV_SYNC_PUSH: &str = "OXIDETERM_SYNC_PUSH";
 const ENV_SYNC_PULL: &str = "OXIDETERM_SYNC_PULL";
 const ENV_SYNC_APPLY: &str = "OXIDETERM_SYNC_APPLY";
+const CLOUD_SYNC_AUTO_PUSH_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CloudSyncFileState {
+    modified_nanos: u128,
+    length: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CloudSyncStoreState {
+    settings: Option<CloudSyncFileState>,
+    connections: Option<CloudSyncFileState>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedCloudSyncConfig {
@@ -58,6 +69,7 @@ pub(crate) struct CloudSyncRuntime {
 #[derive(Clone, Debug)]
 pub(crate) struct CloudSyncDeletePrompt {
     pub device: String,
+    pub trace_id: String,
     pub ts_ms: u64,
     pub deleted_count: usize,
     pub document: serde_json::Value,
@@ -120,8 +132,10 @@ pub(crate) fn resolve_config(settings: &PersistedSettings) -> Option<ResolvedClo
         room,
         device_id,
         transport,
-        push_on_peer_change: env_flag(ENV_SYNC_PUSH),
-        pull_on_join: env_flag(ENV_SYNC_PULL),
+        // Automatic convergence is the normal product behavior. Environment
+        // overrides can still disable either edge for controlled diagnostics.
+        push_on_peer_change: !env_disabled(ENV_SYNC_PUSH),
+        pull_on_join: !env_disabled(ENV_SYNC_PULL),
         // Applying received snapshots is the point of syncing; keep it on by
         // default and allow opting out per instance for read-only senders.
         auto_apply: !env_disabled(ENV_SYNC_APPLY),
@@ -129,31 +143,73 @@ pub(crate) fn resolve_config(settings: &PersistedSettings) -> Option<ResolvedClo
 }
 
 impl WorkspaceApp {
-    /// Starts the sync engine when enabled through settings or environment.
+    /// Keeps a short, human-readable trail for diagnosing whether the room
+    /// connected, whether a snapshot was sent, and what changed locally.
+    fn record_cloud_sync_log(&mut self, message: String) {
+        const CLOUD_SYNC_LOG_LIMIT: usize = 8;
+        self.cloud_sync_logs.push_back(message);
+        while self.cloud_sync_logs.len() > CLOUD_SYNC_LOG_LIMIT {
+            self.cloud_sync_logs.pop_front();
+        }
+    }
+
+    fn set_cloud_sync_progress(&mut self, progress: f32) {
+        self.cloud_sync_progress = Some(progress.clamp(0.0, 1.0));
+    }
+
+    /// Starts (or restarts) the sync engine when enabled through settings or
+    /// environment. The generation token lets an old event pump die quietly
+    /// after the user saves a new server or room.
     pub(crate) fn autostart_cloud_sync(&mut self, cx: &mut Context<Self>) {
-        eprintln!(
-            "[cloud-sync] autostart: enabled={} room='{}' join_env={}",
-            self.settings_store.settings().cloud_sync.enabled,
-            self.settings_store.settings().cloud_sync.room,
-            env_flag(ENV_SYNC_JOIN)
-        );
+        self.cloud_sync_generation = self.cloud_sync_generation.wrapping_add(1);
+        let generation = self.cloud_sync_generation;
+        self.cloud_sync_auto_push_task = None;
         let Some(config) = resolve_config(self.settings_store.settings()) else {
-            eprintln!("[cloud-sync] autostart: disabled by config");
+            let trace_id = crate::logging::next_audit_trace_id();
+            tracing::info!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.lifecycle.validation",
+                result = "disabled",
+                reason = "cloud sync is disabled or the room is empty",
+                business_impact = "no automatic sync worker or change watcher is running",
+                "cloud sync startup was rejected before transport initialization"
+            );
+            self.record_cloud_sync_log(
+                self.i18n
+                    .t("settings_view.general.cloudsync.status_disabled"),
+            );
+            self.cloud_sync = None;
+            self.cloud_sync_config = None;
+            self.cloud_sync_observed_store_state = None;
+            self.set_cloud_sync_progress(0.0);
+            self.cloud_sync_status = Some(
+                self.i18n
+                    .t("settings_view.general.cloudsync.status_disabled"),
+            );
+            cx.notify();
             return;
         };
         let snapshot_key = match derive_snapshot_key(&config.room) {
             Ok(key) => key,
             Err(error) => {
-                eprintln!("[cloud-sync] failed to derive snapshot key: {error}");
+                let trace_id = crate::logging::next_audit_trace_id();
+                tracing::warn!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "sync.lifecycle.key",
+                    result = "failed",
+                    error_kind = %error,
+                    secret_detail_redacted = true,
+                    business_impact = "the sync engine was not started",
+                    "cloud sync snapshot-key derivation failed"
+                );
+                self.record_cloud_sync_log("failed to derive snapshot key".to_string());
                 return;
             }
         };
-        eprintln!(
-            "[cloud-sync] autostart: starting device={} server={} mode={:?}",
-            config.device_id, config.server_url, config.transport
-        );
         let runtime = self.forwarding_runtime.clone();
-        let oxideterm_cloud_sync::SyncHandle { events: mut events, commands } =
+        let oxideterm_cloud_sync::SyncHandle { mut events, commands } =
             oxideterm_cloud_sync::spawn(
                 oxideterm_cloud_sync::engine::SyncOptions {
                     server_url: config.server_url.clone(),
@@ -163,15 +219,44 @@ impl WorkspaceApp {
                 },
                 runtime.handle().clone(),
             );
+        self.record_cloud_sync_log(format!(
+            "{}",
+            self.i18n_replace(
+                "settings_view.general.cloudsync.log_started",
+                &[("device", config.device_id.clone())]
+            )
+        ));
         self.cloud_sync_status = Some(format!("device {}", config.device_id));
         self.cloud_sync = Some(CloudSyncRuntime { commands, snapshot_key });
         self.cloud_sync_config = Some(config);
+        self.cloud_sync_observed_store_state = Some(self.cloud_sync_store_state());
+        self.set_cloud_sync_progress(0.05);
+        self.start_cloud_sync_auto_push_watch(generation, cx);
+        let trace_id = self.new_cloud_sync_trace_id();
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.lifecycle.response",
+            generation,
+            result = "started",
+            auto_push_interval_ms = CLOUD_SYNC_AUTO_PUSH_INTERVAL.as_millis() as u64,
+            push_on_peer_change = self.cloud_sync_push_on_peer_change(),
+            pull_on_join = self.cloud_sync_pull_on_join(),
+            auto_apply = self.cloud_sync_auto_apply(),
+            secret_detail_redacted = true,
+            business_impact = "the transport event pump and automatic local-change watcher are running",
+            "cloud sync runtime startup completed"
+        );
+        cx.notify();
 
         // Pump engine events onto the GPUI thread so snapshots apply through
         // the same entity-owned stores the rest of the app uses.
         cx.spawn(async move |workspace, cx| {
             while let Some(event) = events.recv().await {
                 let outcome = workspace.update(cx, |workspace, cx| {
+                    if workspace.cloud_sync_generation != generation {
+                        return;
+                    }
                     workspace.handle_cloud_sync_event(event, cx);
                 });
                 if outcome.is_err() {
@@ -182,6 +267,91 @@ impl WorkspaceApp {
         .detach();
     }
 
+    fn cloud_sync_store_state(&self) -> CloudSyncStoreState {
+        CloudSyncStoreState {
+            settings: cloud_sync_file_state(self.settings_store.path()),
+            connections: cloud_sync_file_state(self.connection_store.path()),
+        }
+    }
+
+    fn start_cloud_sync_auto_push_watch(
+        &mut self,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        // Workspace lifetime owns the watcher. Replacing the task on restart
+        // is its cancellation path, so no sync observer survives its runtime.
+        self.cloud_sync_auto_push_task = Some(cx.spawn(async move |workspace, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(CLOUD_SYNC_AUTO_PUSH_INTERVAL)
+                    .await;
+                let should_continue = workspace
+                    .update(cx, |workspace, cx| {
+                        if workspace.cloud_sync_generation != generation
+                            || workspace.cloud_sync.is_none()
+                        {
+                            return false;
+                        }
+                        workspace.detect_and_push_cloud_sync_local_change(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn detect_and_push_cloud_sync_local_change(&mut self, cx: &mut Context<Self>) {
+        let current = self.cloud_sync_store_state();
+        let Some(previous) = self.cloud_sync_observed_store_state else {
+            self.cloud_sync_observed_store_state = Some(current);
+            return;
+        };
+        if current == previous {
+            return;
+        }
+        let trace_id = self.new_cloud_sync_trace_id();
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.auto_push.request",
+            settings_changed = current.settings != previous.settings,
+            connections_changed = current.connections != previous.connections,
+            debounce_ms = CLOUD_SYNC_AUTO_PUSH_INTERVAL.as_millis() as u64,
+            result = "detected",
+            business_impact = "a persisted local change will be broadcast automatically",
+            "cloud sync automatic change watcher detected a local store update"
+        );
+        if !self.cloud_sync_broadcast_snapshot_with_trace(
+            trace_id.clone(),
+            "automatic-store-change",
+            cx,
+        ) {
+            tracing::warn!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.auto_push.response",
+                result = "retry_pending",
+                reason = "the snapshot could not be queued",
+                business_impact = "the unchanged observation marker will make the watcher retry",
+                "cloud sync automatic broadcast will be retried"
+            );
+        }
+    }
+
+    fn new_cloud_sync_trace_id(&self) -> String {
+        let sequence = crate::logging::next_audit_trace_id();
+        let device = self
+            .cloud_sync_config
+            .as_ref()
+            .map(|config| config.device_id.as_str())
+            .unwrap_or("unknown");
+        format!("cloud-sync-{device}-{sequence}")
+    }
+
     fn handle_cloud_sync_event(
         &mut self,
         event: oxideterm_cloud_sync::SyncEvent,
@@ -190,40 +360,109 @@ impl WorkspaceApp {
         use oxideterm_cloud_sync::SyncEvent as Event;
         match event {
             Event::Joined { peers } => {
-                eprintln!("[cloud-sync] joined room, peers={peers}");
-                self.cloud_sync_status = Some(format!("joined ({peers} peers)"));
+                let trace_id = self.new_cloud_sync_trace_id();
+                tracing::info!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "sync.room.joined",
+                    peers,
+                    push_on_peer_change = self.cloud_sync_push_on_peer_change(),
+                    pull_on_join = self.cloud_sync_pull_on_join(),
+                    result = "connected",
+                    business_impact = "automatic snapshot exchange will start for the joined room",
+                    "cloud sync joined the room"
+                );
+                self.set_cloud_sync_progress(0.15);
+                self.record_cloud_sync_log(self.i18n_replace(
+                    "settings_view.general.cloudsync.log_joined",
+                    &[("peers", peers.to_string())],
+                ));
+                self.cloud_sync_status = Some(self.i18n_replace(
+                    "settings_view.general.cloudsync.status_connected",
+                    &[("peers", peers.to_string())],
+                ));
                 if self.cloud_sync_push_on_peer_change() {
                     self.cloud_sync_broadcast_snapshot(cx);
                 }
                 if self.cloud_sync_pull_on_join() {
-                    self.cloud_sync_request_snapshot();
+                    self.cloud_sync_request_snapshot(cx);
                 }
                 cx.notify();
             }
             Event::PeerCount(peers) => {
-                self.cloud_sync_status = Some(format!("{peers} peers"));
+                let trace_id = self.new_cloud_sync_trace_id();
+                tracing::info!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "sync.room.peer_count",
+                    peers,
+                    result = "updated",
+                    business_impact = "the client reevaluated whether to publish local state",
+                    "cloud sync peer count changed"
+                );
+                self.cloud_sync_status = Some(self.i18n_replace(
+                    "settings_view.general.cloudsync.status_connected",
+                    &[("peers", peers.to_string())],
+                ));
                 if self.cloud_sync_push_on_peer_change() {
                     self.cloud_sync_broadcast_snapshot(cx);
                 }
                 cx.notify();
             }
             Event::PeerDirect { device } => {
-                eprintln!("[cloud-sync] direct datachannel open: {device}");
-                self.cloud_sync_status = Some(format!("direct link: {device}"));
+                self.set_cloud_sync_progress(0.15);
+                self.cloud_sync_status = Some(self.i18n_replace(
+                    "settings_view.general.cloudsync.status_direct",
+                    &[("device", device)],
+                ));
                 cx.notify();
             }
             Event::EnvelopeReceived(envelope) => {
-                eprintln!(
-                    "[cloud-sync] snapshot received from {} ts={}",
-                    envelope.device, envelope.ts_ms
+                let trace_id = envelope.trace_id.clone().unwrap_or_else(|| {
+                    format!("cloud-sync-{}-{}", envelope.device, envelope.ts_ms)
+                });
+                tracing::info!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "sync.receive.request",
+                    remote_device = %envelope.device,
+                    envelope_kind = ?envelope.kind,
+                    envelope_timestamp_ms = envelope.ts_ms,
+                    result = "received",
+                    business_impact = "a remote snapshot entered validation and merge processing",
+                    "cloud sync envelope reached the workspace"
                 );
+                self.record_cloud_sync_log(self.i18n_replace(
+                    "settings_view.general.cloudsync.log_received",
+                    &[("device", envelope.device.clone())],
+                ));
                 self.apply_cloud_sync_envelope(*envelope, cx);
             }
             Event::Notice(notice) => {
+                tracing::info!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id = self.new_cloud_sync_trace_id(),
+                    stage = "sync.engine.notice",
+                    notice_character_count = notice.chars().count(),
+                    secret_detail_redacted = true,
+                    result = "observed",
+                    business_impact = "the settings status reflects the latest transport event",
+                    "cloud sync engine notice reached the workspace"
+                );
                 self.cloud_sync_status = Some(notice);
                 cx.notify();
             }
             Event::Closed(reason) => {
+                tracing::warn!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id = self.new_cloud_sync_trace_id(),
+                    stage = "sync.lifecycle.response",
+                    result = "closed",
+                    reason_character_count = reason.chars().count(),
+                    secret_detail_redacted = true,
+                    business_impact = "automatic synchronization is unavailable until reconnect succeeds",
+                    "cloud sync transport session closed"
+                );
                 self.cloud_sync_status = Some(format!("disconnected: {reason}"));
                 cx.notify();
             }
@@ -255,11 +494,35 @@ impl WorkspaceApp {
     /// Builds an encrypted configuration snapshot document from the live
     /// stores. Connection passwords are embedded only when the user enabled
     /// `sync_passwords`; the sealed envelope keeps them private in transit.
-    fn build_cloud_sync_snapshot(&self) -> Result<String, String> {
+    fn build_cloud_sync_snapshot(&self, trace_id: &str) -> Result<String, String> {
         let connections = self
             .connection_store
             .export_saved_connections_snapshot()
             .map_err(|error| error.to_string())?;
+        let serial_profiles = serde_json::to_value(
+            self.connection_store
+                .export_serial_profiles_snapshot()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let telnet_profiles = serde_json::to_value(
+            self.connection_store
+                .export_telnet_profiles_snapshot()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let standalone_sftp_profiles = serde_json::to_value(
+            self.connection_store
+                .export_standalone_sftp_profiles_snapshot()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let remote_desktop_profiles = serde_json::to_value(
+            self.connection_store
+                .export_remote_desktop_profiles_snapshot()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
         let settings_snapshot = oxideterm_settings::export_oxide_settings_snapshot_json(
             self.settings_store.settings(),
             None,
@@ -271,11 +534,17 @@ impl WorkspaceApp {
         let mut document = serde_json::json!({
             "connections": connections,
             "settings": settings_value,
+            "serialProfiles": serial_profiles,
+            "telnetProfiles": telnet_profiles,
+            "standaloneSftpProfiles": standalone_sftp_profiles,
+            "remoteDesktopProfiles": remote_desktop_profiles,
         });
+        super::new_connection::audit_sync_document(trace_id, "outbound", &document);
         if self.settings_store.settings().cloud_sync.sync_passwords {
-            if let Some(passwords) = self.resolve_connection_passwords() {
-                document["passwords"] = serde_json::Value::Object(passwords);
-            }
+            // Passwords are authoritative like any other connection field:
+            // the sender includes every password slot, using `null` when no
+            // secret is stored so receivers can clear a stale local value.
+            document["passwords"] = serde_json::Value::Object(self.resolve_connection_passwords());
         }
         let plaintext = serde_json::to_string(&document).map_err(|error| error.to_string())?;
         let key = self
@@ -288,7 +557,7 @@ impl WorkspaceApp {
     /// Resolves plaintext passwords for password-authenticated saved
     /// connections. Returns `None` when nothing is resolvable so callers can
     /// skip the field entirely.
-    fn resolve_connection_passwords(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+    fn resolve_connection_passwords(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut passwords = serde_json::Map::new();
         for connection in self.connection_store.connections() {
             let matches_password_slot = matches!(
@@ -298,27 +567,127 @@ impl WorkspaceApp {
             if !matches_password_slot {
                 continue;
             }
-            if let Ok(secret) = self.connection_store.get_connection_password(&connection.id) {
-                passwords.insert(
-                    connection.id.clone(),
-                    serde_json::Value::String(secret.expose_secret().to_string()),
-                );
-            }
+            let value = match self.connection_store.get_connection_password(&connection.id) {
+                Ok(secret) => {
+                    serde_json::Value::String(secret.expose_secret().to_string())
+                }
+                Err(_) => serde_json::Value::Null,
+            };
+            passwords.insert(connection.id.clone(), value);
         }
-        (!passwords.is_empty()).then_some(passwords)
+        passwords
     }
 
-    pub(crate) fn cloud_sync_broadcast_snapshot(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn cloud_sync_broadcast_snapshot(&mut self, cx: &mut Context<Self>) -> bool {
+        let trace_id = self.new_cloud_sync_trace_id();
+        if let Some(form) = self.connection_form_state(cx).form.as_ref() {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id = form.audit_trace_id,
+                cloud_sync_trace_id = %trace_id,
+                stage = "session.form.sync_trace_link",
+                transport = ?form.transport,
+                saved_connection_id = ?self.connection_form_state(cx).editing_saved_connection_id,
+                result = "linked",
+                secret_detail_redacted = true,
+                business_impact = "the session edit trace can now be followed into encrypted snapshot construction and transport",
+                "session form operation was linked to a cloud-sync trace"
+            );
+        }
+        self.cloud_sync_broadcast_snapshot_with_trace(trace_id, "explicit-mutation", cx)
+    }
+
+    fn cloud_sync_broadcast_snapshot_with_trace(
+        &mut self,
+        trace_id: String,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(runtime) = self.cloud_sync.as_ref() else {
-            return;
+            tracing::warn!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.broadcast.validation",
+                source,
+                result = "rejected",
+                reason = "cloud sync runtime is not running",
+                business_impact = "the local change was not queued for synchronization",
+                "cloud sync broadcast was rejected before snapshot construction"
+            );
+            return false;
         };
-        match self.build_cloud_sync_snapshot() {
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.broadcast.request",
+            source,
+            result = "accepted",
+            business_impact = "the local stores are being converted into an encrypted snapshot",
+            "cloud sync broadcast request entered snapshot construction"
+        );
+        match self.build_cloud_sync_snapshot(&trace_id) {
             Ok(snapshot) => {
-                let _ = runtime
-                    .commands
-                    .try_send(oxideterm_cloud_sync::SyncCommand::Broadcast(snapshot));
+                let encrypted_bytes = snapshot.len();
+                match runtime.commands.try_send(
+                    oxideterm_cloud_sync::SyncCommand::Broadcast {
+                        trace_id: trace_id.clone(),
+                        snapshot,
+                    },
+                ) {
+                    Ok(()) => {
+                        self.cloud_sync_observed_store_state =
+                            Some(self.cloud_sync_store_state());
+                        tracing::info!(
+                            target: "oxideterm_gpui_app::cloud_sync",
+                            trace_id,
+                            stage = "sync.broadcast.response",
+                            source,
+                            encrypted_bytes,
+                            result = "queued",
+                            business_impact = "the encrypted snapshot is waiting for transport delivery",
+                            "cloud sync snapshot was queued for broadcast"
+                        );
+                        self.record_cloud_sync_log(
+                            self.i18n
+                                .t("settings_view.general.cloudsync.log_push_queued"),
+                        );
+                        self.set_cloud_sync_progress(0.5);
+                        self.cloud_sync_status = Some(
+                            self.i18n
+                                .t("settings_view.general.cloudsync.status_queued"),
+                        );
+                        cx.notify();
+                        true
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "oxideterm_gpui_app::cloud_sync",
+                            trace_id,
+                            stage = "sync.broadcast.response",
+                            source,
+                            encrypted_bytes,
+                            result = "rejected",
+                            queue_error = %error,
+                            secret_detail_redacted = true,
+                            business_impact = "the local snapshot was not delivered and remains eligible for retry",
+                            "cloud sync command queue rejected the snapshot"
+                        );
+                        false
+                    }
+                }
             }
             Err(error) => {
+                tracing::warn!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "sync.broadcast.response",
+                    source,
+                    result = "failed",
+                    error_kind = %error,
+                    secret_detail_redacted = true,
+                    business_impact = "the local stores were not broadcast and remain eligible for retry",
+                    "cloud sync snapshot construction failed"
+                );
                 self.push_workspace_notice(
                     TerminalNotice {
                         title: self
@@ -331,17 +700,95 @@ impl WorkspaceApp {
                     },
                     cx,
                 );
+                false
             }
         }
     }
 
-    pub(crate) fn cloud_sync_request_snapshot(&mut self) {
+    pub(crate) fn cloud_sync_request_snapshot(&mut self, cx: &mut Context<Self>) {
+        let trace_id = self.new_cloud_sync_trace_id();
         let Some(runtime) = self.cloud_sync.as_ref() else {
+            tracing::warn!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.request.validation",
+                result = "rejected",
+                reason = "cloud sync runtime is not running",
+                business_impact = "no remote snapshot was requested",
+                "cloud sync request was rejected before transport delivery"
+            );
             return;
         };
-        let _ = runtime
-            .commands
-            .try_send(oxideterm_cloud_sync::SyncCommand::Request);
+        let result = runtime.commands.try_send(
+            oxideterm_cloud_sync::SyncCommand::Request {
+                trace_id: trace_id.clone(),
+            },
+        );
+        let queue_error = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "none".to_string());
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.request.response",
+            result = if result.is_ok() { "queued" } else { "rejected" },
+            queue_error,
+            secret_detail_redacted = result.is_err(),
+            business_impact = if result.is_ok() {
+                "connected peers will be asked for their latest snapshot"
+            } else {
+                "the request did not enter the transport queue"
+            },
+            "cloud sync snapshot request reached the command queue"
+        );
+        if result.is_err() {
+            return;
+        }
+        self.record_cloud_sync_log(
+            self.i18n
+                .t("settings_view.general.cloudsync.log_request_sent"),
+        );
+        self.set_cloud_sync_progress(0.25);
+        self.cloud_sync_status = Some(
+            self.i18n
+                .t("settings_view.general.cloudsync.status_waiting"),
+        );
+        cx.notify();
+    }
+
+    /// Manual "force sync": broadcast the local snapshot and immediately ask
+    /// the room for theirs. This wakes every connected client to converge in
+    /// one round trip instead of waiting for the next automatic trigger.
+    pub(crate) fn cloud_sync_force_sync(&mut self, cx: &mut Context<Self>) {
+        if self.cloud_sync.is_none() {
+            return;
+        }
+        let trace_id = self.new_cloud_sync_trace_id();
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.force.request",
+            result = "accepted",
+            business_impact = "the client will request remote state and publish local state immediately",
+            "manual force sync: push local snapshot and request remote snapshots"
+        );
+        self.cloud_sync_request_snapshot(cx);
+        let queued =
+            self.cloud_sync_broadcast_snapshot_with_trace(trace_id.clone(), "manual-force", cx);
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.force.response",
+            result = if queued { "queued" } else { "partial" },
+            business_impact = if queued {
+                "the force-sync push entered transport delivery"
+            } else {
+                "the remote request was attempted but the local push was not queued"
+            },
+            "manual force sync reached its local terminal response"
+        );
     }
 
     fn apply_cloud_sync_envelope(
@@ -349,82 +796,220 @@ impl WorkspaceApp {
         envelope: oxideterm_cloud_sync::SyncEnvelope,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = envelope
+            .trace_id
+            .clone()
+            .unwrap_or_else(|| format!("cloud-sync-{}-{}", envelope.device, envelope.ts_ms));
         if !self.cloud_sync_auto_apply() {
+            tracing::warn!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.receive.validation",
+                result = "rejected",
+                reason = "automatic apply is disabled",
+                business_impact = "the received snapshot was not merged into local stores",
+                "cloud sync snapshot was rejected before decryption"
+            );
             return;
         }
-        let Some(data) = envelope.data.as_ref() else { return };
+        let Some(data) = envelope.data.as_ref() else {
+            tracing::warn!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.receive.validation",
+                result = "rejected",
+                reason = "the snapshot envelope did not contain data",
+                business_impact = "the received snapshot was not merged",
+                "cloud sync snapshot was rejected before decryption"
+            );
+            return;
+        };
         let Some(payload) = data.get("payload").and_then(|payload| payload.as_str()) else {
+            tracing::warn!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.receive.validation",
+                result = "rejected",
+                reason = "the snapshot envelope did not contain a string payload",
+                business_impact = "the received snapshot was not merged",
+                "cloud sync snapshot was rejected before decryption"
+            );
             return;
         };
         // The payload is the sealed envelope; without the shared key a frame
         // can never reach the merge layer.
         let key = match self.cloud_sync_snapshot_key() {
             Some(key) => key,
-            None => return,
+            None => {
+                tracing::warn!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "sync.receive.validation",
+                    result = "rejected",
+                    reason = "the runtime snapshot key is unavailable",
+                    business_impact = "the received snapshot could not be decrypted",
+                    "cloud sync snapshot was rejected before decryption"
+                );
+                return;
+            }
         };
         let sealed: oxideterm_cloud_sync::crypto::EncryptedSyncPayload =
             match serde_json::from_str(payload) {
                 Ok(sealed) => sealed,
                 Err(error) => {
-                    eprintln!("[cloud-sync] envelope decode failed: {error}");
+                    tracing::warn!(
+                        target: "oxideterm_gpui_app::cloud_sync",
+                        trace_id,
+                        stage = "envelope-decode-failed",
+                        "cloud sync envelope decode failed: {error}"
+                    );
                     return;
                 }
             };
         let plaintext = match decrypt_snapshot(key, &sealed) {
             Ok(plaintext) => plaintext,
             Err(error) => {
-                eprintln!(
-                    "[cloud-sync] envelope from {} failed authentication: {error}",
-                    envelope.device
+                tracing::warn!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "envelope-auth-failed",
+                    device = %envelope.device,
+                    "cloud sync envelope failed authentication: {error}"
                 );
                 return;
             }
         };
         let Ok(document) = serde_json::from_str::<serde_json::Value>(plaintext.as_str()) else {
+            tracing::warn!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.receive.decode",
+                result = "failed",
+                reason = "decrypted snapshot document is not valid JSON",
+                secret_detail_redacted = true,
+                business_impact = "the received snapshot was not merged",
+                "cloud sync decrypted document could not be decoded"
+            );
             return;
         };
 
         // Skip snapshots we have already applied so repeated broadcasts cannot
         // ping-pong between devices.
-        let marker_path = marker_path_for(self.settings_store.path());
-        let last_applied = read_last_applied_ts(&marker_path).unwrap_or(0);
+        let last_applied =
+            read_last_applied_ts(self.settings_store.path(), &envelope.device).unwrap_or(0);
         if envelope.ts_ms <= last_applied {
+            tracing::info!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.receive.validation",
+                result = "skipped",
+                envelope_timestamp_ms = envelope.ts_ms,
+                last_applied_timestamp_ms = last_applied,
+                reason = "the snapshot is not newer than the local apply marker",
+                business_impact = "local data remained unchanged",
+                "cloud sync duplicate or stale snapshot was skipped"
+            );
             return;
         }
 
         // Remote deletions are destructive: surface them before applying.
-        if let Some(connections_value) = document.get("connections") {
-            let snapshot: oxideterm_connections::SavedConnectionsSyncSnapshot =
-                match serde_json::from_value(connections_value.clone()) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        eprintln!("[cloud-sync] connection snapshot decode failed: {error}");
-                        return;
-                    }
-                };
-            match self
-                .connection_store
-                .preview_saved_connections_snapshot_deletions(&snapshot)
-            {
-                Ok(deleted_count) if deleted_count > 0 => {
-                    self.cloud_sync_delete_prompt = Some(CloudSyncDeletePrompt {
-                        device: envelope.device,
-                        ts_ms: envelope.ts_ms,
-                        deleted_count,
-                        document,
-                    });
-                    cx.notify();
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("[cloud-sync] deletion preview failed: {error:#}");
-                    return;
-                }
+        let deleted_count = match self.preview_cloud_sync_deletions(&document) {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::warn!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id,
+                    stage = "deletion-preview-failed",
+                    "cloud sync deletion preview failed: {error:#}"
+                );
+                return;
             }
+        };
+        if deleted_count > 0 {
+            tracing::info!(
+                target: "oxideterm_gpui_app::cloud_sync",
+                trace_id,
+                stage = "sync.deletion.validation",
+                deleted_count,
+                result = "accepted",
+                reason = "authenticated deletion tombstones are conflict-resolved by record identity",
+                business_impact = "remote deletions will be applied without waiting for a hidden settings-only prompt",
+                "cloud sync deletion tombstones entered automatic merge"
+            );
         }
 
-        self.apply_cloud_sync_document(document, envelope.ts_ms, &envelope.device, cx);
+        self.apply_cloud_sync_document(
+            document,
+            envelope.ts_ms,
+            &envelope.device,
+            &trace_id,
+            cx,
+        );
+    }
+
+    /// Counts local sessions that an incoming snapshot would delete across
+    /// saved connections and every profile type, without mutating anything.
+    fn preview_cloud_sync_deletions(
+        &self,
+        document: &serde_json::Value,
+    ) -> Result<usize, String> {
+        let mut deleted_count = 0usize;
+        if let Some(connections_value) = document.get("connections") {
+            let snapshot: oxideterm_connections::SavedConnectionsSyncSnapshot =
+                serde_json::from_value(connections_value.clone())
+                    .map_err(|error| format!("connection snapshot decode failed: {error}"))?;
+            // An all-deleted/empty connection list is the most destructive
+            // snapshot shape. Treat it as a wipe attempt when this device has
+            // any saved sessions and let the user decide instead of applying.
+            if snapshot
+                .records
+                .iter()
+                .all(|record| record.deleted)
+                && !self.connection_store.connections().is_empty()
+            {
+                deleted_count += self.connection_store.connections().len();
+            } else {
+                deleted_count += self
+                    .connection_store
+                    .preview_saved_connections_snapshot_deletions(&snapshot)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        if let Some(value) = document.get("serialProfiles") {
+            let snapshot: oxideterm_connections::SerialProfilesSyncSnapshot =
+                serde_json::from_value(value.clone())
+                    .map_err(|error| format!("serial profiles snapshot decode failed: {error}"))?;
+            deleted_count += self
+                .connection_store
+                .preview_serial_profiles_snapshot_deletions(&snapshot);
+        }
+        if let Some(value) = document.get("telnetProfiles") {
+            let snapshot: oxideterm_connections::TelnetProfilesSyncSnapshot =
+                serde_json::from_value(value.clone())
+                    .map_err(|error| format!("telnet profiles snapshot decode failed: {error}"))?;
+            deleted_count += self
+                .connection_store
+                .preview_telnet_profiles_snapshot_deletions(&snapshot);
+        }
+        if let Some(value) = document.get("standaloneSftpProfiles") {
+            let snapshot: oxideterm_connections::StandaloneSftpProfilesSyncSnapshot =
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    format!("standalone SFTP profiles snapshot decode failed: {error}")
+                })?;
+            deleted_count += self
+                .connection_store
+                .preview_standalone_sftp_profiles_snapshot_deletions(&snapshot);
+        }
+        if let Some(value) = document.get("remoteDesktopProfiles") {
+            let snapshot: oxideterm_connections::RemoteDesktopProfilesSyncSnapshot =
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    format!("remote desktop profiles snapshot decode failed: {error}")
+                })?;
+            deleted_count += self
+                .connection_store
+                .preview_remote_desktop_profiles_snapshot_deletions(&snapshot);
+        }
+        Ok(deleted_count)
     }
 
     /// Applies one validated snapshot document (connections + settings +
@@ -434,26 +1019,129 @@ impl WorkspaceApp {
         document: serde_json::Value,
         ts_ms: u64,
         device: &str,
+        trace_id: &str,
         cx: &mut Context<Self>,
     ) {
+        super::new_connection::audit_sync_document(trace_id, "inbound", &document);
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.apply.request",
+            remote_device = device,
+            snapshot_timestamp_ms = ts_ms,
+            result = "accepted",
+            business_impact = "the remote document entered store-level merge processing",
+            "cloud sync document entered the apply layer"
+        );
         let mut applied_connections = 0usize;
+        let mut applied_profiles = 0usize;
+        let mut connection_updated_at: HashMap<String, u64> = HashMap::new();
         if let Some(connections_value) = document.get("connections") {
             let snapshot: oxideterm_connections::SavedConnectionsSyncSnapshot =
                 match serde_json::from_value(connections_value.clone()) {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
-                        eprintln!("[cloud-sync] connection snapshot decode failed: {error}");
+                        tracing::warn!(
+                            target: "oxideterm_gpui_app::cloud_sync",
+                            trace_id,
+                            stage = "connection-snapshot-decode-failed",
+                            "cloud sync connection snapshot decode failed: {error}"
+                        );
                         return;
                     }
                 };
-            match self.connection_store.apply_saved_connections_snapshot(
+            for record in &snapshot.records {
+                if record.deleted {
+                    continue;
+                }
+                let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&record.updated_at) else {
+                    continue;
+                };
+                connection_updated_at
+                    .insert(record.id.clone(), updated_at.timestamp_millis() as u64);
+            }
+            match self.connection_store.apply_saved_connections_snapshot_with_trace(
                 snapshot,
                 oxideterm_connections::SavedConnectionsConflictStrategy::Merge,
+                trace_id,
             ) {
                 Ok(outcome) => applied_connections = outcome.result.applied,
                 Err(error) => {
-                    eprintln!("[cloud-sync] connection snapshot apply failed: {error:#}");
+                    tracing::warn!(
+                        target: "oxideterm_gpui_app::cloud_sync",
+                        trace_id,
+                        stage = "connection-snapshot-apply-failed",
+                        "cloud sync connection snapshot apply failed: {error:#}"
+                    );
                     return;
+                }
+            }
+        }
+        for (document_key, profile_kind) in [
+            ("serialProfiles", "serial"),
+            ("telnetProfiles", "telnet"),
+            ("standaloneSftpProfiles", "sftp"),
+            ("remoteDesktopProfiles", "remote desktop"),
+        ] {
+            let Some(profile_value) = document.get(document_key) else {
+                continue;
+            };
+            let applied = match document_key {
+                "serialProfiles" => serde_json::from_value::<
+                    oxideterm_connections::SerialProfilesSyncSnapshot,
+                >(profile_value.clone())
+                .ok()
+                .and_then(|snapshot| {
+                    self.connection_store
+                        .apply_serial_profiles_snapshot(snapshot)
+                        .ok()
+                }),
+                "telnetProfiles" => serde_json::from_value::<
+                    oxideterm_connections::TelnetProfilesSyncSnapshot,
+                >(profile_value.clone())
+                .ok()
+                .and_then(|snapshot| {
+                    self.connection_store
+                        .apply_telnet_profiles_snapshot(snapshot)
+                        .ok()
+                }),
+                "standaloneSftpProfiles" => serde_json::from_value::<
+                    oxideterm_connections::StandaloneSftpProfilesSyncSnapshot,
+                >(profile_value.clone())
+                .ok()
+                .and_then(|snapshot| {
+                    self.connection_store
+                        .apply_standalone_sftp_profiles_snapshot(snapshot)
+                        .ok()
+                }),
+                _ => serde_json::from_value::<
+                    oxideterm_connections::RemoteDesktopProfilesSyncSnapshot,
+                >(profile_value.clone())
+                .ok()
+                .and_then(|snapshot| {
+                    self.connection_store
+                        .apply_remote_desktop_profiles_snapshot(snapshot)
+                        .ok()
+                }),
+            };
+            match applied {
+                Some(count) => {
+                    tracing::info!(target: "oxideterm::audit", trace_id,
+                        stage = "session.sync.apply", protocol = profile_kind, count,
+                        result = "completed", "远端协议会话快照已合并到本地存储");
+                    applied_profiles += count;
+                }
+                None => {
+                    tracing::warn!(target: "oxideterm::audit", trace_id,
+                        stage = "session.sync.apply", protocol = profile_kind,
+                        result = "failed", "远端协议会话快照解析或合并失败，不能视为已成功同步");
+                    self.record_cloud_sync_log(format!(
+                        "{}",
+                        self.i18n_replace(
+                            "settings_view.general.cloudsync.log_invalid_profile",
+                            &[("kind", profile_kind.to_string())]
+                        )
+                    ));
                 }
             }
         }
@@ -470,19 +1158,44 @@ impl WorkspaceApp {
             }
         }
         if let Some(passwords) = document.get("passwords").and_then(|value| value.as_object()) {
-            self.apply_synced_connection_passwords(passwords);
+            self.apply_synced_connection_passwords(passwords, &connection_updated_at);
         }
 
-        let marker_path = marker_path_for(self.settings_store.path());
-        write_last_applied_ts(&marker_path, ts_ms);
-        eprintln!(
-            "[cloud-sync] snapshot applied: device={} connections={applied_connections}",
-            device
+        write_last_applied_ts(self.settings_store.path(), device, ts_ms, trace_id);
+        self.cloud_sync_observed_store_state = Some(self.cloud_sync_store_state());
+        self.active_session_sidebar_rows_cache.borrow_mut().take();
+        for connection_id in connection_updated_at.keys() {
+            self.sync_saved_connection_node_title(connection_id);
+            self.sync_saved_connection_x11_forwarding(connection_id);
+        }
+        tracing::info!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "sync.apply.response",
+            applied_connections,
+            applied_profiles,
+            result = "completed",
+            business_impact = "the local stores and active-session sidebar now reflect the remote snapshot",
+            "cloud sync document apply completed"
+        );
+        self.record_cloud_sync_log(self.i18n_replace(
+            "settings_view.general.cloudsync.log_applied",
+            &[
+                ("count", applied_connections.to_string()),
+                ("profileCount", applied_profiles.to_string()),
+            ],
+        ));
+        self.set_cloud_sync_progress(1.0);
+        self.cloud_sync_status = Some(
+            self.i18n
+                .t("settings_view.general.cloudsync.status_applied"),
         );
         self.push_workspace_notice(
             TerminalNotice {
                 title: self.i18n.t("settings_view.general.cloudsync.applied"),
-                description: Some(format!("{device} · {applied_connections}")),
+                description: Some(format!(
+                    "{device} · {applied_connections} · {applied_profiles}"
+                )),
                 status_text: None,
                 progress: None,
                 variant: TerminalNoticeVariant::Success,
@@ -492,28 +1205,45 @@ impl WorkspaceApp {
         cx.notify();
     }
 
-    /// Stores passwords that arrived inside an encrypted snapshot. Only
-    /// password slots that currently have no keychain reference are written;
-    /// existing local credentials are never overwritten.
+    /// Applies passwords that arrived inside an encrypted snapshot as an
+    /// authoritative value: a non-null entry replaces the local credential and
+    /// a `null` entry clears it, matching ordinary edit-sync semantics.
     fn apply_synced_connection_passwords(
         &mut self,
         passwords: &serde_json::Map<String, serde_json::Value>,
+        connection_updated_at: &HashMap<String, u64>,
     ) {
         use oxideterm_connections::{ConnectionCredentialSlot, SavedAuth};
         for (id, value) in passwords {
-            let Some(plaintext) = value.as_str() else {
-                continue;
-            };
             let Some(connection) = self.connection_store.get(id) else {
                 continue;
             };
             let matches_password_slot = match &connection.auth {
-                SavedAuth::Password { keychain_id, .. } => keychain_id.is_none(),
+                SavedAuth::Password { .. } => true,
                 _ => false,
             };
             if !matches_password_slot {
                 continue;
             }
+            // Only a connection this snapshot actually accepted may drive its
+            // password, mirroring ordinary per-field conflict resolution.
+            let local_ts = connection
+                .updated_at
+                .map(|ts| ts.timestamp_millis() as u64)
+                .unwrap_or_else(|| connection.created_at.timestamp_millis() as u64);
+            let accepted = connection_updated_at
+                .get(id)
+                .is_some_and(|incoming_ts| local_ts <= *incoming_ts);
+            if !accepted {
+                continue;
+            }
+            let Some(plaintext) = value.as_str() else {
+                let _ = self.connection_store.forget_connection_credential(
+                    id,
+                    ConnectionCredentialSlot::Primary,
+                );
+                continue;
+            };
             let secret =
                 oxideterm_connections::SecretString::from(Zeroizing::new(plaintext.to_string()));
             let _ = self
@@ -533,18 +1263,39 @@ impl WorkspaceApp {
         };
         match action {
             CloudSyncDeleteAction::Skip => {
-                eprintln!(
-                    "[cloud-sync] user skipped remote deletion of {} sessions",
-                    prompt.deleted_count
+                tracing::info!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id = %prompt.trace_id,
+                    stage = "delete-prompt-skip",
+                    deleted_count = prompt.deleted_count,
+                    "user skipped remote deletion"
                 );
             }
             CloudSyncDeleteAction::Sync => {
-                self.apply_cloud_sync_document(prompt.document, prompt.ts_ms, &prompt.device, cx);
+                tracing::info!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id = %prompt.trace_id,
+                    stage = "delete-prompt-sync",
+                    deleted_count = prompt.deleted_count,
+                    result = "accepted",
+                    business_impact = "the remote deletions will be merged into the local stores",
+                    "user applied remote deletions"
+                );
+                self.apply_cloud_sync_document(
+                    prompt.document,
+                    prompt.ts_ms,
+                    &prompt.device,
+                    &prompt.trace_id,
+                    cx,
+                );
             }
             CloudSyncDeleteAction::RestoreRemote => {
-                eprintln!(
-                    "[cloud-sync] user restored local copy over {} remote deletions",
-                    prompt.deleted_count
+                tracing::info!(
+                    target: "oxideterm_gpui_app::cloud_sync",
+                    trace_id = %prompt.trace_id,
+                    stage = "delete-prompt-restore",
+                    deleted_count = prompt.deleted_count,
+                    "user restored local copy over remote deletions"
                 );
                 self.cloud_sync_broadcast_snapshot(cx);
             }
@@ -686,18 +1437,90 @@ fn marker_path_for(settings_path: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("cloud_sync_state.json"))
 }
 
-fn read_last_applied_ts(settings_path: &std::path::Path) -> Option<u64> {
+fn read_last_applied_ts(settings_path: &std::path::Path, device: &str) -> Option<u64> {
     let text = std::fs::read_to_string(marker_path_for(settings_path)).ok()?;
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()?
-        .get("lastAppliedTsMs")?
+    serde_json::from_str::<serde_json::Value>(&text).ok()?
+        ["lastAppliedByDevice"]
+        .get(device)?
         .as_u64()
 }
 
-fn write_last_applied_ts(settings_path: &std::path::Path, ts_ms: u64) {
+fn write_last_applied_ts(
+    settings_path: &std::path::Path,
+    device: &str,
+    ts_ms: u64,
+    trace_id: &str,
+) {
     let path = marker_path_for(settings_path);
-    let body = serde_json::json!({ "lastAppliedTsMs": ts_ms }).to_string();
+    let mut state = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(root) = state.as_object_mut() else {
+        return;
+    };
+    let devices = root
+        .entry("lastAppliedByDevice")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(devices) = devices.as_object_mut() else {
+        return;
+    };
+    devices.insert(device.to_string(), serde_json::Value::from(ts_ms));
+    let body = state.to_string();
     if let Err(error) = std::fs::write(&path, body) {
-        eprintln!("[cloud-sync] failed to persist sync marker: {error}");
+        tracing::warn!(
+            target: "oxideterm_gpui_app::cloud_sync",
+            trace_id,
+            stage = "marker-persist-failed",
+            secret_detail_redacted = true,
+            business_impact = "the snapshot was applied but duplicate suppression may not survive restart",
+            "failed to persist cloud sync marker: {error}"
+        );
+    }
+}
+
+fn cloud_sync_file_state(path: &std::path::Path) -> Option<CloudSyncFileState> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(CloudSyncFileState {
+        modified_nanos,
+        length: metadata.len(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applied_markers_are_independent_per_device() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let settings_path = directory.path().join("settings.json");
+        std::fs::write(&settings_path, "{}").expect("settings fixture");
+
+        write_last_applied_ts(&settings_path, "desktop", 100, "trace-desktop");
+        write_last_applied_ts(&settings_path, "laptop", 20, "trace-laptop");
+
+        assert_eq!(read_last_applied_ts(&settings_path, "desktop"), Some(100));
+        assert_eq!(read_last_applied_ts(&settings_path, "laptop"), Some(20));
+        assert_eq!(read_last_applied_ts(&settings_path, "unknown"), None);
+    }
+
+    #[test]
+    fn local_store_state_changes_when_persisted_content_changes() {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let path = directory.path().join("connections.json");
+        std::fs::write(&path, "{}").expect("initial store fixture");
+        let initial = cloud_sync_file_state(&path).expect("initial state");
+
+        std::fs::write(&path, "{\"connections\":[]}").expect("changed store fixture");
+        let changed = cloud_sync_file_state(&path).expect("changed state");
+
+        assert_ne!(initial, changed);
     }
 }

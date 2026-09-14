@@ -41,7 +41,9 @@ pub(crate) const TERMINAL_TIMESTAMP_GUTTER_GAP_CELLS: f32 = 1.0;
 pub(crate) const TERMINAL_SCROLL_MULTIPLIER: f32 = 1.0;
 pub(crate) const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 pub(crate) const TERMINAL_PASTE_PROTECTION: bool = true;
-pub(crate) const TERMINAL_SMART_COPY: bool = true;
+// Smart Ctrl+C changes the long-standing interrupt shortcut, so new installs
+// keep the safer terminal-native behavior until the user opts in.
+pub(crate) const TERMINAL_SMART_COPY: bool = false;
 pub(crate) const TERMINAL_OSC52_CLIPBOARD: bool = true;
 pub(crate) const TERMINAL_OSC52_CLIPBOARD_READ: bool = false;
 pub(crate) const TERMINAL_COPY_ON_SELECT: bool = false;
@@ -333,7 +335,6 @@ pub struct TerminalCommandSelectionLabels {
     pub insert_selection_into_command: String,
     pub replace_command_with_selection: String,
     pub find: String,
-    pub manage_triggers: String,
     pub select_command: String,
     pub previous_command: String,
     pub next_command: String,
@@ -353,7 +354,6 @@ impl Default for TerminalCommandSelectionLabels {
             insert_selection_into_command: "Insert selection here".to_string(),
             replace_command_with_selection: "Replace command with selection".to_string(),
             find: "Find...".to_string(),
-            manage_triggers: "Manage triggers...".to_string(),
             select_command: "Select command".to_string(),
             previous_command: "Previous command".to_string(),
             next_command: "Next command".to_string(),

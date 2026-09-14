@@ -38,6 +38,6 @@ sudo dnf install ./OxideTerm_*_linux_*.rpm
 
 ## 🔗 Links
 
-- Documentation: https://oxideterm.app
-- GitHub Issues: https://github.com/AnalyseDeCircuit/oxideterm/issues
-- Changelog: https://github.com/AnalyseDeCircuit/oxideterm/blob/main/.github/release-notes/stable-changelog.md
+- Repository: https://github.com/CangShui/oxideterm-flash
+- GitHub Issues: https://github.com/CangShui/oxideterm-flash/issues
+- Changelog: https://github.com/CangShui/oxideterm-flash/blob/main/.github/release-notes/stable-changelog.md

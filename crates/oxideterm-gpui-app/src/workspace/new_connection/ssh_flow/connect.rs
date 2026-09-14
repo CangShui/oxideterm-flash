@@ -430,6 +430,7 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
         self.update_connection_form_state(cx, |state| {
             if let Some(form) = state.form.as_mut() {
                 form.pending = false;
@@ -439,9 +440,30 @@ impl WorkspaceApp {
 
         match status {
             HostKeyStatus::Verified => {
+                tracing::info!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "ssh.connect.host_key.response",
+                    host = %host,
+                    port,
+                    status = "verified",
+                    result = "accepted",
+                    "主机密钥验证通过，继续连接或测试"
+                );
                 self.continue_verified_ssh_flow(config, title, intent, window, cx)
             }
             HostKeyStatus::Unknown { .. } | HostKeyStatus::Changed { .. } => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "ssh.connect.host_key.response",
+                    host = %host,
+                    port,
+                    status = if matches!(status, HostKeyStatus::Unknown { .. }) { "unknown" } else { "changed" },
+                    result = "blocked",
+                    business_impact = "连接被暂停，等待用户确认主机密钥",
+                    "主机密钥未通过验证，请求未继续进入连接流程"
+                );
                 self.prepare_modal_interaction_boundary(cx);
                 let challenge = HostKeyChallenge {
                     presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
@@ -460,6 +482,17 @@ impl WorkspaceApp {
                 cx.notify();
             }
             HostKeyStatus::Error { message } => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "ssh.connect.host_key.response",
+                    host = %host,
+                    port,
+                    status = "error",
+                    result = "rejected",
+                    business_impact = "连接未建立",
+                    "主机密钥校验失败，连接被拒绝"
+                );
                 if let Some(token) = intent.standalone_sftp_pair_launch_token() {
                     self.pending_standalone_sftp_pair_launches.remove(token);
                 }
@@ -544,19 +577,6 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.connection_flow.read(cx).has_active_proxy_connect_run()
-            || self
-                .workspace_runtime
-                .read(cx)
-                .has_active_connection_chain()
-        {
-            self.report_proxy_session_tree_error(
-                "CHAIN_LOCK_BUSY: Another connection chain is in progress".to_string(),
-                cx,
-            );
-            return true;
-        }
-
         let Ok(path_node_ids) = self.node_router.path_to_node(&target_node_id) else {
             self.report_proxy_session_tree_error(
                 format!("Node path not found for {}", target_node_id.0),
@@ -564,6 +584,25 @@ impl WorkspaceApp {
             );
             return true;
         };
+        if self.connection_flow.read(cx).has_active_proxy_connect_run()
+            || self
+                .workspace_runtime
+                .read(cx)
+                .connection_chain_overlaps(&path_node_ids)
+        {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                stage = "session.connect.chain",
+                result = "blocked",
+                node_id = %target_node_id.0,
+                "跳板连接链与进行中的连接重叠，或已有跳板流程占用连接槽"
+            );
+            self.report_proxy_session_tree_error(
+                "CHAIN_LOCK_BUSY: Another connection chain is in progress".to_string(),
+                cx,
+            );
+            return true;
+        }
         if path_node_ids.len() <= 1 {
             return false;
         }
@@ -1107,6 +1146,15 @@ impl WorkspaceApp {
         error: String,
         cx: &mut Context<Self>,
     ) {
+        tracing::warn!(
+            target: "oxideterm::audit",
+            trace_id = crate::logging::next_audit_trace_id(),
+            stage = "ssh.connect.tree.error",
+            error_kind = error.chars().take(160).collect::<String>(),
+            result = "reported",
+            business_impact = "跳板会话树连接失败，连接未建立",
+            "会话树连接流程报告错误"
+        );
         let reported_to_form = self.connection_flow.update(cx, |connection_flow, cx| {
             connection_flow.set_form_feedback(Some(false), Some(error.clone()), cx)
         });
@@ -1127,6 +1175,15 @@ impl WorkspaceApp {
         title: String,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "ssh.connect.test.request",
+            has_proxy_chain = config.proxy_chain.as_ref().is_some_and(|chain| !chain.is_empty()),
+            result = "received",
+            "用户点击测试连接，进入主机密钥检查与连接测试流程；凭据不写入日志"
+        );
         if config
             .proxy_chain
             .as_ref()
@@ -1504,6 +1561,14 @@ impl WorkspaceApp {
         config: SshConfig,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "ssh.connect.test.request",
+            result = "accepted",
+            "连接测试已通过主机密钥分支，进入 SSH 传输测试"
+        );
         let message = self.i18n.t("ssh.form.test_running");
         let reported_to_form = self.connection_flow.update(cx, |connection_flow, cx| {
             connection_flow.set_form_feedback(Some(true), Some(message.clone()), cx)

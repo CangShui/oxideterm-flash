@@ -3,6 +3,110 @@
 Stable releases are listed newest first. The release workflow uses each versioned
 section as the detailed changelog attached to the corresponding GitHub Release.
 
+## 1.0.2
+
+### English
+
+OxideTerm-Flash 1.0.2 is a community fork build based on official OxideTerm. This release concentrates on the remote file manager (SFTP), Cloud Sync reliability, connection and session correctness, host tools, and a fully localized Chinese audit-log system.
+
+#### 🔀 Upstream changes
+
+- None newly merged in this release range. This fork tracks an earlier official OxideTerm snapshot and has not yet merged the newer upstream commits, so every change below is fork-specific.
+
+#### 🧩 Fork-specific changes
+
+##### 📁 Remote file manager (SFTP)
+
+- Added remote **cut / copy / paste**. Operations run entirely on the host (server-side rename or copy, with the archive helpers where needed), so pasting never downloads to the local machine and re-uploads, and every operation reports progress.
+- Added **archive extraction and creation** from the file list: extract `.tar`, `.tar.gz`, `.tgz`, `.7z`, `.zip`, and `.rar` into a chosen directory or the current directory, and pack the selection into an archive using the host's `tar`/`7z`/`zip` tools. When the required tool is not installed, the app says so instead of failing silently.
+- Added **progress and completion feedback for inline editing**, which was previously silent. The editor now tells you when the saved local cache was written back to the host, and when it stayed local because the session was unavailable.
+- Fixed creating a file whose name collides with an existing folder (and the reverse), which used to surface an unlocalized `protocol error`; the conflict is now reported clearly.
+- Localized rename, create, delete, and transfer error messages that were English-only.
+- Fixed saved favorite folders/files disappearing by aligning favorites with the same edit and Cloud Sync persistence rules used for connections.
+
+##### ☁️ Cloud Sync
+
+- Fixed **bulk deletions not propagating**: deleting many sessions in a short window could leave stale entries that had to be deleted repeatedly on both devices.
+- Fixed deletions after editing or moving sessions not syncing until a manual forced sync.
+- Corrected applying an empty remote section so deletions are honored instead of being skipped as false conflicts.
+- Hardened synchronization under poor network conditions so an interrupted exchange cannot corrupt local state.
+- Added detailed Chinese-language synchronization logging for troubleshooting.
+
+##### 🖥️ Connections, sessions, and tabs
+
+- Kept connections that share identical settings but have different names fully independent; editing one no longer renames the other.
+- Fixed terminal and host-tool **crosstalk** when several session tabs are open, so a pane no longer shows another host's data until you switch manually.
+- A connection stalled on connect timeout no longer blocks the sidebar from opening other hosts.
+- Added audit logging for saved-connection edits, including field-level changes and save interactions.
+
+##### 🧠 Host tools
+
+- Fixed Docker container detection on hosts where `docker ps -a` is slow: container listing now uses a lightweight query (`--size=false`) and no longer stalls the sampling pass.
+- Made GPU/NPU host monitoring degrade gracefully when the host does not expose the required counters.
+
+##### ⚙️ Settings and localization
+
+- Removed the terminal "perception and inheritance" (output-triggered) feature and all of its UI and references.
+- Added `.oxide` import support to the Session import/export settings, and localized the export-format dropdown.
+- Filled in missing translations across the file manager, connection, and settings flows.
+
+##### 🧰 Logging and build tooling
+
+- Reworked the debug/audit logging system around Chinese-language records, UTF-8 BOM chunk files that never split a multi-byte character, and a CPU-spike sampler, and expanded its coverage across SFTP, connections, Cloud Sync, import/export, and control interactions.
+- `build-windows.ps1` now imports the Visual Studio (MSVC) environment automatically when `link.exe` is missing, and stops a still-running previous build before replacing its binaries.
+- Removed the compiler warnings produced by the previous build.
+
+### 中文
+
+OxideTerm-Flash 1.0.2 是基于官方 OxideTerm 的社区分支版本，本次重点改进远程文件（SFTP）、云同步可靠性、连接与会话正确性、主机工具，以及一套完整的中文审计日志系统。
+
+#### 🔀 上游更新
+
+- 本发布区间内没有新合并的上游改动。本分支基于较早的官方快照，尚未合并较新的上游提交，因此以下改动均为本分支自有。
+
+#### 🧩 Fork 自有更新
+
+##### 📁 远程文件（SFTP）
+
+- 新增远程 **剪切 / 复制 / 粘贴**。操作完全在远端执行（服务端改名或复制，必要时借助压缩工具），粘贴不会把文件先下载到本地再上传，且都有进度展示。
+- 在文件列表中新增 **解压与打包**：把 `.tar`、`.tar.gz`、`.tgz`、`.7z`、`.zip`、`.rar` 解压到指定目录或当前目录，并用远端的 `tar`/`7z`/`zip` 工具把所选内容打包成压缩包。缺少对应工具时会明确提示，而不是静默失败。
+- 为 **内置编辑** 增加了进度与完成提示（此前没有任何反馈）。编辑完成后会提示本地缓存是否已写回远端，以及因会话不可用而仅停留在本地的情况。
+- 修复了新建文件与已有同名文件夹冲突（以及反之）时出现未本地化的 `protocol error` 的问题，现在会给出清晰的冲突提示。
+- 补全了重命名、新建、删除、传输等此前只有英文报错的中文语言包。
+- 修复了收藏的文件夹/文件消失的问题，使收藏与连接采用同一套编辑与云同步持久化规则。
+
+##### ☁️ 云同步
+
+- 修复 **批量删除不同步** 的问题：短时间内删除大量会话时，可能残留未删除的条目，导致两端反复删除。
+- 修复了编辑/移动会话后删除、必须手动强制同步才会生效的问题。
+- 修正了远端为空分区时的应用逻辑，删除会被正确执行，而不再被当成误报的冲突跳过。
+- 加强了弱网环境下的同步安全性，中断的交换不会再损坏本地状态。
+- 增加了详细的中文同步日志，便于排查问题。
+
+##### 🖥️ 连接、会话与标签页
+
+- 让"配置相同但名称不同"的会话彻底相互独立，编辑其中一个不会再改名另一个。
+- 修复了打开多个会话标签时终端与主机工具 **串味** 的问题，面板不再显示别的主机数据、直到手动切换。
+- 因连接超时卡住的会话不再阻塞左侧列表打开其他主机。
+- 为已保存连接的编辑增加了审计日志，记录字段级变化与保存操作。
+
+##### 🧠 主机工具
+
+- 修复了在 `docker ps -a` 较慢的主机上容器检测异常的问题：容器列表改用轻量查询（`--size=false`），采样不再被拖住。
+- 在主机不支持所需计数器时，GPU/NPU 监控会优雅降级。
+
+##### ⚙️ 设置与本地化
+
+- 移除了终端"感知与继承"（输出触发）功能及其全部界面与引用。
+- 会话导入导出设置新增 `.oxide` 导入支持，并本地化了导出格式下拉框。
+- 补全了远程文件、连接与设置流程中缺失的翻译。
+
+##### 🧰 日志与构建
+
+- 重构了调试/审计日志系统：中文记录、带 UTF-8 BOM 且不会切断多字节字符的分片文件、CPU 尖峰采样器，并把覆盖面扩展到 SFTP、连接、云同步、导入导出与控件交互。
+- `build-windows.ps1` 在缺少 `link.exe` 时会自动导入 Visual Studio（MSVC）环境，并在替换产物前先关闭仍在运行的上一版程序。
+- 清除了上一次构建产生的编译警告。
+
 ## 2.0.23
 
 ### English

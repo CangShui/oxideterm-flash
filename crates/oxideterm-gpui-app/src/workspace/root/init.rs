@@ -171,9 +171,6 @@ impl WorkspaceApp {
                 ssh_registry.clone(),
                 node_router.clone(),
                 forwarding_runtime.clone(),
-                settings.reconnect.enabled,
-                reconnect_timing_from_settings(&settings),
-                reconnect_max_attempts_from_settings(&settings),
                 cx,
             )
         });
@@ -241,6 +238,7 @@ impl WorkspaceApp {
                         workspace.clear_workspace_tooltip(id, cx);
                     }
                     sftp::SftpWorkspaceEvent::PreviewSaveRequested {
+                        progress_key,
                         path,
                         content,
                         encoding,
@@ -248,7 +246,15 @@ impl WorkspaceApp {
                         generation,
                         delivery,
                     } => {
+                        let total = content.len().max(1) as u64;
+                        let _ = delivery.send(sftp::SftpWorkerResult::RemoteMutationProgress {
+                            key: progress_key.clone(),
+                            title: workspace.i18n.t("sftp.toast.editing"),
+                            completed: 0,
+                            total,
+                        });
                         if !workspace.spawn_remote_sftp_preview_save(
+                            progress_key.clone(),
                             path.clone(),
                             content.clone(),
                             encoding.clone(),
@@ -258,6 +264,9 @@ impl WorkspaceApp {
                             cx,
                         ) {
                             let _ = delivery.send(sftp::SftpWorkerResult::PreviewSaved {
+                                progress_key: progress_key.clone(),
+                                success_title: workspace.i18n.t("sftp.toast.edit_complete"),
+                                error_title: workspace.i18n.t("sftp.toast.edit_failed"),
                                 generation: *generation,
                                 path: path.clone(),
                                 content: content.clone(),
@@ -331,11 +340,13 @@ impl WorkspaceApp {
             host_tools
         });
         let connection_workspace = cx.new(ConnectionWorkspaceState::new);
-        let connection_workspace_observation =
-            cx.observe(&connection_workspace, |_workspace, _connection_workspace, cx| {
+        let connection_workspace_observation = cx.observe(
+            &connection_workspace,
+            |_workspace, _connection_workspace, cx| {
                 // Entity-owned manager state repaints every mounted manager surface.
                 cx.notify();
-            });
+            },
+        );
         let connection_workspace_subscription = cx.subscribe(
             &connection_workspace,
             |workspace, _connection_workspace, event: &ConnectionWorkspaceEvent, cx| {
@@ -444,8 +455,6 @@ impl WorkspaceApp {
             terminal_trigger_settings_pane: None,
             terminal_trigger_shell_confirmation_pending: false,
             terminal_triggers,
-            terminal_trigger_runtime:
-                terminal_triggers_runtime::TerminalTriggerRuntimeState::default(),
             terminal_trigger_saved_connections: HashMap::new(),
             terminal_semantic_highlight_section_expanded: true,
             terminal_rule_highlight_section_expanded: true,
@@ -468,7 +477,9 @@ impl WorkspaceApp {
             command_palette_hover_position: None,
             split_group_extents: HashMap::new(),
             sidebar_resizing: false,
+            sidebar_resize_trace_id: None,
             context_sidebar_resizing: false,
+            context_sidebar_resize_trace_id: None,
             embedded_sftp_sidebar_resizing: false,
             sidebar_resize_hotzone_hovered: false,
             sidebar_collapsed: settings.sidebar_ui.collapsed,
@@ -578,7 +589,12 @@ impl WorkspaceApp {
             cloud_sync: None,
             cloud_sync_config: None,
             cloud_sync_status: None,
+            cloud_sync_generation: 0,
+            cloud_sync_logs: VecDeque::new(),
+            cloud_sync_progress: None,
             cloud_sync_delete_prompt: None,
+            cloud_sync_auto_push_task: None,
+            cloud_sync_observed_store_state: None,
             sftp_progress_store,
             node_router,
             ssh_nodes: HashMap::new(),
@@ -630,7 +646,7 @@ impl WorkspaceApp {
             overlay,
             _overlay_observation: overlay_observation,
         };
-        let workspace_window_bounds = cx.observe_window_bounds(window, |this, window, cx| {
+        let _workspace_window_bounds = cx.observe_window_bounds(window, |this, window, cx| {
             this.clamp_sidebar_widths_to_viewport(current_window_size(window).0, cx);
             this.capture_main_window_state(window, cx);
         });
@@ -834,7 +850,7 @@ impl WorkspaceApp {
             backspace_sequence: terminal.backspace_sequence,
             delete_sequence: terminal.delete_sequence,
             bidi_enabled: terminal.unicode.bidi_enabled,
-            current_directory_awareness_enabled: terminal.command_bar.current_directory_awareness,
+            current_directory_awareness_enabled: false,
             command_marks_enabled: terminal.command_marks.enabled,
             command_marks_user_input_observed: terminal.command_marks.user_input_observed,
             command_marks_heuristic_detection: terminal.command_marks.heuristic_detection,
@@ -867,12 +883,12 @@ impl WorkspaceApp {
                     .i18n
                     .t("terminal.command_selection.replace_command_with_selection"),
                 find: self.i18n.t("terminal.command_selection.find"),
-                manage_triggers: self.i18n.t("terminal.command_selection.manage_triggers"),
                 select_command: self.i18n.t("terminal.command_selection.select_command"),
                 previous_command: self.i18n.t("terminal.command_selection.previous_command"),
                 next_command: self.i18n.t("terminal.command_selection.next_command"),
                 clear_screen: self.i18n.t("terminal.command_selection.clear_screen"),
-                clear_screen_shortcut: None,            },
+                clear_screen_shortcut: None,
+            },
             modem_labels: TerminalModemLabels {
                 binary_transfer: self.i18n.t("terminal.modem.binary_transfer"),
                 xmodem_upload: self.i18n.t("terminal.modem.xmodem_upload"),
@@ -881,9 +897,7 @@ impl WorkspaceApp {
                 ymodem_receive: self.i18n.t("terminal.modem.ymodem_receive"),
                 zmodem_upload: self.i18n.t("terminal.modem.zmodem_upload"),
                 zmodem_receive: self.i18n.t("terminal.modem.zmodem_receive"),
-                select_upload_files_title: self
-                    .i18n
-                    .t("terminal.modem.select_upload_files_title"),
+                select_upload_files_title: self.i18n.t("terminal.modem.select_upload_files_title"),
                 select_download_directory_title: self
                     .i18n
                     .t("terminal.modem.select_download_directory_title"),

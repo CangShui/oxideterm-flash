@@ -1730,6 +1730,317 @@ mod tests {
     }
 
     #[test]
+    fn saved_connection_delete_wins_over_clock_skew_and_stale_replay() {
+        let mut source = load_empty_store("sync-delete-clock-skew-source");
+        let mut target = load_empty_store("sync-delete-clock-skew-target");
+        source.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
+        target.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
+        let stale_active_snapshot = source.export_saved_connections_snapshot().unwrap();
+
+        // The receiving device is deliberately one hour ahead. A deletion
+        // must be normalized past the observed active record rather than being
+        // rejected by incomparable device wall clocks.
+        target.data.connections[0].updated_at = Some(Utc::now() + chrono::Duration::hours(1));
+        source.delete("conn-1").unwrap();
+        let deletion_snapshot = source.export_saved_connections_snapshot().unwrap();
+
+        let deleted = target
+            .apply_saved_connections_snapshot(
+                deletion_snapshot,
+                SavedConnectionsConflictStrategy::Merge,
+            )
+            .unwrap();
+        assert_eq!(deleted.result.applied, 1);
+        assert!(target.get("conn-1").is_none());
+
+        let replayed = target
+            .apply_saved_connections_snapshot(
+                stale_active_snapshot,
+                SavedConnectionsConflictStrategy::Merge,
+            )
+            .unwrap();
+        assert_eq!(replayed.result.applied, 0);
+        assert!(target.get("conn-1").is_none());
+    }
+
+    #[test]
+    fn serial_profile_tombstone_propagates_and_blocks_stale_resurrection() {
+        let mut source = load_empty_store("serial-tombstone-source");
+        let mut target = load_empty_store("serial-tombstone-target");
+        // Both devices start from the same profile snapshot so the deleting
+        // device's tombstone is strictly newer than the surviving copy.
+        for store in [&mut source, &mut target] {
+            store
+                .upsert_serial_profile(SaveSerialProfileRequest {
+                    id: Some("serial-1".to_string()),
+                    name: "Lab console".to_string(),
+                    port_path: "/dev/cu.usbserial-1".to_string(),
+                    ..SaveSerialProfileRequest::default()
+                })
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        source.delete_serial_profile("serial-1").unwrap();
+
+        let snapshot = source.export_serial_profiles_snapshot().unwrap();
+        assert_eq!(snapshot.tombstones.len(), 1);
+        assert_eq!(snapshot.tombstones[0].id, "serial-1");
+        assert!(snapshot.records.is_empty());
+
+        let applied = target.apply_serial_profiles_snapshot(snapshot).unwrap();
+        assert_eq!(applied, 1);
+        assert!(target.serial_profiles().is_empty());
+    }
+
+    #[test]
+    fn serial_profile_recreation_after_tombstone_is_accepted() {
+        let mut source = load_empty_store("serial-recreate-source");
+        let mut target = load_empty_store("serial-recreate-target");
+        for store in [&mut source, &mut target] {
+            store
+                .upsert_serial_profile(SaveSerialProfileRequest {
+                    id: Some("serial-1".to_string()),
+                    name: "Lab console".to_string(),
+                    port_path: "/dev/cu.usbserial-1".to_string(),
+                    ..SaveSerialProfileRequest::default()
+                })
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        source.delete_serial_profile("serial-1").unwrap();
+        let tombstone_snapshot = source.export_serial_profiles_snapshot().unwrap();
+        target
+            .apply_serial_profiles_snapshot(tombstone_snapshot)
+            .unwrap();
+        assert!(target.serial_profiles().is_empty());
+
+        // A stale active snapshot created before the deletion must not bring
+        // the profile back: the recorded tombstone outranks it.
+        let mut stale = SerialProfile::new("Lab console", "/dev/cu.usbserial-1");
+        stale.id = "serial-1".to_string();
+        stale.updated_at = Utc::now() - chrono::Duration::hours(1);
+        let stale_snapshot = SerialProfilesSyncSnapshot {
+            revision: "stale".to_string(),
+            exported_at: Utc::now().to_rfc3339(),
+            records: vec![stale],
+            tombstones: Vec::new(),
+        };
+        let applied = target.apply_serial_profiles_snapshot(stale_snapshot).unwrap();
+        assert_eq!(applied, 0);
+        assert!(target.serial_profiles().is_empty());
+
+        // A genuine re-creation with a newer timestamp clears the tombstone.
+        let mut recreated = SerialProfile::new("Lab console", "/dev/cu.usbserial-1");
+        recreated.id = "serial-1".to_string();
+        recreated.updated_at = Utc::now() + chrono::Duration::minutes(1);
+        let recreate_snapshot = SerialProfilesSyncSnapshot {
+            revision: "recreate".to_string(),
+            exported_at: Utc::now().to_rfc3339(),
+            records: vec![recreated],
+            tombstones: Vec::new(),
+        };
+        let applied = target.apply_serial_profiles_snapshot(recreate_snapshot).unwrap();
+        assert_eq!(applied, 1);
+        assert_eq!(target.serial_profiles().len(), 1);
+        assert!(target
+            .data
+            .serial_profile_tombstones
+            .iter()
+            .all(|tombstone| tombstone.id != "serial-1"));
+    }
+
+    #[test]
+    fn profile_delete_preview_counts_only_matching_local_profiles() {
+        let mut target = load_empty_store("profile-delete-preview");
+        target
+            .upsert_telnet_profile(SaveTelnetProfileRequest {
+                id: Some("telnet-1".to_string()),
+                name: "Router".to_string(),
+                host: "192.168.1.1".to_string(),
+                port: 23,
+                terminal: ConnectionTerminalOptions::default(),
+                ..SaveTelnetProfileRequest::default()
+            })
+            .unwrap();
+        target
+            .upsert_telnet_profile(SaveTelnetProfileRequest {
+                id: Some("telnet-2".to_string()),
+                name: "Switch".to_string(),
+                host: "192.168.1.2".to_string(),
+                port: 23,
+                terminal: ConnectionTerminalOptions::default(),
+                ..SaveTelnetProfileRequest::default()
+            })
+            .unwrap();
+
+        let deleted_at = Utc::now() + chrono::Duration::minutes(1);
+        let snapshot = TelnetProfilesSyncSnapshot {
+            revision: "deleting".to_string(),
+            exported_at: Utc::now().to_rfc3339(),
+            records: Vec::new(),
+            tombstones: vec![
+                ProfileTombstone {
+                    id: "telnet-1".to_string(),
+                    deleted_at,
+                },
+                ProfileTombstone {
+                    id: "telnet-unknown".to_string(),
+                    deleted_at,
+                },
+            ],
+        };
+
+        assert_eq!(target.preview_telnet_profiles_snapshot_deletions(&snapshot), 1);
+    }
+
+    #[test]
+    fn telnet_profile_tombstone_propagates_and_blocks_stale_resurrection() {
+        let mut source = load_empty_store("telnet-tombstone-source");
+        let mut target = load_empty_store("telnet-tombstone-target");
+        for store in [&mut source, &mut target] {
+            store
+                .upsert_telnet_profile(SaveTelnetProfileRequest {
+                    id: Some("telnet-1".to_string()),
+                    name: "Router console".to_string(),
+                    host: "192.168.1.1".to_string(),
+                    port: 23,
+                    terminal: ConnectionTerminalOptions::default(),
+                    ..SaveTelnetProfileRequest::default()
+                })
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        source.delete_telnet_profile("telnet-1").unwrap();
+
+        let snapshot = source.export_telnet_profiles_snapshot().unwrap();
+        assert_eq!(snapshot.tombstones.len(), 1);
+        let applied = target.apply_telnet_profiles_snapshot(snapshot).unwrap();
+        assert_eq!(applied, 1);
+        assert!(target.telnet_profiles().is_empty());
+
+        let mut stale = TelnetProfile::new("Router console", "192.168.1.1", 23);
+        stale.id = "telnet-1".to_string();
+        stale.updated_at = Utc::now() - chrono::Duration::hours(1);
+        let stale_snapshot = TelnetProfilesSyncSnapshot {
+            revision: "stale".to_string(),
+            exported_at: Utc::now().to_rfc3339(),
+            records: vec![stale],
+            tombstones: Vec::new(),
+        };
+        let applied = target.apply_telnet_profiles_snapshot(stale_snapshot).unwrap();
+        assert_eq!(applied, 0);
+        assert!(target.telnet_profiles().is_empty());
+    }
+
+    #[test]
+    fn remote_desktop_profile_tombstone_propagates_and_blocks_stale_resurrection() {
+        let mut source = load_empty_store("rdp-tombstone-source");
+        let mut target = load_empty_store("rdp-tombstone-target");
+        for store in [&mut source, &mut target] {
+            store
+                .upsert_remote_desktop_profile(SaveRemoteDesktopProfileRequest {
+                    id: Some("rdp-1".to_string()),
+                    name: "Workstation".to_string(),
+                    protocol: RemoteDesktopProtocol::Rdp,
+                    host: "192.168.1.10".to_string(),
+                    port: 3389,
+                    ..SaveRemoteDesktopProfileRequest::default()
+                })
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        source.delete_remote_desktop_profile("rdp-1").unwrap();
+
+        let snapshot = source.export_remote_desktop_profiles_snapshot().unwrap();
+        assert_eq!(snapshot.tombstones.len(), 1);
+        let applied = target.apply_remote_desktop_profiles_snapshot(snapshot).unwrap();
+        assert_eq!(applied, 1);
+        assert!(target.remote_desktop_profiles().is_empty());
+
+        let mut stale = RemoteDesktopProfile::new(
+            "Workstation",
+            RemoteDesktopProtocol::Rdp,
+            "192.168.1.10",
+            3389,
+        );
+        stale.id = "rdp-1".to_string();
+        stale.updated_at = Utc::now() - chrono::Duration::hours(1);
+        let stale_snapshot = RemoteDesktopProfilesSyncSnapshot {
+            revision: "stale".to_string(),
+            exported_at: Utc::now().to_rfc3339(),
+            records: vec![stale],
+            tombstones: Vec::new(),
+        };
+        let applied = target.apply_remote_desktop_profiles_snapshot(stale_snapshot).unwrap();
+        assert_eq!(applied, 0);
+        assert!(target.remote_desktop_profiles().is_empty());
+    }
+
+    #[test]
+    fn standalone_sftp_profile_tombstone_propagates_and_blocks_stale_resurrection() {
+        let mut source = load_empty_store("sftp-tombstone-source");
+        let mut target = load_empty_store("sftp-tombstone-target");
+        for store in [&mut source, &mut target] {
+            store
+                .upsert_standalone_sftp_profile(SaveStandaloneSftpProfileRequest {
+                    id: Some("sftp-1".to_string()),
+                    name: "Archive".to_string(),
+                    group: None,
+                    notes: None,
+                    icon: None,
+                    color: None,
+                    icon_background_color: None,
+                    host: "sftp.example.test".to_string(),
+                    port: 2222,
+                    username: "archive".to_string(),
+                    auth: SavedAuth::Agent,
+                    connect_timeout_seconds: 45,
+                    proxy_chain: Vec::new(),
+                    upstream_proxy: SavedUpstreamProxyPolicy::UseGlobal,
+                    proxy_command: None,
+                    identity_agent: None,
+                    legacy_ssh_compatibility: false,
+                    ssh_algorithms: SshAlgorithmPreferences::default(),
+                    initial_remote_path: None,
+                    transfer_mode: StandaloneSftpTransferMode::LocalRemote,
+                    secondary_endpoint: None,
+                })
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        source.delete_standalone_sftp_profile("sftp-1").unwrap();
+
+        let snapshot = source.export_standalone_sftp_profiles_snapshot().unwrap();
+        assert_eq!(snapshot.tombstones.len(), 1);
+        let applied = target
+            .apply_standalone_sftp_profiles_snapshot(snapshot)
+            .unwrap();
+        assert_eq!(applied, 1);
+        assert!(target.standalone_sftp_profiles().is_empty());
+
+        let mut stale = StandaloneSftpProfile::new(
+            "Archive",
+            "sftp.example.test",
+            2222,
+            "archive",
+            SavedAuth::Agent,
+        );
+        stale.id = "sftp-1".to_string();
+        stale.updated_at = Utc::now() - chrono::Duration::hours(1);
+        let stale_snapshot = StandaloneSftpProfilesSyncSnapshot {
+            revision: "stale".to_string(),
+            exported_at: Utc::now().to_rfc3339(),
+            records: vec![stale],
+            tombstones: Vec::new(),
+        };
+        let applied = target
+            .apply_standalone_sftp_profiles_snapshot(stale_snapshot)
+            .unwrap();
+        assert_eq!(applied, 0);
+        assert!(target.standalone_sftp_profiles().is_empty());
+    }
+
+    #[test]
     fn saved_connection_sync_merge_applies_kerberos_policy_and_keeps_local_fallback_secret() {
         let mut target = load_empty_store("sync-kerberos-target");
         target
@@ -2134,6 +2445,10 @@ mod tests {
             dedicated_new_terminal_connection: true,
             post_connect_command: Some("uname -a".to_string()),
             terminal: ConnectionTerminalOptions::default(),
+            remote_path_favorites: vec![
+                RemotePathFavorite::new("/srv/releases", true).unwrap(),
+                RemotePathFavorite::new("/var/log/service.log", false).unwrap(),
+            ],
         };
         source.save().unwrap();
 
@@ -2175,6 +2490,13 @@ mod tests {
             imported.options.post_connect_command.as_deref(),
             Some("uname -a")
         );
+        assert_eq!(
+            imported.options.remote_path_favorites,
+            vec![
+                RemotePathFavorite::new("/srv/releases", true).unwrap(),
+                RemotePathFavorite::new("/var/log/service.log", false).unwrap(),
+            ]
+        );
         let SavedUpstreamProxyPolicy::Custom { proxy } = &imported.upstream_proxy else {
             panic!("custom upstream proxy should survive sync");
         };
@@ -2194,6 +2516,43 @@ mod tests {
         assert_eq!(username, "proxy-user");
         assert!(keychain_id.is_none());
         assert!(plaintext_password.is_none());
+    }
+
+    #[test]
+    fn remote_path_favorites_are_persisted_per_saved_connection() {
+        let mut store = load_empty_store("remote-path-favorites");
+        store
+            .upsert(request("conn-1", SavedAuth::Agent))
+            .unwrap();
+        store
+            .upsert(request("conn-2", SavedAuth::Agent))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .toggle_remote_path_favorite("conn-1", "/srv//releases/", true)
+                .unwrap(),
+            Some(true)
+        );
+        let path = store.path().to_path_buf();
+        let reloaded = ConnectionStore::load(path).unwrap();
+
+        assert_eq!(
+            reloaded
+                .get("conn-1")
+                .unwrap()
+                .options
+                .remote_path_favorites,
+            vec![RemotePathFavorite::new("/srv/releases", true).unwrap()]
+        );
+        assert!(
+            reloaded
+                .get("conn-2")
+                .unwrap()
+                .options
+                .remote_path_favorites
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2230,6 +2589,46 @@ mod tests {
         );
         assert_eq!(imported.options.keep_alive_interval, 0);
         assert!(!imported.options.compression);
+    }
+
+    #[test]
+    fn saved_connection_sync_preserves_local_favorites_when_snapshot_has_none() {
+        let mut source = load_empty_store("sync-favorites-source");
+        source.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
+        let snapshot = source.export_saved_connections_snapshot().unwrap();
+        let mut snapshot_json = serde_json::to_value(snapshot).unwrap();
+        snapshot_json["records"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("options");
+        let legacy_snapshot: SavedConnectionsSyncSnapshot =
+            serde_json::from_value(snapshot_json).unwrap();
+
+        let mut target = load_empty_store("sync-favorites-target");
+        target.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
+        target
+            .toggle_remote_path_favorite("conn-1", "/root", true)
+            .unwrap();
+        assert_eq!(
+            target
+                .get("conn-1")
+                .unwrap()
+                .options
+                .remote_path_favorites
+                .len(),
+            1
+        );
+
+        target
+            .apply_saved_connections_snapshot(
+                legacy_snapshot,
+                SavedConnectionsConflictStrategy::Replace,
+            )
+            .unwrap();
+
+        let merged = target.get("conn-1").unwrap();
+        assert_eq!(merged.options.remote_path_favorites.len(), 1);
+        assert_eq!(merged.options.remote_path_favorites[0].path, "/root");
     }
 
     #[test]
@@ -3059,6 +3458,7 @@ mod tests {
                 revision: "foreign".to_string(),
                 exported_at: Utc::now().to_rfc3339(),
                 records: vec![imported],
+                tombstones: Vec::new(),
             })
             .unwrap();
         assert_eq!(
@@ -3078,6 +3478,7 @@ mod tests {
                 revision: "foreign".to_string(),
                 exported_at: Utc::now().to_rfc3339(),
                 records: vec![foreign_profile],
+                tombstones: Vec::new(),
             })
             .unwrap();
         assert!(

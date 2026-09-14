@@ -358,71 +358,7 @@ impl WorkspaceApp {
         file: SftpFileEntry,
         cx: &mut Context<Self>,
     ) {
-        let Some(remote_id) = self.visible_sftp_remote_id(cx) else {
-            self.push_sftp_toast(
-                self.i18n.t("sftp.toast.extract_failed"),
-                None,
-                TerminalNoticeVariant::Error,
-                cx,
-            );
-            return;
-        };
-        let remote_directory = self.sftp_view.read(cx).remote_path.clone();
-        let archive_path = if file.path.is_empty() {
-            join_sftp_path(&remote_directory, &file.name)
-        } else {
-            file.path.clone()
-        };
-        let command = match oxideterm_sftp::plan_archive_extraction(
-            &file.name,
-            &archive_path,
-            &remote_directory,
-        ) {
-            Ok(plan) => plan.command,
-            Err(oxideterm_sftp::ArchiveExtractionError::UnsupportedArchive { .. }) => {
-                self.push_sftp_toast(
-                    self.i18n.t("sftp.toast.unsupported_archive"),
-                    Some(file.name),
-                    TerminalNoticeVariant::Error,
-                    cx,
-                );
-                return;
-            }
-        };
-
-        let Some(backend) = self.sftp_remote_backend(&remote_id) else {
-            return;
-        };
-        let tx = self.sftp_view.read(cx).worker_sender();
-        let runtime = self.forwarding_runtime.clone();
-        let toast = SftpMutationToast {
-            success_title: self.i18n.t("sftp.toast.extract_complete"),
-            success_description: Some(file.name),
-            error_title: self.i18n.t("sftp.toast.extract_failed"),
-        };
-        runtime.spawn(async move {
-            let result = async {
-                let handle = backend.resolve_connection().await?;
-                let output = handle
-                    .run_command_capture(&command, std::time::Duration::from_secs(300), 64 * 1024)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if output.exit_code == Some(0) {
-                    Ok(())
-                } else {
-                    Err(format_sftp_remote_extract_error(output))
-                }
-            }
-            .await;
-            let _ = tx.send(SftpWorkerResult::RemoteMutationComplete {
-                result,
-                refresh_remote: true,
-                refresh_local: false,
-                toast: Some(toast),
-            });
-        });
-        self.sftp_view
-            .update(cx, |sftp, cx| sftp.dismiss_context_menu(cx));
+        self.open_remote_archive_dialog(true, Some(file.name), cx);
     }
 
     pub(in crate::workspace::sftp) fn queue_sftp_transfers(
@@ -763,21 +699,4 @@ pub(in crate::workspace) fn sftp_extract_archive_kind(
     oxideterm_sftp::archive_kind(file_name)
 }
 
-fn format_sftp_remote_extract_error(output: oxideterm_ssh::SshCommandOutput) -> String {
-    let detail = if !output.stderr.trim().is_empty() {
-        output.stderr.trim()
-    } else if !output.stdout.trim().is_empty() {
-        output.stdout.trim()
-    } else {
-        "remote extractor exited without details"
-    };
-    let mut message = if let Some(code) = output.exit_code {
-        format!("exit {code}: {detail}")
-    } else {
-        format!("remote extractor exited without status: {detail}")
-    };
-    if output.truncated {
-        message.push_str(" (output truncated)");
-    }
-    message
-}
+

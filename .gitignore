@@ -16,6 +16,8 @@ target/
 
 # Build artifacts
 dist/
+logs/
+log/
 *.o
 *.a
 *.dylib

@@ -1,3 +1,5 @@
+#![allow(linker_messages)]
+
 mod derive_action;
 mod derive_app_context;
 mod derive_into_element;

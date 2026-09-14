@@ -237,6 +237,8 @@ impl WorkspaceApp {
         let tooltip_for_move = tooltip.clone();
         let tooltip_element_id = tooltip.clone();
         let tooltip_request_id = tooltip.clone();
+        let audit_control = tooltip.clone();
+        let blocked_control = tooltip.clone();
         let tooltip_workspace = workspace.clone();
         let clear_workspace = workspace;
 
@@ -269,13 +271,21 @@ impl WorkspaceApp {
             }
         })
         .when(actionable, |button| {
-            button.on_mouse_down(MouseButton::Left, listener)
+            button.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                crate::logging::audit_button_click(&audit_control, "workspace");
+                listener(event, window, cx);
+            })
         })
         .when(!actionable, |button| {
             // Disabled browser buttons do not activate their parent row. Stop the
             // click at the shared tooltip button so file/SFTP/sidebar toolbars do
             // not each need a local disabled-event patch.
-            button.on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+            button.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                crate::logging::audit_button_blocked(
+                    &blocked_control,
+                    "workspace",
+                    "button is disabled or loading",
+                );
                 cx.stop_propagation();
             })
         })
@@ -293,6 +303,8 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let actionable = !(options.disabled || options.loading);
+        let audit_control = format!("icon-{icon:?}");
+        let blocked_control = audit_control.clone();
 
         // Row-level icon buttons do not always have tooltips, but they still
         // share the browser button contract: disabled/loading buttons keep
@@ -303,12 +315,23 @@ impl WorkspaceApp {
             options,
         )
         .when(actionable, |button| {
-            button.on_mouse_down(MouseButton::Left, cx.listener(listener))
+            button.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    crate::logging::audit_button_click(&audit_control, "workspace");
+                    listener(this, event, window, cx);
+                }),
+            )
         })
         .when(!actionable, |button| {
             // Match the DOM disabled button contract for inline row actions:
             // inert buttons consume the pointer instead of selecting/opening the row.
-            button.on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+            button.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                crate::logging::audit_button_blocked(
+                    &blocked_control,
+                    "workspace",
+                    "button is disabled or loading",
+                );
                 cx.stop_propagation();
             })
         })
@@ -322,16 +345,26 @@ impl WorkspaceApp {
         listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     ) -> gpui::Div {
         let actionable = !(options.button.disabled || options.loading);
+        let audit_label = label.clone();
+        let blocked_label = audit_label.clone();
 
         // Tauri Button activation always goes through the native disabled
         // attribute. GPUI callers still own the action body, but the shared
         // wrapper keeps disabled/loading activation guards out of feature code.
         oxideterm_gpui_ui::button::toolbar_button(&self.tokens, label, icon, options)
             .when(actionable, |button| {
-                button.on_mouse_down(MouseButton::Left, listener)
+                button.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    crate::logging::audit_button_click(&audit_label, "workspace");
+                    listener(event, window, cx);
+                })
             })
             .when(!actionable, |button| {
-                button.on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                button.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    crate::logging::audit_button_blocked(
+                        &blocked_label,
+                        "workspace",
+                        "button is disabled or loading",
+                    );
                     cx.stop_propagation();
                 })
             })

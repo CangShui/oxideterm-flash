@@ -2,7 +2,6 @@
 /// Run this example with:
 /// cargo run --example client_exec_interactive -- -k <private key path> <host> <command>
 ///
-use std::convert::TryFrom;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

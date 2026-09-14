@@ -20,6 +20,12 @@ impl WorkspaceApp {
                 self.render_sftp_drives_dialog_body(has_background, cx),
                 None,
             ),
+            SftpDialog::Archive { extract, .. } => (
+                self.i18n.t(if extract { "sftp.archive.extract" } else { "sftp.archive.create" }),
+                self.i18n.t(if extract { "sftp.archive.extract_hint" } else { "sftp.archive.create_hint" }),
+                self.render_sftp_dialog_input("sftp.archive.destination", cx),
+                Some(self.i18n.t("common.actions.confirm")),
+            ),
             SftpDialog::Rename { .. } => (
                 self.i18n.t("sftp.dialogs.rename"),
                 self.i18n.t("sftp.dialogs.rename_desc"),
@@ -86,7 +92,8 @@ impl WorkspaceApp {
         };
         let width = match &dialog {
             SftpDialog::Drives => SFTP_DIALOG_WIDTH_XS,
-            SftpDialog::Rename { .. }
+            SftpDialog::Archive { .. }
+            | SftpDialog::Rename { .. }
             | SftpDialog::NewFolder { .. }
             | SftpDialog::NewFile { .. }
             | SftpDialog::Delete { .. } => SFTP_DIALOG_WIDTH_SM,

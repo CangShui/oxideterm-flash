@@ -155,7 +155,6 @@ where
             let encoding_detector = &mut state.encoding_detector;
             let output_decoder = &mut state.output_decoder;
             let output_events_enabled = state.output_events_enabled;
-            let trigger_stream = &mut state.trigger_stream;
             let shell_integration = &mut state.shell_integration;
             let alt_screen_active = &mut state.alt_screen_active;
             graphics.advance_ordered(
@@ -167,11 +166,6 @@ where
                         }
                         let decoded = output_decoder.decode_to_utf8_bytes(&terminal_bytes);
                         parsed_bytes += terminal_bytes.len();
-                        if let Some(stream) = trigger_stream.as_mut() {
-                            stream.observe_bytes(decoded.as_ref(), |matched| {
-                                let _ = event_tx.send(TerminalEvent::TriggerMatched(matched));
-                            });
-                        }
                         if output_events_enabled {
                             // Persist only bytes released by the shell-integration
                             // scanner so invisible private clipboard OSC cannot enter recordings.

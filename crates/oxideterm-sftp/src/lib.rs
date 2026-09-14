@@ -12,9 +12,11 @@ mod conflict;
 mod error;
 mod path_utils;
 mod progress;
+mod remote_ops;
 mod retry;
 mod scp;
 mod session;
+mod shell_listing;
 mod tar_transfer;
 mod text_diff;
 mod transfer_manager;
@@ -38,6 +40,7 @@ pub use progress::{
     RemoteRelayProgressContext, StoredRemoteRelayProgress, StoredTransferProgress,
     TransferProtocol, TransferStatus, TransferStrategy, TransferType,
 };
+pub use remote_ops::{RemoteCopyPlanError, plan_remote_copy_command};
 pub use retry::{
     RetryConfig, calculate_backoff, error_is_auth_failure, error_is_connection_unavailable,
     error_is_not_found, error_is_permission_denied, error_should_retry_initialization,
@@ -48,6 +51,7 @@ pub use scp::{
     scp_download_directory, scp_download_file, scp_upload_directory, scp_upload_file,
 };
 pub use session::{SftpChannelOpener, SftpSession, WriteContentResult};
+pub use shell_listing::{error_is_sftp_protocol_unavailable, list_remote_directory_via_shell};
 pub use tar_transfer::{
     SftpExecChannelOpener, TarCapabilities, TarCompression, probe_tar_capabilities,
     probe_tar_compression, probe_tar_support, tar_download_directory, tar_upload_directory,
@@ -67,3 +71,6 @@ pub use types::{
     RemoteRelayDisposition, SortOrder, TransferDirection, TransferProgress, TransferState,
     encode_to_encoding,
 };
+
+mod archive_create;
+pub use archive_create::{archive_tools, plan_archive_creation};

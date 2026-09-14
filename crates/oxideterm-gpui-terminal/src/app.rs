@@ -83,6 +83,24 @@ const EDITOR_INTEGRATION_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(250
 const EDITOR_CLIPBOARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const TERMINAL_SEARCH_DEBOUNCE: Duration = Duration::from_millis(24);
 const BACKGROUND_IMAGE_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(32);
+const TERMINAL_STALL_AUDIT_COOLDOWN: Duration = Duration::from_secs(5);
+const TERMINAL_STALL_DRAIN_THRESHOLD: Duration = Duration::from_millis(8);
+const TERMINAL_STALL_LOCK_WAIT_THRESHOLD: Duration = Duration::from_millis(4);
+const TERMINAL_STALL_PENDING_BYTES_THRESHOLD: usize = 512 * 1024;
+static NEXT_TERMINAL_AUDIT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(super) fn audit_terminal_communication(channel: &'static str, byte_count: usize) {
+    tracing::debug!(
+        target: "oxideterm::audit",
+        trace_id = NEXT_TERMINAL_AUDIT_TRACE_ID.fetch_add(1, Ordering::Relaxed),
+        stage = "terminal.communication",
+        direction = "outbound",
+        channel,
+        byte_count,
+        payload = "<redacted: terminal data may contain sensitive text>",
+        "terminal data was sent to the session backend"
+    );
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalPaneEvent {
@@ -393,6 +411,7 @@ pub struct TerminalPane {
     last_terminal_input: Instant,
     last_terminal_activity: Instant,
     last_drain_budget_exhausted: bool,
+    last_stall_audit_at: Option<Instant>,
     scheduler_wake_sender: Sender<()>,
     process_info_refresh_in_flight: bool,
     last_process_info_refresh_requested: Instant,
@@ -466,7 +485,6 @@ pub(crate) enum FreeTypeDragAction {
 pub enum TerminalContextAction {
     FillCommandBarFromSelection,
     OpenSearch,
-    OpenSessionTriggers,
 }
 
 #[derive(Clone, Debug)]
@@ -985,6 +1003,7 @@ impl TerminalPane {
             last_terminal_input: Instant::now(),
             last_terminal_activity: Instant::now(),
             last_drain_budget_exhausted: false,
+            last_stall_audit_at: None,
             scheduler_wake_sender,
             process_info_refresh_in_flight: false,
             last_process_info_refresh_requested: Instant::now()
@@ -1963,6 +1982,7 @@ impl TerminalPane {
             Err(_) => self.terminal.lock().write_protocol_bytes(&bytes),
         };
         if result.is_ok() {
+            audit_terminal_communication("paste", bytes.len());
             self.restore_live_output_after_user_input();
             self.input_tracker.reset();
             self.last_terminal_input = Instant::now();
@@ -2117,6 +2137,7 @@ impl TerminalPane {
         // learned as user history, autosuggest input, or AI
         // context, even though the shell may still echo the bytes visibly.
         if self.terminal.lock().write_text(&input).is_ok() {
+            audit_terminal_communication("internal-control", input.len());
             self.last_terminal_input = Instant::now();
             self.reset_cursor_blink();
             cx.notify();
@@ -2498,6 +2519,34 @@ impl TerminalPane {
 
     fn update_render_stats(&mut self, report: &TerminalDrainReport, now: Instant) -> bool {
         let drain_micros = report.drain_duration.as_micros().min(u128::from(u64::MAX)) as u64;
+        let should_record_stall = report.budget_exhausted
+            || report.drain_duration >= TERMINAL_STALL_DRAIN_THRESHOLD
+            || report.terminal_lock_wait_duration >= TERMINAL_STALL_LOCK_WAIT_THRESHOLD
+            || report.pending_bytes >= TERMINAL_STALL_PENDING_BYTES_THRESHOLD;
+        if should_record_stall
+            && self.last_stall_audit_at.is_none_or(|last| {
+                now.saturating_duration_since(last) >= TERMINAL_STALL_AUDIT_COOLDOWN
+            })
+        {
+            self.last_stall_audit_at = Some(now);
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id = NEXT_TERMINAL_AUDIT_TRACE_ID.fetch_add(1, Ordering::Relaxed),
+                stage = "terminal.performance",
+                session_kind = ?self.session_kind,
+                render_tier = ?self.current_render_tier(),
+                drained_bytes = report.drained_bytes,
+                pending_bytes = report.pending_bytes,
+                events_drained = report.events_drained,
+                drain_micros,
+                output_processing_micros = report.output_processing_duration.as_micros().min(u128::from(u64::MAX)) as u64,
+                terminal_lock_wait_micros = report.terminal_lock_wait_duration.as_micros().min(u128::from(u64::MAX)) as u64,
+                max_data_chunk_bytes = report.max_data_chunk_bytes,
+                budget_exhausted = report.budget_exhausted,
+                business_impact = "terminal output processing may delay input or rendering",
+                "terminal processing crossed a responsiveness threshold"
+            );
+        }
         if self.preferences.show_performance_overlay
             && (report.events_drained > 0 || report.changed || report.pending_bytes > 0)
         {
@@ -2816,6 +2865,14 @@ impl TerminalPane {
                 TerminalEventEffect::notify()
             }
             TerminalEvent::CwdChanged { cwd, host } => {
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id = NEXT_TERMINAL_AUDIT_TRACE_ID.fetch_add(1, Ordering::Relaxed),
+                    stage = "cwd.response",
+                    path_character_count = cwd.chars().count(),
+                    host_present = host.is_some(),
+                    "the shell reported a working-directory change"
+                );
                 self.cwd = Some(cwd);
                 self.cwd_source = Some(TerminalWorkingDirectorySource::ShellIntegration);
                 // A prepared startup profile becomes active only after the
@@ -2861,6 +2918,7 @@ impl TerminalPane {
         }
 
         if self.terminal.lock().write_protocol_bytes(bytes).is_ok() {
+            audit_terminal_communication("protocol", bytes.len());
             if let Some(recorder) = self.recorder.as_mut() {
                 recorder.record_input(&String::from_utf8_lossy(bytes));
             }
@@ -2918,6 +2976,7 @@ impl TerminalPane {
         }
 
         if self.terminal.lock().write_text(text).is_ok() {
+            audit_terminal_communication("text", text.len());
             self.restore_live_output_after_user_input();
             if let Some(recorder) = self.recorder.as_mut() {
                 recorder.record_input(text);
@@ -2993,7 +3052,7 @@ impl TerminalPane {
         command: &str,
         cx: &mut Context<Self>,
     ) {
-        if !self.settings.current_directory_awareness_enabled || self.cwd_is_shell_integrated() {
+        if !self.settings.current_directory_awareness_enabled {
             return;
         }
         let cwd = self
@@ -3010,10 +3069,6 @@ impl TerminalPane {
                 cx,
             );
         }
-    }
-
-    fn cwd_is_shell_integrated(&self) -> bool {
-        self.cwd_source == Some(TerminalWorkingDirectorySource::ShellIntegration)
     }
 
     fn terminal_accepts_input(&self) -> bool {

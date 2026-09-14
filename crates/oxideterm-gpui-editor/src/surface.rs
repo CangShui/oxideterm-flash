@@ -5,9 +5,13 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     ops::Range,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::Duration,
 };
+// Only the Windows caret probe needs OnceLock; other targets always return the
+// fixed cadence, so importing it unconditionally would be unused there.
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 use gpui::{
     AnyElement, App, Bounds, Context, Div, Element, ElementId, ElementInputHandler, Entity,

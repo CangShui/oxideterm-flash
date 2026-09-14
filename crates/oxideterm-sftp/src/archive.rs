@@ -7,6 +7,8 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArchiveKind {
     Zip,
+    SevenZip,
+    Rar,
     Tar,
     TarGzip,
     TarBzip2,
@@ -31,7 +33,11 @@ pub enum ArchiveExtractionError {
 /// Identifies an archive format from its file name.
 pub fn archive_kind(file_name: &str) -> Option<ArchiveKind> {
     let lower = file_name.to_ascii_lowercase();
-    if lower.ends_with(".zip") {
+    if lower.ends_with(".7z") {
+        Some(ArchiveKind::SevenZip)
+    } else if lower.ends_with(".rar") {
+        Some(ArchiveKind::Rar)
+    } else if lower.ends_with(".zip") {
         Some(ArchiveKind::Zip)
     } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
         Some(ArchiveKind::TarGzip)
@@ -62,6 +68,8 @@ pub fn plan_archive_extraction(
     let destination = shell_quote(destination_path);
     // Keep extraction non-destructive until SFTP has an archive conflict dialog.
     let command = match kind {
+        ArchiveKind::SevenZip => format!("7z x -aos -y -o{destination} -- {archive} < /dev/null"),
+        ArchiveKind::Rar => format!("unrar x -o- -p- {archive} {destination}/ < /dev/null"),
         ArchiveKind::Zip => format!("unzip -nq {archive} -d {destination}"),
         ArchiveKind::Tar => format!("tar -k -xf {archive} -C {destination}"),
         ArchiveKind::TarGzip => format!("tar -k -xzf {archive} -C {destination}"),

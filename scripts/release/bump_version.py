@@ -100,7 +100,8 @@ def version_badge_url(version: str) -> str:
 def updated_readme_badge(readme_text: str, new_version: str, path: Path) -> str:
     updated_text, count = README_BADGE_RE.subn(version_badge_url(new_version), readme_text)
     if count == 0:
-        raise RuntimeError(f"version badge not found in {path.relative_to(ROOT_DIR)}")
+        # Forks may ship a custom README without the shields.io version badge.
+        print(f"note: no version badge in {path.relative_to(ROOT_DIR)}; skipping badge update")
     return updated_text
 
 

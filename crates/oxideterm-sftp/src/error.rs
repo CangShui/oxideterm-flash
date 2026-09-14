@@ -13,6 +13,8 @@ pub enum SftpError {
     FileNotFound(String),
     #[error("Directory not found: {0}")]
     DirectoryNotFound(String),
+    #[error("File already exists: {0}")]
+    AlreadyExists(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("Channel error: {0}")]
@@ -52,6 +54,7 @@ impl SftpError {
             Self::PermissionDenied(_)
             | Self::FileNotFound(_)
             | Self::DirectoryNotFound(_)
+            | Self::AlreadyExists(_)
             | Self::InvalidPath(_)
             | Self::TransferCancelled
             | Self::TransferInterrupted(_)

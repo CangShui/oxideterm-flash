@@ -130,6 +130,7 @@
       }
     },
     "host_docker": {
+      "invalid_output": "Docker 返回了无法识别的数据，不能据此判断没有容器。请刷新并检查调试日志。",
       "search_placeholder": "搜索容器...",
       "count_suffix": "个容器",
       "sampling": "正在采样 Docker 容器...",

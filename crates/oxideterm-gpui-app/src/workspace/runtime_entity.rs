@@ -6,7 +6,6 @@ use super::*;
 use oxideterm_ssh::{ManagedKeyResolver, ReconnectForwardRestorePlan, ReconnectJob, ReconnectTiming};
 
 const ACTIVE_PROBE_START_DELAY: Duration = Duration::from_millis(530);
-const RECONNECT_DEBOUNCE_DELAY: Duration = Duration::from_millis(500);
 const RECONNECT_MAX_REQUEUE: u32 = 120;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,9 +20,6 @@ pub(in crate::workspace) enum WorkspaceRuntimeEffect {
     OpenReadySshTerminals {
         requests: Vec<PendingSshTerminalOpen>,
     },
-    StartReconnectRoot {
-        node_id: NodeId,
-    },
     ContinueConnectionChain {
         node_id: NodeId,
     },
@@ -33,7 +29,9 @@ pub(in crate::workspace) enum WorkspaceRuntimeEffect {
     },
     RetryNodeConnect {
         node_id: NodeId,
+        #[allow(dead_code)]
         attempt: u32,
+        #[allow(dead_code)]
         max_attempts: u32,
     },
     ReconnectRecoveredBeforeRetry {
@@ -73,6 +71,7 @@ pub(in crate::workspace) enum QueueSshTerminalOpenOutcome {
 pub(in crate::workspace) enum ReconnectRuntimeEffect {
     NodeConnected {
         node_id: NodeId,
+        #[allow(dead_code)]
         connection_id: String,
         reconnecting: bool,
     },
@@ -88,10 +87,13 @@ pub(in crate::workspace) enum ReconnectRuntimeEffect {
     },
     GraceExpired {
         node_id: NodeId,
+        #[allow(dead_code)]
         detail: String,
     },
     SftpTransfersSnapshotted {
+        #[allow(dead_code)]
         node_id: NodeId,
+        #[allow(dead_code)]
         entered_grace_period: bool,
     },
 }
@@ -100,7 +102,9 @@ pub(in crate::workspace) enum ReconnectRuntimeEffect {
 pub(in crate::workspace) enum ReconnectFailureAction {
     InitialConnect,
     Retry {
+        #[allow(dead_code)]
         attempt: u32,
+        #[allow(dead_code)]
         max_attempts: u32,
         delay: Duration,
         job_id: String,
@@ -112,6 +116,7 @@ pub(in crate::workspace) enum ReconnectFailureAction {
 pub(in crate::workspace) enum NodeRuntimeEffect {
     ConnectionStatusChanged {
         node_id: NodeId,
+        #[allow(dead_code)]
         connection_id: String,
         status: String,
         state: NodeReadiness,
@@ -249,10 +254,6 @@ pub(in crate::workspace) struct WorkspaceRuntimeEntity {
     next_node_transport_attempt_id: u64,
     node_event_generations: HashMap<NodeId, u64>,
     node_router: NodeRouter,
-    reconnect_enabled: bool,
-    pending_reconnect_node_ids: HashSet<NodeId>,
-    reconnect_debounce_generation: u64,
-    reconnect_debounce_task: Option<Task<()>>,
     reconnect_pipeline_active_node: Option<NodeId>,
     reconnect_requeue_states: HashMap<NodeId, ReconnectRequeueState>,
     reconnect_requeue_tasks: HashMap<NodeId, Task<()>>,
@@ -267,7 +268,7 @@ pub(in crate::workspace) struct WorkspaceRuntimeEntity {
     reconnect_forward_restore_totals: HashMap<NodeId, u32>,
     reconnect_forward_restore_tokens: HashMap<NodeId, Arc<AtomicBool>>,
     reconnect_orchestrator: ReconnectOrchestratorStore,
-    active_connection_chain: Option<ConnectionChainRun>,
+    active_connection_chains: Vec<ConnectionChainRun>,
     connecting_node_locks: HashSet<NodeId>,
     connection_trace_state: ConnectionTraceState,
     ssh_registry: SshConnectionRegistry,
@@ -335,6 +336,7 @@ fn redact_connection_error(error: &mut String) {
 }
 
 impl WorkspaceRuntimeEntity {
+    #[allow(dead_code)]
     pub(in crate::workspace) fn task_runtime(&self) -> Arc<tokio::runtime::Runtime> {
         self.task_runtime.clone()
     }
@@ -350,9 +352,6 @@ impl WorkspaceRuntimeEntity {
         ssh_registry: SshConnectionRegistry,
         node_router: NodeRouter,
         task_runtime: Arc<tokio::runtime::Runtime>,
-        reconnect_enabled: bool,
-        reconnect_timing: ReconnectTiming,
-        reconnect_max_attempts: u32,
         cx: &mut Context<Self>,
     ) -> Self {
         let (ssh_worker_tx, _ssh_worker_rx) = delivery::ActiveDeliverySender::channel_with_wake(
@@ -363,9 +362,6 @@ impl WorkspaceRuntimeEntity {
             ssh_registry,
             node_router,
             task_runtime,
-            reconnect_enabled,
-            reconnect_timing,
-            reconnect_max_attempts,
             cx,
         )
     }
@@ -375,9 +371,6 @@ impl WorkspaceRuntimeEntity {
         ssh_registry: SshConnectionRegistry,
         node_router: NodeRouter,
         task_runtime: Arc<tokio::runtime::Runtime>,
-        reconnect_enabled: bool,
-        reconnect_timing: ReconnectTiming,
-        reconnect_max_attempts: u32,
         cx: &mut Context<Self>,
     ) -> Self {
         let runtime_wake = delivery::ActiveDeliveryWake::default();
@@ -410,10 +403,6 @@ impl WorkspaceRuntimeEntity {
             next_node_transport_attempt_id: 0,
             node_event_generations: HashMap::new(),
             node_router,
-            reconnect_enabled,
-            pending_reconnect_node_ids: HashSet::new(),
-            reconnect_debounce_generation: 0,
-            reconnect_debounce_task: None,
             reconnect_pipeline_active_node: None,
             reconnect_requeue_states: HashMap::new(),
             reconnect_requeue_tasks: HashMap::new(),
@@ -427,15 +416,15 @@ impl WorkspaceRuntimeEntity {
             reconnect_forward_restore_totals: HashMap::new(),
             reconnect_forward_restore_tokens: HashMap::new(),
             reconnect_orchestrator: ReconnectOrchestratorStore::new(
-                reconnect_timing,
-                reconnect_max_attempts,
+                ReconnectTiming::default(),
+                1,
             ),
-            active_connection_chain: None,
+            active_connection_chains: Vec::new(),
             connecting_node_locks: HashSet::new(),
             connection_trace_state: ConnectionTraceState::default(),
             ssh_registry,
             task_runtime,
-            reconnect_timing,
+            reconnect_timing: ReconnectTiming::default(),
             ssh_active_probe_in_flight: false,
             active_probe_task: None,
             active_probe_timer_generation: 0,
@@ -445,26 +434,6 @@ impl WorkspaceRuntimeEntity {
         entity.schedule_worker_delivery(cx);
         entity.schedule_active_probe_after(ACTIVE_PROBE_START_DELAY, cx);
         entity
-    }
-
-    pub(in crate::workspace) fn configure_reconnect(
-        &mut self,
-        reconnect_enabled: bool,
-        reconnect_timing: ReconnectTiming,
-        reconnect_max_attempts: u32,
-        cx: &mut Context<Self>,
-    ) {
-        self.reconnect_enabled = reconnect_enabled;
-        if !reconnect_enabled {
-            self.pending_reconnect_node_ids.clear();
-            // Invalidate timers scheduled under the previous settings.
-            self.reconnect_debounce_generation = self.reconnect_debounce_generation.wrapping_add(1);
-            self.reconnect_debounce_task = None;
-        }
-        self.reconnect_orchestrator
-            .configure(reconnect_timing, reconnect_max_attempts);
-        self.reconnect_timing = reconnect_timing;
-        self.schedule_active_probe_after(ACTIVE_PROBE_START_DELAY, cx);
     }
 
     pub(in crate::workspace) fn register_ssh_terminal_session(
@@ -1073,20 +1042,16 @@ impl WorkspaceRuntimeEntity {
         // Stop producers and invalidate deferred transitions before touching
         // any node or registry owner they could otherwise reacquire.
         self.shutdown_node_transport_attempts();
-        self.reconnect_debounce_generation = self.reconnect_debounce_generation.wrapping_add(1);
-        // Runtime shutdown owns cancellation of the pending foreground debounce timer.
-        self.reconnect_debounce_task = None;
         self.reconnect_cascade_generation = self.reconnect_cascade_generation.wrapping_add(1);
         self.active_probe_timer_generation = self.active_probe_timer_generation.wrapping_add(1);
         self.active_probe_timer_task = None;
-        self.pending_reconnect_node_ids.clear();
         self.pending_reconnect_cascade_nodes.clear();
         self.reconnect_requeue_states.clear();
         self.reconnect_requeue_tasks.clear();
         self.reconnect_cascade_task = None;
         self.reconnect_schedule_tasks.clear();
         self.reconnect_pipeline_active_node = None;
-        self.active_connection_chain = None;
+        self.active_connection_chains.clear();
         self.connecting_node_locks.clear();
         self.connection_trace_state = ConnectionTraceState::default();
         for cancellation in self
@@ -1488,27 +1453,35 @@ impl WorkspaceRuntimeEntity {
             .collect()
     }
 
+    #[cfg(test)]
     pub(in crate::workspace) fn has_active_connection_chain(&self) -> bool {
-        self.active_connection_chain.is_some()
+        !self.active_connection_chains.is_empty()
     }
 
     pub(in crate::workspace) fn connection_chain_contains(&self, node_id: &NodeId) -> bool {
-        self.active_connection_chain
-            .as_ref()
-            .is_some_and(|run| run.trace_plan.node_ids.contains(node_id))
+        self.active_connection_chains
+            .iter()
+            .any(|run| run.trace_plan.node_ids.contains(node_id))
+    }
+
+    pub(in crate::workspace) fn connection_chain_overlaps(&self, node_ids: &[NodeId]) -> bool {
+        node_ids.iter().any(|node_id| {
+            self.connection_chain_contains(node_id) || self.connecting_node_locks.contains(node_id)
+        })
     }
 
     pub(in crate::workspace) fn connection_chain_position(
         &self,
         node_id: &NodeId,
     ) -> Option<(usize, usize)> {
-        let run = self.active_connection_chain.as_ref()?;
-        let position = run
-            .trace_plan
-            .node_ids
-            .iter()
-            .position(|candidate| candidate == node_id)?;
-        Some((position, run.trace_plan.node_ids.len()))
+        self.active_connection_chains.iter().find_map(|run| {
+            let position = run
+                .trace_plan
+                .node_ids
+                .iter()
+                .position(|candidate| candidate == node_id)?;
+            Some((position, run.trace_plan.node_ids.len()))
+        })
     }
 
     pub(in crate::workspace) fn any_connecting_node_is_locked(&self, node_ids: &[NodeId]) -> bool {
@@ -1530,23 +1503,56 @@ impl WorkspaceRuntimeEntity {
         trace_plan: ConnectionTracePlan,
     ) -> bool {
         if trace_plan.node_ids.is_empty()
-            || self.active_connection_chain.is_some()
             || self.any_connecting_node_is_locked(&trace_plan.node_ids)
         {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id = %trace_plan.attempt_id,
+                stage = "session.connect.chain.request",
+                node_count = trace_plan.node_ids.len(),
+                result = "blocked",
+                reason = "连接路径为空，或与正在连接的节点路径重叠",
+                business_impact = "本次连接未启动，但不相关主机仍可继续连接",
+                "连接链请求被拒绝"
+            );
             return false;
         }
-        // The trace plan is shared shallowly across steps instead of cloning its node path.
+        // Independent saved sessions keep separate chains. Jump-host hops still
+        // serialize because they share locked ancestor node ids.
         self.connecting_node_locks
             .extend(trace_plan.node_ids.iter().cloned());
-        self.active_connection_chain = Some(ConnectionChainRun {
+        self.active_connection_chains.push(ConnectionChainRun {
             next_index: 0,
             trace_plan: Arc::new(trace_plan),
         });
+        let run = self
+            .active_connection_chains
+            .last()
+            .expect("connection chain was just inserted");
+        tracing::info!(
+            target: "oxideterm::audit",
+            trace_id = %run.trace_plan.attempt_id,
+            stage = "session.connect.chain.request",
+            node_count = run.trace_plan.node_ids.len(),
+            active_chain_count = self.active_connection_chains.len(),
+            result = "accepted",
+            business_impact = "此节点路径开始连接，不会阻塞不相关主机",
+            "独立连接链已启动"
+        );
         true
     }
 
-    pub(in crate::workspace) fn connection_chain_next_step(&self) -> Option<ConnectionChainStep> {
-        let run = self.active_connection_chain.as_ref()?;
+    pub(in crate::workspace) fn connection_chain_step_after(
+        &self,
+        after_node_id: Option<&NodeId>,
+    ) -> Option<ConnectionChainStep> {
+        let run = match after_node_id {
+            None => self.active_connection_chains.last()?,
+            Some(node_id) => self.active_connection_chains.iter().find(|run| {
+                run.next_index > 0
+                    && run.trace_plan.node_ids.get(run.next_index - 1) == Some(node_id)
+            })?,
+        };
         let node_id = run.trace_plan.node_ids.get(run.next_index)?.clone();
         Some(ConnectionChainStep {
             node_id,
@@ -1558,22 +1564,45 @@ impl WorkspaceRuntimeEntity {
         &mut self,
         node_id: &NodeId,
     ) -> ConnectionChainAdvance {
-        let Some(run) = self.active_connection_chain.as_mut() else {
+        let Some(index) = self.active_connection_chains.iter().position(|run| {
+            run.trace_plan.node_ids.get(run.next_index) == Some(node_id)
+        }) else {
             return ConnectionChainAdvance::Ignored;
         };
-        if run.trace_plan.node_ids.get(run.next_index) != Some(node_id) {
-            return ConnectionChainAdvance::Ignored;
-        }
-        run.next_index += 1;
-        if run.next_index < run.trace_plan.node_ids.len() {
+        self.active_connection_chains[index].next_index += 1;
+        if self.active_connection_chains[index].next_index
+            < self.active_connection_chains[index].trace_plan.node_ids.len()
+        {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id = %self.active_connection_chains[index].trace_plan.attempt_id,
+                stage = "session.connect.chain.progress",
+                completed_node_id = %node_id.0,
+                next_index = self.active_connection_chains[index].next_index,
+                result = "continue",
+                "连接链中的一个节点已完成，可以启动下一跳"
+            );
             return ConnectionChainAdvance::Continue;
         }
-        self.release_connection_chain();
+        let trace_id = self.active_connection_chains[index]
+            .trace_plan
+            .attempt_id
+            .clone();
+        self.release_connection_chain_at(index);
+        tracing::info!(
+            target: "oxideterm::audit",
+            trace_id = %trace_id,
+            stage = "session.connect.chain.response",
+            completed_node_id = %node_id.0,
+            result = "completed",
+            business_impact = "仅释放当前连接链持有的节点锁",
+            "连接链已完成"
+        );
         ConnectionChainAdvance::Complete
     }
 
     pub(in crate::workspace) fn connection_chain_waits_after_node(&self, node_id: &NodeId) -> bool {
-        self.active_connection_chain.as_ref().is_some_and(|run| {
+        self.active_connection_chains.iter().any(|run| {
             run.next_index > 0
                 && run
                     .trace_plan
@@ -1587,18 +1616,34 @@ impl WorkspaceRuntimeEntity {
         &mut self,
         node_id: &NodeId,
     ) -> bool {
-        if !self.connection_chain_contains(node_id) {
+        let Some(index) = self
+            .active_connection_chains
+            .iter()
+            .position(|run| run.trace_plan.node_ids.contains(node_id))
+        else {
             return false;
-        }
-        self.release_connection_chain();
+        };
+        let trace_id = self.active_connection_chains[index]
+            .trace_plan
+            .attempt_id
+            .clone();
+        self.release_connection_chain_at(index);
+        tracing::warn!(
+            target: "oxideterm::audit",
+            trace_id = %trace_id,
+            stage = "session.connect.chain.response",
+            failed_node_id = %node_id.0,
+            result = "aborted",
+            business_impact = "仅终止并释放失败的连接链，其他连接继续执行",
+            "连接链已中止"
+        );
         true
     }
 
-    fn release_connection_chain(&mut self) {
-        if let Some(run) = self.active_connection_chain.take() {
-            for node_id in &run.trace_plan.node_ids {
-                self.connecting_node_locks.remove(node_id);
-            }
+    fn release_connection_chain_at(&mut self, index: usize) {
+        let run = self.active_connection_chains.remove(index);
+        for node_id in &run.trace_plan.node_ids {
+            self.connecting_node_locks.remove(node_id);
         }
     }
 
@@ -1761,30 +1806,7 @@ impl WorkspaceRuntimeEntity {
         self.reconnect_worker_tx.clone()
     }
 
-    pub(in crate::workspace) fn queue_reconnect_root(
-        &mut self,
-        node_id: NodeId,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.reconnect_enabled {
-            return;
-        }
-        self.pending_reconnect_node_ids.insert(node_id);
-        self.reconnect_debounce_generation = self.reconnect_debounce_generation.wrapping_add(1);
-        let generation = self.reconnect_debounce_generation;
-        // Retaining the latest debounce task cancels superseded timers and
-        // prevents their async wake from escaping the runtime entity lifetime.
-        self.reconnect_debounce_task = Some(cx.spawn(async move |entity, cx| {
-            Timer::after(RECONNECT_DEBOUNCE_DELAY).await;
-            let _ = entity.update(cx, |entity, cx| {
-                entity.flush_reconnect_roots(generation, cx);
-            });
-        }));
-    }
-
     pub(in crate::workspace) fn cancel_queued_reconnects(&mut self, node_ids: &[NodeId]) {
-        self.pending_reconnect_node_ids
-            .retain(|node_id| !node_ids.contains(node_id));
         self.runtime_effects
             .retain(|effect| !runtime_effect_is_reconnect_schedule_for_nodes(effect, node_ids));
         self.cancel_reconnect_scheduler_nodes(node_ids);
@@ -2587,23 +2609,6 @@ impl WorkspaceRuntimeEntity {
         }
     }
 
-    fn flush_reconnect_roots(&mut self, generation: u64, cx: &mut Context<Self>) {
-        if generation != self.reconnect_debounce_generation {
-            return;
-        }
-        if !self.reconnect_enabled {
-            self.pending_reconnect_node_ids.clear();
-            return;
-        }
-        let pending = self.pending_reconnect_node_ids.drain().collect::<Vec<_>>();
-        let roots = self.node_router.minimal_subtree_roots(pending);
-        if roots.is_empty() {
-            return;
-        }
-        for node_id in roots {
-            self.push_runtime_effect(WorkspaceRuntimeEffect::StartReconnectRoot { node_id }, cx);
-        }
-    }
 }
 
 fn readiness_for_runtime_connection_status(status: &str) -> Option<NodeReadiness> {
@@ -2676,8 +2681,7 @@ fn runtime_effect_is_reconnect_schedule_for_nodes(
     node_ids: &[NodeId],
 ) -> bool {
     match effect {
-        WorkspaceRuntimeEffect::StartReconnectRoot { node_id }
-        | WorkspaceRuntimeEffect::ContinueConnectionChain { node_id }
+        WorkspaceRuntimeEffect::ContinueConnectionChain { node_id }
         | WorkspaceRuntimeEffect::StartReconnectPipeline { node_id }
         | WorkspaceRuntimeEffect::RetryNodeConnect { node_id, .. }
         | WorkspaceRuntimeEffect::ReconnectRecoveredBeforeRetry { node_id } => {
@@ -2777,9 +2781,6 @@ mod tests {
                 ssh_registry,
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         })
@@ -2982,7 +2983,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn empty_registry_and_timing_changes_reschedule_without_probe(cx: &mut TestAppContext) {
+    fn empty_registry_reschedules_without_probe(cx: &mut TestAppContext) {
         let entity = test_runtime_entity(cx);
         let initial_generation = cx.read(|cx| entity.read(cx).active_probe_timer_generation);
 
@@ -2990,31 +2991,22 @@ mod tests {
             entity.start_active_ssh_probe(cx);
             assert!(!entity.ssh_active_probe_in_flight);
             assert!(entity.active_probe_timer_generation > initial_generation);
-
-            let mut reconnect_timing = ReconnectTiming::default();
-            reconnect_timing.ssh_keepalive_interval = Duration::from_secs(37);
-            entity.configure_reconnect(true, reconnect_timing, 4, cx);
-            assert_eq!(
-                entity.reconnect_timing.ssh_keepalive_interval,
-                Duration::from_secs(37)
-            );
         });
     }
 
     #[gpui::test]
-    fn reconnect_jobs_and_configuration_are_entity_owned(cx: &mut TestAppContext) {
+    fn manual_reconnect_jobs_are_entity_owned_and_single_attempt(cx: &mut TestAppContext) {
         let entity = test_runtime_entity(cx);
         let node_id = NodeId::new("node-a");
 
-        entity.update(cx, |entity, cx| {
-            entity.configure_reconnect(true, ReconnectTiming::default(), 4, cx);
+        entity.update(cx, |entity, _cx| {
             let job = entity.start_reconnect_job(
                 &node_id,
                 "Node A".to_string(),
                 ReconnectSnapshot::default(),
             );
 
-            assert_eq!(job.max_attempts, 4);
+            assert_eq!(job.max_attempts, 1);
             assert!(entity.has_active_reconnect_job(&node_id));
             assert!(entity.reconnect_job_is_current(&node_id, &job.job_id));
             assert_eq!(entity.active_reconnect_node_ids(), vec![node_id.clone()]);
@@ -3054,7 +3046,7 @@ mod tests {
                 ])
             );
 
-            let first_step = entity.connection_chain_next_step().unwrap();
+            let first_step = entity.connection_chain_step_after(None).unwrap();
             assert_eq!(first_step.node_id, parent_node_id);
             assert_eq!(first_step.trace_plan.attempt_id, "attempt-a");
             assert_eq!(
@@ -3067,7 +3059,7 @@ mod tests {
             );
             assert!(entity.connection_chain_waits_after_node(&parent_node_id));
             assert_eq!(
-                entity.connection_chain_next_step().unwrap().node_id,
+                entity.connection_chain_step_after(None).unwrap().node_id,
                 child_node_id
             );
             assert_eq!(
@@ -3103,6 +3095,44 @@ mod tests {
             assert!(!entity.has_active_connection_chain());
             assert!(entity.try_lock_connecting_node(&chain_node_id));
             assert!(!entity.try_lock_connecting_node(&unrelated_node_id));
+        });
+    }
+
+    #[gpui::test]
+    fn disjoint_connection_chains_can_run_in_parallel(cx: &mut TestAppContext) {
+        let entity = test_runtime_entity(cx);
+        let first = NodeId::new("node-first");
+        let second = NodeId::new("node-second");
+        entity.update(cx, |entity, _cx| {
+            assert!(entity.try_begin_connection_chain(ConnectionTracePlan {
+                attempt_id: "attempt-a".to_string(),
+                mode: ConnectionTraceMode::Connect,
+                node_ids: vec![first.clone()],
+            }));
+            assert!(entity.try_begin_connection_chain(ConnectionTracePlan {
+                attempt_id: "attempt-b".to_string(),
+                mode: ConnectionTraceMode::Connect,
+                node_ids: vec![second.clone()],
+            }));
+            assert!(entity.has_active_connection_chain());
+            assert!(entity.connection_chain_contains(&first));
+            assert!(entity.connection_chain_contains(&second));
+            assert!(!entity.try_begin_connection_chain(ConnectionTracePlan {
+                attempt_id: "attempt-overlap".to_string(),
+                mode: ConnectionTraceMode::Connect,
+                node_ids: vec![first.clone()],
+            }));
+            assert_eq!(
+                entity.advance_connection_chain(&first),
+                ConnectionChainAdvance::Complete
+            );
+            assert!(entity.connection_chain_contains(&second));
+            assert!(!entity.connection_chain_contains(&first));
+            assert_eq!(
+                entity.advance_connection_chain(&second),
+                ConnectionChainAdvance::Complete
+            );
+            assert!(!entity.has_active_connection_chain());
         });
     }
 
@@ -3224,9 +3254,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router.clone(),
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3394,9 +3421,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router.clone(),
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3494,9 +3518,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3544,9 +3565,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3583,9 +3601,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router,
                 test_task_runtime(),
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3641,9 +3656,6 @@ mod tests {
                 ssh_registry,
                 node_router,
                 test_task_runtime(),
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3702,9 +3714,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router,
                 test_task_runtime(),
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3810,9 +3819,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3843,9 +3849,6 @@ mod tests {
                 ssh_registry,
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3908,9 +3911,6 @@ mod tests {
                 ssh_registry.clone(),
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -3975,9 +3975,6 @@ mod tests {
                 ssh_registry,
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -4059,9 +4056,6 @@ mod tests {
                 ssh_registry,
                 node_router,
                 task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
                 cx,
             )
         });
@@ -4092,61 +4086,6 @@ mod tests {
                     .readiness,
                 NodeReadiness::Error
             );
-        });
-    }
-
-    #[gpui::test]
-    fn reconnect_debounce_selects_minimal_runtime_subtrees(cx: &mut TestAppContext) {
-        let ssh_registry = SshConnectionRegistry::new(ConnectionPoolConfig::default());
-        let node_runtime_store = NodeRuntimeStore::default();
-        let root = NodeId::new("root");
-        let child = NodeId::new("child");
-        node_runtime_store.upsert_node(root.clone(), SshConfig::default());
-        node_runtime_store
-            .upsert_child_node(root.clone(), child.clone(), SshConfig::default())
-            .unwrap();
-        let node_router = NodeRouter::with_runtime_store(ssh_registry.clone(), node_runtime_store);
-        let task_runtime = test_task_runtime();
-        let entity = cx.new(|cx| {
-            WorkspaceRuntimeEntity::new(
-                ssh_registry,
-                node_router,
-                task_runtime,
-                true,
-                ReconnectTiming::default(),
-                3,
-                cx,
-            )
-        });
-
-        entity.update(cx, |entity, cx| {
-            entity.pending_reconnect_node_ids.insert(child);
-            entity.pending_reconnect_node_ids.insert(root.clone());
-            entity.reconnect_debounce_generation = 7;
-            entity.flush_reconnect_roots(6, cx);
-            assert!(entity.runtime_effects.is_empty());
-            entity.flush_reconnect_roots(7, cx);
-            assert!(matches!(
-                entity.take_runtime_effects(cx).as_slice(),
-                [WorkspaceRuntimeEffect::StartReconnectRoot { node_id }] if node_id == &root
-            ));
-        });
-    }
-
-    #[gpui::test]
-    fn disabling_reconnect_clears_pending_debounce_state(cx: &mut TestAppContext) {
-        let entity = test_runtime_entity(cx);
-        entity.update(cx, |entity, cx| {
-            entity.queue_reconnect_root(NodeId::new("node-a"), cx);
-            let scheduled_generation = entity.reconnect_debounce_generation;
-            assert!(!entity.pending_reconnect_node_ids.is_empty());
-            assert!(entity.reconnect_debounce_task.is_some());
-
-            entity.configure_reconnect(false, ReconnectTiming::default(), 3, cx);
-
-            assert!(entity.pending_reconnect_node_ids.is_empty());
-            assert!(entity.reconnect_debounce_task.is_none());
-            assert!(entity.reconnect_debounce_generation > scheduled_generation);
         });
     }
 

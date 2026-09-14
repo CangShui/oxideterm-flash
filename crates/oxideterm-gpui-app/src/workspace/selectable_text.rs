@@ -437,6 +437,7 @@ impl WorkspaceApp {
         self.render_selectable_text_with_style(id, text, color, None, cx)
     }
 
+    #[allow(dead_code)]
     pub(super) fn render_selectable_text_in_group(
         &self,
         group_id: u64,

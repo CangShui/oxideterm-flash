@@ -42,7 +42,6 @@ use oxideterm_remote_desktop::{
 };
 use oxideterm_workspace::{Tab, TabKind, TabTitleSource};
 use tokio::sync::Notify;
-use zeroize::Zeroizing;
 
 use super::*;
 

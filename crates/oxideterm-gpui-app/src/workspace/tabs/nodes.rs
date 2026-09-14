@@ -47,9 +47,8 @@ impl WorkspaceApp {
             runtime_entity::WorkspaceRuntimeEffect::OpenReadySshTerminals { requests } => {
                 self.open_ready_ssh_terminal_requests(requests, window, cx)
             }
-            runtime_entity::WorkspaceRuntimeEffect::StartReconnectRoot { node_id }
-            | runtime_entity::WorkspaceRuntimeEffect::StartReconnectPipeline { node_id } => {
-                self.start_grace_period_reconnect(&node_id, cx);
+            runtime_entity::WorkspaceRuntimeEffect::StartReconnectPipeline { node_id } => {
+                self.start_manual_reconnect(&node_id, cx);
                 true
             }
             runtime_entity::WorkspaceRuntimeEffect::ContinueConnectionChain { node_id } => {
@@ -58,7 +57,7 @@ impl WorkspaceApp {
                     .read(cx)
                     .connection_chain_waits_after_node(&node_id)
                 {
-                    self.start_next_connection_chain_node(cx);
+                    self.start_next_connection_chain_node_after(Some(&node_id), cx);
                     true
                 } else {
                     false
@@ -174,7 +173,7 @@ impl WorkspaceApp {
             match result {
                 runtime_entity::ReconnectRuntimeEffect::NodeConnected {
                     node_id,
-                    connection_id,
+                    connection_id: _,
                     reconnecting,
                 } => {
                     let mut resume_transfers_without_forwards = false;
@@ -408,7 +407,7 @@ impl WorkspaceApp {
         match event {
             runtime_entity::NodeRuntimeEffect::ConnectionStatusChanged {
                 node_id,
-                connection_id,
+                connection_id: _,
                 status,
                 state,
                 reason,
@@ -434,6 +433,7 @@ impl WorkspaceApp {
                     self.workspace_runtime.update(cx, |runtime, cx| {
                         runtime.finish_connection_trace_failed(&node_id, Some(reason.clone()), cx);
                     });
+                    self.record_automatic_reconnect_suppressed(&state);
                 }
                 let affected_children_count = affected_children.len();
                 if matches!(state, NodeReadiness::Error | NodeReadiness::Disconnected) {
@@ -473,9 +473,6 @@ impl WorkspaceApp {
                         }
                         let _ = forwarding_registry.suspend_session(&session_id).await;
                     });
-                }
-                if status == "link_down" {
-                    self.schedule_grace_period_reconnect(&node_id, cx);
                 }
                 if status == "disconnected" {
                     let mut nodes_to_close = if affected_children.is_empty() {
@@ -529,6 +526,7 @@ impl WorkspaceApp {
                     self.workspace_runtime.update(cx, |runtime, cx| {
                         runtime.finish_connection_trace_failed(&node_id, Some(reason.clone()), cx);
                     });
+                    self.record_automatic_reconnect_suppressed(&state);
                 }
                 if matches!(previous, Some(NodeReadiness::Ready))
                     && matches!(state, NodeReadiness::Error | NodeReadiness::Disconnected)
@@ -567,11 +565,6 @@ impl WorkspaceApp {
                         }
                         let _ = forwarding_registry.suspend_session(&session_id).await;
                     });
-                    if matches!(state, NodeReadiness::Error)
-                        && reason.to_ascii_lowercase().contains("link")
-                    {
-                        self.schedule_grace_period_reconnect(&node_id, cx);
-                    }
                     if matches!(state, NodeReadiness::Disconnected) {
                         let mut nodes_to_close = self.node_router.subtree_postorder(&node_id);
                         if nodes_to_close.is_empty() {
@@ -813,23 +806,7 @@ impl WorkspaceApp {
         );
     }
 
-    fn schedule_grace_period_reconnect(&mut self, node_id: &NodeId, cx: &mut Context<Self>) {
-        if !self.settings_store.settings().reconnect.enabled {
-            return;
-        }
-        if self
-            .workspace_runtime
-            .read(cx)
-            .has_active_reconnect_job(node_id)
-        {
-            return;
-        }
-        self.workspace_runtime.update(cx, |runtime, cx| {
-            runtime.queue_reconnect_root(node_id.clone(), cx);
-        });
-    }
-
-    fn start_grace_period_reconnect(&mut self, node_id: &NodeId, cx: &mut Context<Self>) {
+    fn start_manual_reconnect(&mut self, node_id: &NodeId, cx: &mut Context<Self>) {
         let Some(node) = self.ssh_nodes.get(node_id) else {
             return;
         };
@@ -952,6 +929,15 @@ impl WorkspaceApp {
         self.workspace_runtime.update(cx, |runtime, _cx| {
             runtime.start_reconnect_grace_probe(grace_probe_request);
         });
+    }
+
+    fn record_automatic_reconnect_suppressed(&self, state: &NodeReadiness) {
+        tracing::info!(
+            target: "oxideterm_gpui_app::connection_lifecycle",
+            trace_id = "connection-unavailable",
+            readiness = ?state,
+            "Connection became unavailable; automatic reconnect is disabled, so no reconnect task was queued"
+        );
     }
 
     fn start_reconnect_cascade_after_grace_expired(
@@ -1263,14 +1249,21 @@ impl WorkspaceApp {
         trace_mode: ConnectionTraceMode,
         cx: &mut Context<Self>,
     ) -> bool {
+        let Ok(path_node_ids) = self.node_router.path_to_node(node_id) else {
+            return false;
+        };
         if self
             .workspace_runtime
             .read(cx)
-            .has_active_connection_chain()
+            .connection_chain_overlaps(&path_node_ids)
         {
-            return false;
-        }
-        let Ok(path_node_ids) = self.node_router.path_to_node(node_id) else {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                stage = "session.connect.chain",
+                result = "blocked",
+                node_id = %node_id.0,
+                "当前节点或其跳板祖先已在连接中，不启动第二条重叠连接链"
+            );
             return false;
         };
         if path_node_ids.is_empty() {
@@ -1299,11 +1292,19 @@ impl WorkspaceApp {
                 node.readiness = NodeReadiness::Disconnected;
             }
         }
-        self.start_next_connection_chain_node(cx)
+        self.start_next_connection_chain_node_after(None, cx)
     }
 
-    fn start_next_connection_chain_node(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(step) = self.workspace_runtime.read(cx).connection_chain_next_step() else {
+    fn start_next_connection_chain_node_after(
+        &mut self,
+        after_node_id: Option<&NodeId>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(step) = self
+            .workspace_runtime
+            .read(cx)
+            .connection_chain_step_after(after_node_id)
+        else {
             return false;
         };
         if !self.ensure_single_node_connection_started_with_trace(
@@ -1562,7 +1563,7 @@ impl WorkspaceApp {
         node_ids.dedup();
 
         for node_id in node_ids {
-            self.schedule_grace_period_reconnect(&node_id, cx);
+            self.start_manual_reconnect(&node_id, cx);
         }
     }
 }

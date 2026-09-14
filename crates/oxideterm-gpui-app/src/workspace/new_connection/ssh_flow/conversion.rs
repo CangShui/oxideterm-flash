@@ -421,6 +421,7 @@ mod runtime_save_tests {
     use std::io::Write;
 
     use super::*;
+    use oxideterm_ssh::NodeReadiness;
     use tempfile::NamedTempFile;
     use zeroize::Zeroizing;
 

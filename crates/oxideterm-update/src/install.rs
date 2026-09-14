@@ -777,6 +777,7 @@ fn current_macos_app_bundle(current_exe: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+#[allow(dead_code)]
 fn shell_escape_path(path: &Path) -> String {
     // Scripts quote the returned path, so escape characters that still carry
     // meaning inside double quotes.

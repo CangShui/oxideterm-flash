@@ -13,12 +13,8 @@ impl TerminalPane {
         if !self.settings.current_directory_awareness_enabled {
             return;
         }
-        // OSC 7 owns cwd updates once it has actually reported a cwd. Some
-        // shells emit command marks without cwd metadata; keep simple `cd`
-        // actions usable for those partially integrated sessions.
-        if self.cwd_is_shell_integrated() {
-            return;
-        }
+        // A prompt hook remains authoritative, but a literal `cd` can still
+        // update the UI immediately when the shell emits no later cwd report.
         let Some(command) = mark.command.as_deref() else {
             return;
         };

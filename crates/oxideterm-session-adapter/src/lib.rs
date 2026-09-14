@@ -17,7 +17,6 @@ pub use proxy::{
     upstream_proxy_config_from_global_settings, upstream_proxy_config_from_saved_policy,
 };
 pub use runtime_settings::{
-    reconnect_max_attempts_from_settings, reconnect_timing_from_settings,
     sftp_runtime_settings_from_settings, terminal_backspace_sequence_from_connection,
     terminal_delete_sequence_from_connection, terminal_encoding_from_connection,
     terminal_encoding_from_settings,

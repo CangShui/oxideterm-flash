@@ -197,6 +197,23 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.set_sidebar_collapsed_with_motion(!self.sidebar_collapsed, cx);
+        if self.sidebar_resizing {
+            let trace_id = self
+                .sidebar_resize_trace_id
+                .take()
+                .unwrap_or_else(next_sidebar_resize_trace_id);
+            tracing::info!(
+                target: "oxideterm_gpui_app::sidebar_resize",
+                trace_id,
+                stage = "sidebar-toggle",
+                sidebar = "primary",
+                width_after = self.sidebar_width,
+                result = "cancelled",
+                reason = "the primary sidebar was toggled while its resize gesture was active",
+                business_impact = "the resize gesture stopped before the sidebar visibility changed",
+                "sidebar resize gesture cancelled"
+            );
+        }
         self.sidebar_resizing = false;
         self.sidebar_resize_hotzone_hovered = false;
         self.persist_sidebar_settings(cx);
@@ -236,12 +253,35 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let was_resizing = self.sidebar_resizing;
+        let trace_id = if was_resizing {
+            self.sidebar_resize_trace_id
+                .unwrap_or_else(next_sidebar_resize_trace_id)
+        } else {
+            let trace_id = next_sidebar_resize_trace_id();
+            self.sidebar_resize_trace_id = Some(trace_id);
+            trace_id
+        };
+        let width_before = self.sidebar_width;
         self.sidebar_resizing = true;
         let viewport_width = f32::from(window.viewport_size().width);
         let width_changed = self.set_sidebar_width(
             self.sidebar_width_from_cursor(event.position.x, window),
             viewport_width,
             cx,
+        );
+        tracing::info!(
+            target: "oxideterm_gpui_app::sidebar_resize",
+            trace_id,
+            stage = "mouse-press",
+            sidebar = "primary",
+            pointer_x = f32::from(event.position.x),
+            viewport_width,
+            width_before,
+            width_after = self.sidebar_width,
+            validation = "pointer press landed inside the primary sidebar-owned resize hotzone",
+            result = "started",
+            business_impact = "the primary sidebar began resizing without taking pointer ownership from the terminal first column",
+            "sidebar resize gesture started"
         );
         if !was_resizing && !width_changed {
             cx.notify();
@@ -275,7 +315,21 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn finish_sidebar_resize(&mut self, cx: &mut Context<Self>) {
         if self.sidebar_resizing {
             self.sidebar_resizing = false;
+            let trace_id = self
+                .sidebar_resize_trace_id
+                .take()
+                .unwrap_or_else(next_sidebar_resize_trace_id);
             self.persist_sidebar_settings(cx);
+            tracing::info!(
+                target: "oxideterm_gpui_app::sidebar_resize",
+                trace_id,
+                stage = "mouse-release",
+                sidebar = "primary",
+                width_after = self.sidebar_width,
+                result = "completed",
+                business_impact = "the primary sidebar resize finished and its final width was submitted to the settings store",
+                "sidebar resize gesture finished"
+            );
             cx.notify();
         }
     }
@@ -353,6 +407,24 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn collapse_context_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.context_sidebar_resizing {
+            let trace_id = self
+                .context_sidebar_resize_trace_id
+                .take()
+                .unwrap_or_else(next_sidebar_resize_trace_id);
+            tracing::info!(
+                target: "oxideterm_gpui_app::sidebar_resize",
+                trace_id,
+                stage = "sidebar-collapse",
+                sidebar = "context",
+                width_after = self.context_sidebar_width(),
+                result = "cancelled",
+                reason = "the context sidebar was collapsed while its resize gesture was active",
+                business_impact = "the resize gesture stopped before the context sidebar was hidden",
+                "sidebar resize gesture cancelled"
+            );
+        }
+        self.context_sidebar_resizing = false;
         self.settings_store
             .settings_mut()
             .sidebar_ui

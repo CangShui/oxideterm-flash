@@ -57,6 +57,7 @@ pub(super) const HOST_LOG_TIME_COLUMN_WIDTH: f32 = 92.0;
 pub(super) const HOST_LOG_LEVEL_COLUMN_WIDTH: f32 = 58.0;
 pub(super) const HOST_LOG_SOURCE_COLUMN_WIDTH: f32 = 96.0;
 pub(super) const HOST_LOG_UNIT_COLUMN_WIDTH: f32 = 96.0;
+#[allow(dead_code)]
 pub(super) const HOST_LOG_CONTEXT_COLUMNS_MIN_WIDTH: f32 = 680.0;
 pub(super) const HOST_LOG_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const HOST_LOG_SNAPSHOT_LIMIT: usize = 300;
@@ -149,6 +150,7 @@ pub(super) const MONITOR_AMBER: u32 = 0xf59e0b;
 pub(super) const MONITOR_RED: u32 = 0xef4444;
 pub(super) const MONITOR_BLUE: u32 = 0x3b82f6;
 
+#[allow(dead_code)]
 pub(super) fn connection_monitor_surface_bg(theme_bg: u32, has_background: bool) -> Rgba {
     if has_background {
         rgba(0x00000000)

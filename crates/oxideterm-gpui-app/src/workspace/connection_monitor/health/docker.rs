@@ -177,13 +177,33 @@ impl HostToolsEntity {
             .map(|metrics| metrics.docker.status.clone())
             .unwrap_or_default();
 
+        // Emit only when the selected host, filter, status or row counts change, not every repaint.
+        let status_name = match &status {
+            ResourceDockerStatus::Unknown => "not_sampled",
+            ResourceDockerStatus::Available => "available",
+            ResourceDockerStatus::Unavailable => "tool_unavailable",
+            ResourceDockerStatus::Error { .. } => "sampling_failed",
+        };
+        let total_count = metrics.map_or(0, |metrics| metrics.docker.containers.len());
+        let mut signature = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&(&selected_connection_id, status_name, total_count, rows.len(),
+            &self.ui.host_docker_search_query), &mut signature);
+        let signature = std::hash::Hasher::finish(&signature);
+        if self.docker_audit_signature.replace(Some(signature)) != Some(signature) {
+            tracing::info!(target: "oxideterm::audit", trace_id = crate::logging::next_audit_trace_id(),
+                stage = "docker.panel.snapshot", connection_id = %selected_connection_id,
+                status = status_name, total_count, visible_count = rows.len(),
+                query_length = self.ui.host_docker_search_query.chars().count(),
+                "Docker 面板状态变化：分别记录采集数量和搜索后数量，未采集不再误报没有容器");
+        }
+
         Some(HostDockerPanelSnapshot {
             connections,
             selected_connection_id,
             visible_count: rows.len(),
             rows,
             status,
-            has_metrics: current.is_some(),
+            has_metrics: metrics.is_some(),
         })
     }
 
@@ -401,12 +421,16 @@ impl HostToolsEntity {
                     LucideIcon::AlertTriangle,
                     MONITOR_RED,
                     i18n.t("sidebar.host_docker.error")
-                        .replace("{{error}}", &message),
+                        .replace("{{error}}", &if message == "sidebar.host_docker.invalid_output" { i18n.t(&message) } else { message }),
                     selectable_text,
                     cx,
                 );
             }
-            ResourceDockerStatus::Unknown | ResourceDockerStatus::Available => {}
+            ResourceDockerStatus::Unknown => {
+                return host_tools_center_state(LucideIcon::Layers, tokens.ui.text_muted,
+                    i18n.t("sidebar.host_docker.sampling"), selectable_text, cx);
+            }
+            ResourceDockerStatus::Available => {}
         }
         if rows.is_empty() {
             return host_tools_center_state(
@@ -1143,6 +1167,13 @@ impl HostToolsEntity {
     }
 
     fn refresh_host_docker_snapshot(&mut self, connection_id: String, cx: &mut Context<Self>) {
+        tracing::info!(
+            target: "oxideterm::audit",
+            trace_id = crate::logging::next_audit_trace_id(),
+            stage = "docker.user.refresh",
+            connection_id = %connection_id,
+            "用户手动点击 Docker 刷新按钮，重置采样状态并重新请求采集"
+        );
         self.profiler_registry().stop(&connection_id);
         self.request_profiler_refresh(connection_id, cx);
     }

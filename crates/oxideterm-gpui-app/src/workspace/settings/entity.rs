@@ -333,7 +333,7 @@ impl SettingsWorkspaceEntity {
             ssh_config_selected_hosts: HashSet::new(),
             connection_import_status: None,
             connection_import_source: ConnectionImportSource::SecureCrt,
-            session_export_format: SessionExportFormat::OxideTermJson,
+            session_export_format: SessionExportFormat::OxideEncrypted,
             connection_import_paths: Vec::new(),
             connection_import_preview: None,
             selected_connection_import_drafts: HashSet::new(),
@@ -1215,13 +1215,12 @@ mod tests {
         path::PathBuf,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, Ordering},
         },
         time::{Duration, SystemTime},
     };
 
     use gpui::{AppContext, TestAppContext};
-    use oxideterm_settings::PersistedSettings;
     use oxideterm_settings_model::SettingsTab;
 
     use super::{

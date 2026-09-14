@@ -22,6 +22,7 @@ pub(super) enum ConnectionFormSection {
     RemoteFeatures,
     SerialParameters,
     SftpOptions,
+    #[allow(dead_code)]
     LocalShell,
 }
 
@@ -1517,6 +1518,23 @@ impl WorkspaceApp {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        let trace_id = this
+                            .connection_form_state(cx)
+                            .form
+                            .as_ref()
+                            .map(|form| form.audit_trace_id)
+                            .unwrap_or_else(crate::logging::next_audit_trace_id);
+                        tracing::debug!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "session.form.field_click",
+                            field = ?field,
+                            click_count = event.click_count,
+                            result = "accepted",
+                            secret_detail_redacted = true,
+                            business_impact = "keyboard and IME input will be routed to this protocol session field",
+                            "user clicked a session form editing field"
+                        );
                         this.update_connection_form_state(cx, |state| {
                             if let Some(form) = state.form.as_mut() {
                                 form.field_focused = true;
@@ -4579,11 +4597,27 @@ impl WorkspaceApp {
                 },
                 ..ToolbarButtonOptions::default()
             },
-            cx.listener(move |this, _event, window, cx| match action {
-                ConnectionButtonAction::Cancel => {
-                    this.close_new_connection_form(window, cx);
-                }
-                ConnectionButtonAction::Test => {
+            cx.listener(move |this, _event, window, cx| {
+                let trace_id = this
+                    .connection_form_state(cx)
+                    .form
+                    .as_ref()
+                    .map(|form| form.audit_trace_id)
+                    .unwrap_or_else(crate::logging::next_audit_trace_id);
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.form.button",
+                    action = ?action,
+                    result = "accepted",
+                    business_impact = "the selected protocol session form action entered its dispatcher",
+                    "user clicked a session form footer button"
+                );
+                match action {
+                    ConnectionButtonAction::Cancel => {
+                        this.close_new_connection_form(window, cx);
+                    }
+                    ConnectionButtonAction::Test => {
                     let intent =
                         if this
                             .connection_form_state(cx)
@@ -4597,28 +4631,29 @@ impl WorkspaceApp {
                         } else {
                             SshConnectionIntent::Test
                         };
-                    this.start_new_connection_flow(intent, window, cx);
-                }
-                ConnectionButtonAction::Connect => {
-                    this.submit_new_connection_form_with_action(
-                        NewConnectionSubmitAction::Connect,
-                        window,
-                        cx,
-                    );
-                }
-                ConnectionButtonAction::Save => {
-                    this.submit_new_connection_form_with_action(
-                        NewConnectionSubmitAction::Save,
-                        window,
-                        cx,
-                    );
-                }
-                ConnectionButtonAction::SaveAndConnect => {
-                    this.submit_new_connection_form_with_action(
-                        NewConnectionSubmitAction::SaveAndConnect,
-                        window,
-                        cx,
-                    );
+                        this.start_new_connection_flow(intent, window, cx);
+                    }
+                    ConnectionButtonAction::Connect => {
+                        this.submit_new_connection_form_with_action(
+                            NewConnectionSubmitAction::Connect,
+                            window,
+                            cx,
+                        );
+                    }
+                    ConnectionButtonAction::Save => {
+                        this.submit_new_connection_form_with_action(
+                            NewConnectionSubmitAction::Save,
+                            window,
+                            cx,
+                        );
+                    }
+                    ConnectionButtonAction::SaveAndConnect => {
+                        this.submit_new_connection_form_with_action(
+                            NewConnectionSubmitAction::SaveAndConnect,
+                            window,
+                            cx,
+                        );
+                    }
                 }
             }),
         )

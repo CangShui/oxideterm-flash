@@ -3,8 +3,6 @@ mod entity;
 
 pub(in crate::workspace) use entity::CommandPaletteEntity;
 use entity::CommandPaletteView;
-#[cfg(test)]
-use oxideterm_connections::is_literal_ssh_config_alias_query;
 use oxideterm_connections::{resolve_ssh_config_alias, saved_connection_from_ssh_host};
 use oxideterm_gpui_settings_view::{OXIDE_THEME_IDS, built_in_theme_exists, is_oxide_theme};
 use oxideterm_gpui_ui::{
@@ -73,7 +71,6 @@ enum PaletteAction {
     OpenRemoteDesktopConnection(RemoteDesktopConnectionProfile),
     Sidebar(SidebarSection),
     OpenSftp,
-    ManageTerminalTriggers,
     ReloadWindow,
     CloseTab,
     CloseOtherTabs,
@@ -443,9 +440,6 @@ impl WorkspaceApp {
                 } else {
                     self.set_sidebar_section(SidebarSection::Sessions, cx);
                 }
-            }
-            PaletteAction::ManageTerminalTriggers => {
-                self.open_terminal_trigger_settings(window, cx)
             }
             PaletteAction::ReloadWindow => self.reload_window_from_palette(cx),
             PaletteAction::CloseTab => self.close_active_tab_from_palette(window, cx),
@@ -1624,12 +1618,6 @@ fn command_palette_specs() -> Vec<CommandSpec> {
             "app.settings",
             LucideIcon::Settings,
         ),
-        CommandSpec {
-            id: "cmd:manage_terminal_triggers",
-            label_key: Cow::Borrowed("command_palette.cmd_manage_terminal_triggers"),
-            icon: LucideIcon::Zap,
-            action: PaletteAction::ManageTerminalTriggers,
-        },
         keybinding_command(
             "cmd:toggle_sidebar",
             "command_palette.cmd_toggle_sidebar",

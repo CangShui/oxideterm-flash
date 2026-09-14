@@ -60,6 +60,10 @@ impl WorkspaceApp {
             trigger.cursor_pointer().on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, _window, cx| {
+                    crate::logging::audit_button_click(
+                        &format!("settings-select-{select_id:?}"),
+                        "settings",
+                    );
                     this.open_settings_select_from_pointer(select_id, cx);
                     cx.stop_propagation();
                     cx.notify();
@@ -405,6 +409,7 @@ impl WorkspaceApp {
         )
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn split_confirm_footer_button(
         &self,
         label: String,
@@ -456,6 +461,7 @@ impl WorkspaceApp {
         )
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn split_confirm_footer_action_button(
         &self,
         label: String,
@@ -638,6 +644,12 @@ impl WorkspaceApp {
             "escape" => {
                 self.focused_settings_input = None;
                 self.clear_settings_input_draft(input);
+                if matches!(
+                    input,
+                    SettingsInput::CloudSyncServerUrl | SettingsInput::CloudSyncRoom
+                ) {
+                    self.autostart_cloud_sync(cx);
+                }
                 self.show_active_input_caret(cx);
                 cx.notify();
                 true
@@ -676,10 +688,20 @@ impl WorkspaceApp {
             changed = true;
         }
         if let Some(input) = self.focused_settings_input.take() {
+            // Server and room edits are applied while typing; restarting on
+            // blur gives the user one obvious "saved and connect" boundary
+            // without reconnecting on every keystroke.
+            let should_restart_cloud_sync = matches!(
+                input,
+                SettingsInput::CloudSyncServerUrl | SettingsInput::CloudSyncRoom
+            );
             self.clear_settings_input_draft(input);
             self.ime_marked_text = None;
             self.clear_ime_selection();
             changed = true;
+            if should_restart_cloud_sync {
+                self.autostart_cloud_sync(cx);
+            }
         }
         if self.open_settings_select.is_some() {
             self.ime_marked_text = None;
@@ -705,9 +727,12 @@ impl WorkspaceApp {
         if self.close_terminal_git_branch_picker(cx) {
             changed = true;
         }
-        if self.connection_workspace.update(cx, |connection_workspace, cx| {
-            connection_workspace.clear_input_focus(cx)
-        }) {
+        if self
+            .connection_workspace
+            .update(cx, |connection_workspace, cx| {
+                connection_workspace.clear_input_focus(cx)
+            })
+        {
             self.ime_marked_text = None;
             changed = true;
         }
@@ -785,7 +810,10 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as i64;
                 if self.settings_store.settings().appearance.ui_font_size != value {
-                    self.edit_settings_deferring_save(|settings| settings.appearance.ui_font_size = value, cx);
+                    self.edit_settings_deferring_save(
+                        |settings| settings.appearance.ui_font_size = value,
+                        cx,
+                    );
                 }
             }
             SettingsSlider::AppearanceBorderRadius
@@ -801,7 +829,10 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as i64;
                 if self.settings_store.settings().appearance.border_radius != value {
-                    self.edit_settings_deferring_save(|settings| settings.appearance.border_radius = value, cx);
+                    self.edit_settings_deferring_save(
+                        |settings| settings.appearance.border_radius = value,
+                        cx,
+                    );
                 }
             }
             SettingsSlider::AppearanceWindowOpacity => {
@@ -815,7 +846,10 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
                 if self.settings_store.settings().appearance.window_opacity != value {
-                    self.edit_settings_deferring_save(|settings| settings.appearance.window_opacity = value, cx);
+                    self.edit_settings_deferring_save(
+                        |settings| settings.appearance.window_opacity = value,
+                        cx,
+                    );
                     // Detached windows consume the same setting on their next frame.
                     cx.refresh_windows();
                 }
@@ -831,7 +865,10 @@ impl WorkspaceApp {
                 };
                 let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
                 if self.settings_store.settings().terminal.background_opacity != value {
-                    self.edit_settings_deferring_save(|settings| settings.terminal.background_opacity = value, cx);
+                    self.edit_settings_deferring_save(
+                        |settings| settings.terminal.background_opacity = value,
+                        cx,
+                    );
                 }
             }
             SettingsSlider::AppearanceBackgroundBlur => {
@@ -1166,9 +1203,7 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
     // opening click. GPUI portals cannot, so modal select triggers keep a
     // closed-state anchor cache without notifying; that makes first-click open
     // immediate while scroll handlers still clear stale coordinates.
-    if anchor_id.is_settings_select_trigger()
-        || anchor_id.is_new_connection_select_trigger()
-    {
+    if anchor_id.is_settings_select_trigger() || anchor_id.is_new_connection_select_trigger() {
         return true;
     }
 

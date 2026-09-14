@@ -130,6 +130,7 @@
       }
     },
     "host_docker": {
+      "invalid_output": "Docker returned unrecognized output; containers may exist. Refresh and check diagnostic logs.",
       "search_placeholder": "Search containers...",
       "count_suffix": "containers",
       "sampling": "Sampling Docker containers...",

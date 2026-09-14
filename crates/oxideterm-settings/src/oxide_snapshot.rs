@@ -90,7 +90,6 @@ const APPEARANCE_KEYS: &[&str] = &[
     "renderProfile",
 ];
 const CONNECTION_DEFAULT_KEYS: &[&str] = &["username", "port"];
-const RECONNECT_KEYS: &[&str] = &["enabled", "maxAttempts", "baseDelayMs", "maxDelayMs"];
 const CONNECTION_POOL_KEYS: &[&str] = &["idleTimeoutSecs"];
 const NETWORK_KEYS: &[&str] = &[
     "upstreamProxy",
@@ -260,7 +259,6 @@ fn copy_section(
                 &["connectionDefaults"],
                 CONNECTION_DEFAULT_KEYS,
             );
-            copy_object_keys(source, target, &["reconnect"], RECONNECT_KEYS);
             copy_object_keys(source, target, &["connectionPool"], CONNECTION_POOL_KEYS);
         }
         "network" => copy_object_keys(source, target, &["network"], NETWORK_KEYS),

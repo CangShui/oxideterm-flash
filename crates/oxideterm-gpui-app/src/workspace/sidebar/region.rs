@@ -1,15 +1,43 @@
 use super::*;
 
-pub(in crate::workspace) const SIDEBAR_RESIZE_HOTZONE_PADDING: f32 = 4.0;
+pub(in crate::workspace) const SIDEBAR_RESIZE_HOTZONE_INTERIOR_WIDTH: f32 = 8.0;
 pub(in crate::workspace) const SIDEBAR_RESIZE_DIVIDER_WIDTH: f32 = 1.0;
 pub(in crate::workspace) const SIDEBAR_RESIZE_HOTZONE_WIDTH: f32 =
-    SIDEBAR_RESIZE_DIVIDER_WIDTH + SIDEBAR_RESIZE_HOTZONE_PADDING * 2.0;
+    SIDEBAR_RESIZE_DIVIDER_WIDTH + SIDEBAR_RESIZE_HOTZONE_INTERIOR_WIDTH;
+#[allow(dead_code)]
 const ACTIVITY_TOOLBAR_BUTTON_SIZE: f32 = 28.0;
+#[allow(dead_code)]
 const ACTIVITY_TOOLBAR_ICON_SIZE: f32 = 15.0;
+#[allow(dead_code)]
 const ACTIVITY_TOOLBAR_GROUP_PADDING: f32 = 2.0;
+#[allow(dead_code)]
 const ACTIVITY_EMPTY_STATE_ICON_SIZE: f32 = 20.0;
+#[allow(dead_code)]
 const ACTIVITY_TOOLBAR_ACTIVE_BACKGROUND_ALPHA: u32 = 0x1f;
+#[allow(dead_code)]
 const ACTIVITY_TOOLBAR_ACTIVE_BORDER_ALPHA: u32 = 0x52;
+
+#[derive(Clone, Copy)]
+pub(in crate::workspace) enum SidebarResizeHotzonePlacement {
+    BeforeSeam,
+    AfterSeam,
+}
+
+impl SidebarResizeHotzonePlacement {
+    fn origin(self, seam: f32) -> f32 {
+        match self {
+            Self::BeforeSeam => seam - SIDEBAR_RESIZE_HOTZONE_WIDTH,
+            Self::AfterSeam => seam,
+        }
+    }
+
+    fn divider_offset(self) -> f32 {
+        match self {
+            Self::BeforeSeam => SIDEBAR_RESIZE_HOTZONE_WIDTH - SIDEBAR_RESIZE_DIVIDER_WIDTH,
+            Self::AfterSeam => 0.0,
+        }
+    }
+}
 
 pub(in crate::workspace) fn context_sidebar_frame_chrome(
     total_width: f32,
@@ -32,20 +60,21 @@ pub(in crate::workspace) fn context_sidebar_region_chrome() -> gpui::Div {
 pub(in crate::workspace) fn sidebar_resize_hotzone_chrome(
     element_id: &'static str,
     line_color: gpui::Rgba,
+    placement: SidebarResizeHotzonePlacement,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(element_id)
         .absolute()
         .w(px(SIDEBAR_RESIZE_HOTZONE_WIDTH))
         .cursor_col_resize()
-        // Match browser split panes: the hit target straddles the seam while
-        // remaining fully transparent except for its centered divider.
+        // Keep the complete drag target inside the owning sidebar so the
+        // adjacent terminal can select text from its first visible pixel.
         .occlude()
         .bg(rgba(0x00000000))
         .child(
             div()
                 .absolute()
-                .left(px(SIDEBAR_RESIZE_HOTZONE_PADDING))
+                .left(px(placement.divider_offset()))
                 .top_0()
                 .bottom_0()
                 .w(px(SIDEBAR_RESIZE_DIVIDER_WIDTH))
@@ -55,8 +84,11 @@ pub(in crate::workspace) fn sidebar_resize_hotzone_chrome(
         )
 }
 
-pub(in crate::workspace) fn sidebar_resize_hotzone_origin(seam: f32) -> f32 {
-    seam - SIDEBAR_RESIZE_HOTZONE_PADDING
+pub(in crate::workspace) fn sidebar_resize_hotzone_origin(
+    seam: f32,
+    placement: SidebarResizeHotzonePlacement,
+) -> f32 {
+    placement.origin(seam)
 }
 
 impl WorkspaceApp {
@@ -259,10 +291,11 @@ impl WorkspaceApp {
             } else {
                 rgba(0x00000000)
             },
+            SidebarResizeHotzonePlacement::AfterSeam,
         )
-        // The seam sits at the frame's outer edge, so frame-local placement
-        // straddles it without depending on viewport math.
-        .left(px(-SIDEBAR_RESIZE_HOTZONE_PADDING))
+        // The frame begins at the seam, so the handle occupies only sidebar
+        // pixels and never covers the terminal content to its left.
+        .left_0()
         .top_0()
         .bottom_0()
         .on_mouse_down(
@@ -291,10 +324,24 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn reset_context_sidebar_width(&mut self, cx: &mut Context<Self>) {
+        let trace_id = next_sidebar_resize_trace_id();
+        let width_before = self.context_sidebar_width();
         self.context_sidebar_resizing = false;
+        self.context_sidebar_resize_trace_id = None;
         // The persisted width is an i64 pixel count, so convert explicitly.
         self.set_context_sidebar_width(oxideterm_settings::AI_SIDEBAR_DEFAULT_WIDTH as f32, cx);
         self.persist_sidebar_settings(cx);
+        tracing::info!(
+            target: "oxideterm_gpui_app::sidebar_resize",
+            trace_id,
+            stage = "double-click-reset",
+            sidebar = "context",
+            width_before,
+            width_after = self.context_sidebar_width(),
+            result = "completed",
+            business_impact = "the context sidebar returned to its default width without occupying adjacent terminal pixels",
+            "sidebar resize reset completed"
+        );
         cx.notify();
     }
 
@@ -303,13 +350,27 @@ impl WorkspaceApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = next_sidebar_resize_trace_id();
+        let width_before = self.sidebar_width;
         self.sidebar_resizing = false;
+        self.sidebar_resize_trace_id = None;
         // The primary width includes the activity bar; the default metric is
         // the sidebar panel alone.
         let default_total_width =
             self.tokens.metrics.activity_bar_width + self.tokens.metrics.sidebar_default_width;
         self.set_sidebar_width(default_total_width, f32::from(window.viewport_size().width), cx);
         self.persist_sidebar_settings(cx);
+        tracing::info!(
+            target: "oxideterm_gpui_app::sidebar_resize",
+            trace_id,
+            stage = "double-click-reset",
+            sidebar = "primary",
+            width_before,
+            width_after = self.sidebar_width,
+            result = "completed",
+            business_impact = "the primary sidebar returned to its default width while the terminal kept ownership of its first visible pixel",
+            "sidebar resize reset completed"
+        );
         cx.notify();
     }
 
@@ -319,12 +380,29 @@ impl WorkspaceApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        let trace_id = next_sidebar_resize_trace_id();
+        let width_before = self.context_sidebar_width();
+        self.context_sidebar_resize_trace_id = Some(trace_id);
         self.context_sidebar_resizing = true;
         // Snap the width to the pointer on press, mirroring the left sidebar
         // handle so the drag already feels attached at first movement.
         self.set_context_sidebar_width(
             f32::from(window.viewport_size().width) - f32::from(event.position.x),
             cx,
+        );
+        tracing::info!(
+            target: "oxideterm_gpui_app::sidebar_resize",
+            trace_id,
+            stage = "mouse-press",
+            sidebar = "context",
+            pointer_x = f32::from(event.position.x),
+            viewport_width = f32::from(window.viewport_size().width),
+            width_before,
+            width_after = self.context_sidebar_width(),
+            validation = "pointer press landed inside the context sidebar-owned resize hotzone",
+            result = "started",
+            business_impact = "the context sidebar began resizing without taking pointer ownership from adjacent terminal content",
+            "sidebar resize gesture started"
         );
         cx.notify();
     }
@@ -353,9 +431,23 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn finish_context_sidebar_resize(&mut self, cx: &mut Context<Self>) {
         if self.context_sidebar_resizing {
             self.context_sidebar_resizing = false;
+            let trace_id = self
+                .context_sidebar_resize_trace_id
+                .take()
+                .unwrap_or_else(next_sidebar_resize_trace_id);
             // The shared persistence path saves the whole sidebar block,
             // including the width this drag just wrote into the store.
             self.persist_sidebar_settings(cx);
+            tracing::info!(
+                target: "oxideterm_gpui_app::sidebar_resize",
+                trace_id,
+                stage = "mouse-release",
+                sidebar = "context",
+                width_after = self.context_sidebar_width(),
+                result = "completed",
+                business_impact = "the context sidebar resize finished and its final width was submitted to the settings store",
+                "sidebar resize gesture finished"
+            );
             cx.notify();
         }
     }
@@ -388,8 +480,12 @@ impl WorkspaceApp {
             } else {
                 rgba(0x00000000)
             },
+            SidebarResizeHotzonePlacement::BeforeSeam,
         )
-        .left(px(sidebar_resize_hotzone_origin(seam)))
+        .left(px(sidebar_resize_hotzone_origin(
+            seam,
+            SidebarResizeHotzonePlacement::BeforeSeam,
+        )))
         .top(px(top_offset))
         .bottom_0()
         .on_mouse_down(
@@ -735,8 +831,15 @@ mod sidebar_resize_region_tests {
                         )),
                 )
                 .child(
-                    sidebar_resize_hotzone_chrome("left-hotzone-element", rgba(0x000000ff))
-                        .left(px(sidebar_resize_hotzone_origin(self.total_width)))
+                    sidebar_resize_hotzone_chrome(
+                        "left-hotzone-element",
+                        rgba(0x000000ff),
+                        SidebarResizeHotzonePlacement::BeforeSeam,
+                    )
+                        .left(px(sidebar_resize_hotzone_origin(
+                            self.total_width,
+                            SidebarResizeHotzonePlacement::BeforeSeam,
+                        )))
                         .top_0()
                         .bottom_0()
                         .debug_selector(|| "left-hotzone".to_string())
@@ -824,8 +927,15 @@ mod sidebar_resize_region_tests {
                         ),
                 )
                 .child(
-                    sidebar_resize_hotzone_chrome("context-hotzone-element", rgba(0x000000ff))
-                        .left(px(sidebar_resize_hotzone_origin(seam)))
+                    sidebar_resize_hotzone_chrome(
+                        "context-hotzone-element",
+                        rgba(0x000000ff),
+                        SidebarResizeHotzonePlacement::AfterSeam,
+                    )
+                        .left(px(sidebar_resize_hotzone_origin(
+                            seam,
+                            SidebarResizeHotzonePlacement::AfterSeam,
+                        )))
                         .top_0()
                         .bottom_0()
                         .debug_selector(|| "context-hotzone".to_string())
@@ -871,7 +981,7 @@ mod sidebar_resize_region_tests {
     }
 
     #[gpui::test]
-    pub(in crate::workspace) fn left_sidebar_resize_hotzone_overlays_loaded_content(
+    pub(in crate::workspace) fn left_sidebar_resize_hotzone_stays_out_of_terminal_content(
         cx: &mut TestAppContext,
     ) {
         let total_width = 280.0;
@@ -897,8 +1007,8 @@ mod sidebar_resize_region_tests {
             SIDEBAR_RESIZE_HOTZONE_WIDTH,
         );
         assert_close(
-            "left divider position",
-            f32::from(hotzone.origin.x) + SIDEBAR_RESIZE_HOTZONE_PADDING,
+            "left hotzone right edge",
+            right_edge(&hotzone),
             right_edge(&frame),
         );
 
@@ -912,8 +1022,8 @@ mod sidebar_resize_region_tests {
         );
         assert_eq!(
             cx.update(|window, _cx| window.cursor_style_for_test()),
-            CursorStyle::ResizeColumn,
-            "hovering the left resize hotzone should apply the column-resize cursor"
+            CursorStyle::Arrow,
+            "the terminal side of the seam should retain its normal cursor"
         );
         cx.simulate_mouse_down(
             Point::new(
@@ -924,8 +1034,34 @@ mod sidebar_resize_region_tests {
             Modifiers::default(),
         );
         assert!(
+            !resize_started.get(),
+            "the first terminal pixels must not start a sidebar resize"
+        );
+
+        cx.simulate_mouse_move(
+            Point::new(
+                frame.origin.x + frame.size.width - px(3.0),
+                frame.origin.y + px(20.0),
+            ),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            cx.update(|window, _cx| window.cursor_style_for_test()),
+            CursorStyle::ResizeColumn,
+            "hovering inside the sidebar-owned hotzone should apply the column-resize cursor"
+        );
+        cx.simulate_mouse_down(
+            Point::new(
+                frame.origin.x + frame.size.width - px(3.0),
+                frame.origin.y + px(20.0),
+            ),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert!(
             resize_started.get(),
-            "left resize hotzone should receive mouse down above loaded content"
+            "the sidebar-owned resize hotzone should receive mouse down above loaded content"
         );
     }
 
@@ -980,7 +1116,7 @@ mod sidebar_resize_region_tests {
         assert_close(
             "hotzone origin",
             f32::from(hotzone.origin.x) - f32::from(frame.origin.x),
-            -SIDEBAR_RESIZE_HOTZONE_PADDING,
+            0.0,
         );
         assert_close(
             "hotzone width",
@@ -995,11 +1131,31 @@ mod sidebar_resize_region_tests {
         );
         assert_eq!(
             cx.update(|window, _cx| window.cursor_style_for_test()),
+            CursorStyle::Arrow,
+            "the main-content side of the seam should retain its normal cursor"
+        );
+        cx.simulate_mouse_down(
+            Point::new(frame.origin.x - px(3.0), frame.origin.y + px(20.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert!(
+            !resize_started.get(),
+            "the last main-content pixels must not start a context-sidebar resize"
+        );
+
+        cx.simulate_mouse_move(
+            Point::new(frame.origin.x + px(3.0), frame.origin.y + px(20.0)),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            cx.update(|window, _cx| window.cursor_style_for_test()),
             CursorStyle::ResizeColumn,
             "hovering the context-sidebar hotzone should apply the column-resize cursor"
         );
         cx.simulate_mouse_down(
-            Point::new(frame.origin.x - px(3.0), frame.origin.y + px(20.0)),
+            Point::new(frame.origin.x + px(3.0), frame.origin.y + px(20.0)),
             MouseButton::Left,
             Modifiers::default(),
         );

@@ -205,6 +205,46 @@ impl ConnectionTerminalOptions {
 
 pub const DEFAULT_X11_UNTRUSTED_TIMEOUT_SECONDS: u32 = 20 * 60;
 pub const DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS: u64 = 30;
+pub const MAX_REMOTE_PATH_FAVORITES: usize = 64;
+pub const MAX_REMOTE_PATH_FAVORITE_BYTES: usize = 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePathFavorite {
+    pub path: String,
+    pub is_directory: bool,
+}
+
+impl RemotePathFavorite {
+    pub fn new(path: &str, is_directory: bool) -> Result<Self> {
+        let path = path.trim();
+        if path.is_empty()
+            || path.len() > MAX_REMOTE_PATH_FAVORITE_BYTES
+            || path.chars().any(char::is_control)
+        {
+            bail!("Invalid remote favorite path");
+        }
+        let mut normalized = path.replace('\\', "/");
+        if !normalized.starts_with('/') {
+            normalized.insert(0, '/');
+        }
+        normalized = format!(
+            "/{}",
+            normalized
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        if normalized.is_empty() {
+            normalized.push('/');
+        }
+        Ok(Self {
+            path: normalized,
+            is_directory,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -343,6 +383,10 @@ pub struct ConnectionOptions {
         skip_serializing_if = "ConnectionTerminalOptions::inherits_application_defaults"
     )]
     pub terminal: ConnectionTerminalOptions,
+    /// Remote file favorites belong to this saved SSH profile and therefore
+    /// follow the same cloud-sync and portable `.oxide` ownership boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_path_favorites: Vec<RemotePathFavorite>,
 }
 
 impl ConnectionOptions {
@@ -350,6 +394,26 @@ impl ConnectionOptions {
         self.connect_timeout_seconds
             .filter(|seconds| *seconds > 0)
             .unwrap_or(DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS)
+    }
+
+    pub(crate) fn normalize_remote_path_favorites(&mut self) {
+        let mut normalized = Vec::new();
+        for favorite in std::mem::take(&mut self.remote_path_favorites) {
+            let Ok(favorite) = RemotePathFavorite::new(&favorite.path, favorite.is_directory)
+            else {
+                continue;
+            };
+            if normalized
+                .iter()
+                .all(|existing: &RemotePathFavorite| existing.path != favorite.path)
+            {
+                normalized.push(favorite);
+                if normalized.len() == MAX_REMOTE_PATH_FAVORITES {
+                    break;
+                }
+            }
+        }
+        self.remote_path_favorites = normalized;
     }
 }
 
@@ -1471,6 +1535,14 @@ pub struct ConnectionStoreData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_tombstones: Vec<DeletedConnectionTombstone>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serial_profile_tombstones: Vec<ProfileTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telnet_profile_tombstones: Vec<ProfileTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standalone_sftp_profile_tombstones: Vec<ProfileTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_desktop_profile_tombstones: Vec<ProfileTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_ssh_keys: Vec<ManagedSshKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub serial_profiles: Vec<SerialProfile>,
@@ -1492,6 +1564,10 @@ impl Default for ConnectionStoreData {
             groups: Vec::new(),
             recent: Vec::new(),
             connection_tombstones: Vec::new(),
+            serial_profile_tombstones: Vec::new(),
+            telnet_profile_tombstones: Vec::new(),
+            standalone_sftp_profile_tombstones: Vec::new(),
+            remote_desktop_profile_tombstones: Vec::new(),
             managed_ssh_keys: Vec::new(),
             serial_profiles: Vec::new(),
             telnet_profiles: Vec::new(),
@@ -1509,6 +1585,8 @@ pub struct SerialProfilesSyncSnapshot {
     pub exported_at: String,
     #[serde(default)]
     pub records: Vec<SerialProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tombstones: Vec<ProfileTombstone>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1518,6 +1596,8 @@ pub struct TelnetProfilesSyncSnapshot {
     pub exported_at: String,
     #[serde(default)]
     pub records: Vec<TelnetProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tombstones: Vec<ProfileTombstone>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1527,6 +1607,8 @@ pub struct StandaloneSftpProfilesSyncSnapshot {
     pub exported_at: String,
     #[serde(default)]
     pub records: Vec<StandaloneSftpProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tombstones: Vec<ProfileTombstone>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1536,6 +1618,8 @@ pub struct RemoteDesktopProfilesSyncSnapshot {
     pub exported_at: String,
     #[serde(default)]
     pub records: Vec<RemoteDesktopProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tombstones: Vec<ProfileTombstone>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1568,6 +1652,15 @@ pub(crate) struct ImportedManagedSshKey {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeletedConnectionTombstone {
+    pub id: String,
+    pub deleted_at: DateTime<Utc>,
+}
+
+/// Tombstone that records the deletion time of one profile so the same
+/// identifier cannot be resurrected by stale active snapshots.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileTombstone {
     pub id: String,
     pub deleted_at: DateTime<Utc>,
 }

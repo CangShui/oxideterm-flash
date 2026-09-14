@@ -1,6 +1,8 @@
 use super::*;
 
 // Keep action responsibilities isolated while their shared API remains private to SFTP.
+mod archive;
+mod clipboard;
 mod dialog_lifecycle;
 mod external;
 mod external_edit;

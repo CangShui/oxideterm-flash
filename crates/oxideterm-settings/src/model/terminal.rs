@@ -62,34 +62,11 @@ impl Default for TerminalAutosuggestSettings {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TerminalTriggerSettings {
-    // Shell execution is a separate trust decision from enabling ordinary terminal triggers.
-    #[serde(default)]
-    pub explicit_shell_enabled: bool,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-impl Default for TerminalTriggerSettings {
-    fn default() -> Self {
-        Self {
-            explicit_shell_enabled: false,
-            extra: ExtraFields::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TerminalCommandBarSettings {
     pub enabled: bool,
     pub git_status: bool,
     #[serde(default = "default_command_bar_project_tasks")]
     pub project_tasks: bool,
-    #[serde(default = "default_command_bar_current_directory_awareness")]
-    pub current_directory_awareness: bool,
-    #[serde(default = "default_command_bar_show_current_directory")]
-    pub show_current_directory: bool,
     pub smart_completion: bool,
     pub quick_commands_enabled: bool,
     #[serde(default)]
@@ -135,8 +112,6 @@ impl Default for TerminalCommandBarSettings {
             enabled: true,
             git_status: true,
             project_tasks: true,
-            current_directory_awareness: true,
-            show_current_directory: true,
             smart_completion: true,
             quick_commands_enabled: true,
             quick_bar_enabled: false,
@@ -152,14 +127,6 @@ impl Default for TerminalCommandBarSettings {
 }
 
 fn default_command_bar_project_tasks() -> bool {
-    true
-}
-
-fn default_command_bar_current_directory_awareness() -> bool {
-    true
-}
-
-fn default_command_bar_show_current_directory() -> bool {
     true
 }
 
@@ -327,6 +294,7 @@ pub struct TerminalSettings {
     #[serde(default = "default_highlight_tab_on_new_output")]
     pub highlight_tab_on_new_output: bool,
     pub paste_protection: bool,
+    #[serde(default)]
     pub smart_copy: bool,
     pub osc52_clipboard: bool,
     // Clipboard reads expose local data to remote programs, so legacy settings default to denied.
@@ -351,8 +319,6 @@ pub struct TerminalSettings {
     pub free_type_mode: bool,
     pub autosuggest: TerminalAutosuggestSettings,
     pub command_bar: TerminalCommandBarSettings,
-    #[serde(default)]
-    pub triggers: TerminalTriggerSettings,
     pub command_marks: TerminalCommandMarksSettings,
     pub background_enabled: bool,
     pub background_image: Option<String>,
@@ -453,7 +419,7 @@ impl Default for TerminalSettings {
             show_fps_overlay: false,
             highlight_tab_on_new_output: true,
             paste_protection: true,
-            smart_copy: true,
+            smart_copy: false,
             osc52_clipboard: true,
             osc52_clipboard_read: false,
             copy_on_select: false,
@@ -466,7 +432,6 @@ impl Default for TerminalSettings {
             free_type_mode: false,
             autosuggest: TerminalAutosuggestSettings::default(),
             command_bar: TerminalCommandBarSettings::default(),
-            triggers: TerminalTriggerSettings::default(),
             command_marks: TerminalCommandMarksSettings::default(),
             background_enabled: true,
             background_image: None,
@@ -507,16 +472,17 @@ mod tests {
     }
 
     #[test]
-    fn terminal_trigger_shell_execution_defaults_to_denied() {
+    fn smart_copy_is_disabled_for_new_and_legacy_missing_settings() {
+        assert!(!TerminalSettings::default().smart_copy);
+
         let mut value = serde_json::to_value(TerminalSettings::default()).expect("settings value");
         value
             .as_object_mut()
             .expect("terminal settings object")
-            .remove("triggers");
-
+            .remove("smartCopy");
         let settings: TerminalSettings = serde_json::from_value(value).expect("legacy settings");
 
-        assert!(!settings.triggers.explicit_shell_enabled);
+        assert!(!settings.smart_copy);
     }
 
     #[test]
@@ -526,13 +492,13 @@ mod tests {
             ("highlightTabOnNewOutput", true, |settings| {
                 settings.highlight_tab_on_new_output
             }),
-            (
-                "freeTypeCursorPositioning",
-                false,
-                |settings| settings.free_type_mode,
-            ),
+            ("freeTypeCursorPositioning", false, |settings| {
+                settings.free_type_mode
+            }),
             ("fontLigatures", false, |settings| settings.font_ligatures),
-            ("rightClickPaste", false, |settings| settings.right_click_paste),
+            ("rightClickPaste", false, |settings| {
+                settings.right_click_paste
+            }),
             ("semanticColoring", false, |settings| {
                 settings.semantic_coloring
             }),
@@ -550,10 +516,7 @@ mod tests {
     #[test]
     fn terminal_semantic_scheme_defaults_and_serializes_stably() {
         let mut value = serde_json::to_value(TerminalSettings::default()).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("semanticScheme");
+        value.as_object_mut().unwrap().remove("semanticScheme");
 
         let legacy: TerminalSettings = serde_json::from_value(value).unwrap();
         assert_eq!(legacy.semantic_scheme, TerminalSemanticScheme::Balanced);
@@ -649,10 +612,7 @@ mod tests {
     #[test]
     fn terminal_settings_default_osc52_clipboard_read_when_missing() {
         let mut value = serde_json::to_value(TerminalSettings::default()).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("osc52ClipboardRead");
+        value.as_object_mut().unwrap().remove("osc52ClipboardRead");
 
         let settings: TerminalSettings = serde_json::from_value(value).unwrap();
 
@@ -702,14 +662,11 @@ mod tests {
 
     #[test]
     fn command_bar_settings_restore_legacy_defaults() {
-        let defaults: [(&str, bool, fn(&TerminalCommandBarSettings) -> bool); 3] = [
-            (
-                "currentDirectoryAwareness",
-                true,
-                |settings| settings.current_directory_awareness,
-            ),
+        let defaults: [(&str, bool, fn(&TerminalCommandBarSettings) -> bool); 2] = [
             ("projectTasks", true, |settings| settings.project_tasks),
-            ("quickBarEnabled", false, |settings| settings.quick_bar_enabled),
+            ("quickBarEnabled", false, |settings| {
+                settings.quick_bar_enabled
+            }),
         ];
 
         for (field, expected, read) in defaults {

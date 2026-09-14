@@ -40,6 +40,7 @@ impl LogicalWindowRect {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn default_window_bounds(cx: &App) -> Bounds<Pixels> {
     initial_window_bounds(cx, &WindowUiState::default()).get_bounds()
 }

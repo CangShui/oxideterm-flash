@@ -291,12 +291,30 @@ impl SftpSession {
     fn map_sftp_error(&self, error: SftpErrorInner, path: &str) -> SftpError {
         let message = error.to_string();
         let lower = message.to_lowercase();
-        if lower.contains("permission denied") {
+        if matches!(
+            &error,
+            SftpErrorInner::Status(status) if status.status_code == StatusCode::PermissionDenied
+        ) || lower.contains("permission denied")
+        {
             SftpError::PermissionDenied(path.to_string())
-        } else if is_missing_file_error_message(&lower) {
+        } else if matches!(
+            &error,
+            SftpErrorInner::Status(status) if status.status_code == StatusCode::NoSuchFile
+        ) || is_missing_file_error_message(&lower)
+        {
             SftpError::FileNotFound(path.to_string())
         } else if lower.contains("no such directory") {
             SftpError::DirectoryNotFound(path.to_string())
+        } else if matches!(
+            &error,
+            SftpErrorInner::Status(status)
+                if matches!(
+                    status.status_code,
+                    StatusCode::NoConnection | StatusCode::ConnectionLost
+                )
+        ) || matches!(error, SftpErrorInner::Timeout)
+        {
+            SftpError::ChannelError(message)
         } else {
             SftpError::ProtocolError(message)
         }

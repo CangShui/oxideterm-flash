@@ -36,7 +36,12 @@ const FREE_TYPE_DEBUG_ENV: &str = "OXIDETERM_FREE_TYPE_DEBUG";
 
 fn log_free_type_terminal(args: std::fmt::Arguments<'_>) {
     if env::var_os(FREE_TYPE_DEBUG_ENV).is_some() {
-        eprintln!("[oxideterm:free-type] {args}");
+        tracing::debug!(
+            target: "oxideterm::audit",
+            stage = "terminal.free_type",
+            detail = %args,
+            "free-type terminal diagnostic event"
+        );
     }
 }
 
@@ -1080,11 +1085,7 @@ impl TerminalPane {
         self.copy_selection_after_select_if_configured(cx);
     }
 
-    fn begin_selection_audit(
-        &mut self,
-        anchor: TerminalGridPoint,
-        mode: TerminalSelectionMode,
-    ) {
+    fn begin_selection_audit(&mut self, anchor: TerminalGridPoint, mode: TerminalSelectionMode) {
         let trace_id = next_terminal_selection_trace_id();
         self.selection_trace_id = Some(trace_id);
         tracing::info!(
@@ -2139,10 +2140,7 @@ fn free_type_drag_distance_exceeded(
     dx.hypot(dy) >= TERMINAL_FREE_TYPE_DRAG_THRESHOLD_PX
 }
 
-fn link_activation_drag_exceeded(
-    start: gpui::Point<Pixels>,
-    current: gpui::Point<Pixels>,
-) -> bool {
+fn link_activation_drag_exceeded(start: gpui::Point<Pixels>, current: gpui::Point<Pixels>) -> bool {
     let dx = f32::from(current.x - start.x);
     let dy = f32::from(current.y - start.y);
     dx.hypot(dy) >= TERMINAL_LINK_ACTIVATION_MAX_MOVEMENT_PX
@@ -2831,8 +2829,8 @@ mod tests {
     };
     use oxideterm_terminal::{TerminalAttrs, TerminalCell, TerminalColor, TerminalCursorShape};
     use oxideterm_terminal::{
-        TerminalEditorApplication, TerminalEditorCapabilities, TerminalEditorClipboardOperation,
-        TerminalEditorIntegrationEvent, TerminalEditorMode, TerminalEditorSelection,
+        TerminalEditorApplication, TerminalEditorCapabilities, TerminalEditorIntegrationEvent,
+        TerminalEditorMode, TerminalEditorSelection,
     };
 
     fn test_cell(ch: char) -> TerminalCell {

@@ -12,6 +12,28 @@ impl WorkspaceApp {
         let Some(intent) = request.take() else {
             return;
         };
+        let trace_id = crate::logging::next_audit_trace_id();
+        let intent_kind = match &intent {
+            HostToolsWindowIntent::OpenExistingNodeTerminal { connection_id, .. } => {
+                format!("open_existing_node_terminal(connection_id={connection_id})")
+            }
+            HostToolsWindowIntent::BeginPlainTextImeSelection { .. } => {
+                "begin_plain_text_ime_selection".to_string()
+            }
+            HostToolsWindowIntent::PrepareTmuxInputDialog => "prepare_tmux_input_dialog".to_string(),
+            HostToolsWindowIntent::PrepareTmuxConfirm => "prepare_tmux_confirm".to_string(),
+            HostToolsWindowIntent::SetMonitoringEnabled { tool, enabled } => {
+                format!("set_monitoring_enabled(tool={tool:?}, enabled={enabled})")
+            }
+        };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "host_tools.request",
+            intent = intent_kind,
+            result = "received",
+            "主机工具窗口请求到达工作区，进入对应工具动作分发；命令文本不写入日志"
+        );
         match intent {
             HostToolsWindowIntent::OpenExistingNodeTerminal {
                 connection_id,
@@ -21,6 +43,15 @@ impl WorkspaceApp {
                 missing_notice,
             } => {
                 let Some(node_id) = self.node_router.node_id_for_connection(&connection_id) else {
+                    tracing::warn!(
+                        target: "oxideterm::audit",
+                        trace_id,
+                        stage = "host_tools.terminal.validation",
+                        connection_id,
+                        result = "rejected",
+                        reason = "找不到该连接对应的运行节点",
+                        "主机工具终端请求未进入业务逻辑"
+                    );
                     self.push_host_tools_window_notice(
                         missing_notice,
                         TerminalNoticeVariant::Error,
@@ -30,6 +61,16 @@ impl WorkspaceApp {
                     return;
                 };
                 if !self.ssh_nodes.contains_key(&node_id) {
+                    tracing::warn!(
+                        target: "oxideterm::audit",
+                        trace_id,
+                        stage = "host_tools.terminal.validation",
+                        connection_id,
+                        node_id = %node_id.0,
+                        result = "rejected",
+                        reason = "工作区没有该运行节点的界面映射",
+                        "主机工具终端请求未进入业务逻辑"
+                    );
                     self.push_host_tools_window_notice(
                         missing_notice,
                         TerminalNoticeVariant::Error,
@@ -39,6 +80,17 @@ impl WorkspaceApp {
                     return;
                 }
                 // NodeRouter retains the physical connection; this creates only a tab consumer.
+                tracing::info!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "host_tools.terminal.request",
+                    connection_id,
+                    node_id = %node_id.0,
+                    reuses_physical_ssh_connection = true,
+                    opens_new_terminal_channel = true,
+                    command_detail_redacted = true,
+                    "主机工具正在复用现有 SSH 物理连接，并为 tmux/Screen 等交互命令创建独立终端通道"
+                );
                 match self.queue_ssh_terminal_tab_for_existing_node(
                     node_id,
                     Some(command),
@@ -46,16 +98,36 @@ impl WorkspaceApp {
                     window,
                     cx,
                 ) {
-                    Ok(()) => self.push_host_tools_window_notice(
-                        opened_notice,
-                        TerminalNoticeVariant::Success,
-                        cx,
-                    ),
-                    Err(_) => self.push_host_tools_window_notice(
-                        missing_notice,
-                        TerminalNoticeVariant::Error,
-                        cx,
-                    ),
+                    Ok(()) => {
+                        tracing::info!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "host_tools.terminal.response",
+                            connection_id,
+                            result = "completed",
+                            "交互式终端标签已创建，它与原终端共享节点连接但拥有独立 PTY"
+                        );
+                        self.push_host_tools_window_notice(
+                            opened_notice,
+                            TerminalNoticeVariant::Success,
+                            cx,
+                        )
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "host_tools.terminal.response",
+                            connection_id,
+                            result = "failed",
+                            "交互式终端标签创建失败，未改变现有终端"
+                        );
+                        self.push_host_tools_window_notice(
+                            missing_notice,
+                            TerminalNoticeVariant::Error,
+                            cx,
+                        )
+                    }
                 }
                 cx.notify();
             }

@@ -18,7 +18,7 @@ use oxideterm_settings::SettingsStore;
 use zeroize::Zeroizing;
 
 use crate::assets::NativeAssets;
-use crate::window_placement::{default_window_bounds, initial_window_bounds};
+use crate::window_placement::initial_window_bounds;
 use crate::workspace::{WorkspaceApp, WorkspaceWindowShell, locale_from_settings};
 
 actions!(

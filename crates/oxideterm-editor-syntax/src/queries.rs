@@ -65,6 +65,7 @@ const BASH_HIGHLIGHTS_QUERY: &str = r#"
 // `tree-sitter-cmake` ships a highlight query file but does not export it from
 // the Rust crate. Keep a compact local query for the scopes our editor theme
 // already maps instead of reaching into Cargo's private registry layout.
+#[allow(dead_code)]
 const CMAKE_HIGHLIGHTS_QUERY: &str = r#"
 [
   (function)
@@ -92,6 +93,7 @@ const CMAKE_HIGHLIGHTS_QUERY: &str = r#"
 // The Common Lisp crate intentionally leaves query exports disabled. This
 // compact query gives Lisp files useful editor color without tying us to the
 // crate's source layout.
+#[allow(dead_code)]
 const LISP_HIGHLIGHTS_QUERY: &str = r#"
 (comment) @comment
 (str_lit) @string
@@ -105,6 +107,7 @@ const LISP_HIGHLIGHTS_QUERY: &str = r#"
 // the crate. This local query intentionally covers the common scopes used by
 // the editor color mapper while staying small enough to keep compile failures
 // obvious when the grammar changes.
+#[allow(dead_code)]
 const JAVASCRIPT_HIGHLIGHTS_QUERY: &str = r#"
 [
   "async"

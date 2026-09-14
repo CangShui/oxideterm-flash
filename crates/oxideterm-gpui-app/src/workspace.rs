@@ -89,8 +89,8 @@ use gpui::{
     prelude::*, px, relative, rgb, rgba, svg,
 };
 use oxideterm_connection_monitor::{
-    CompactMonitorRow, ConnectionPoolEntryState, ConnectionPoolEntrySummary,
-    ConnectionPoolMonitorStats, DockerActionKind, FilesystemCommandCapability,
+    CompactMonitorRow, ConnectionPoolEntryState,
+    DockerActionKind, FilesystemCommandCapability,
     FilesystemEntrySeverity, FilesystemFilter, GpuDevice, GpuProvider, GpuSamplingTask,
     GpuSnapshot, GpuSnapshotStatus, GpuUpdate, LogCommandCapability, LogPreset, MetricsSource,
     MonitorMetricKind, MonitorSectionKind, MonitorValueLevel, PackageCommandCapability,
@@ -147,9 +147,9 @@ use oxideterm_gpui_terminal::{
     TerminalBackgroundFit, TerminalBackgroundPreferences, TerminalBroadcastInputKind,
     TerminalCommandSelectionLabels, TerminalContextAction, TerminalHighlightMatchScope,
     TerminalHighlightRenderMode, TerminalHighlightRule as UiHighlightRule,
-    TerminalHighlightRuleSetOverride, TerminalInputBroadcaster, TerminalInputInterceptor,
-    TerminalInputInterceptorResult, TerminalModemLabels, TerminalNotice, TerminalNoticeVariant,
-    TerminalOutputProcessor, TerminalPane, TerminalPaneEvent, TerminalPasteLabels,
+    TerminalHighlightRuleSetOverride, TerminalInputBroadcaster,
+    TerminalModemLabels, TerminalNotice, TerminalNoticeVariant,
+    TerminalPane, TerminalPaneEvent, TerminalPasteLabels,
     TerminalRecordingState, TerminalRecordingStatus, TerminalSearchStatus,
     TerminalSerialControlLabels, TerminalTrzszLabels, TerminalUiPreferenceOverrides,
     TerminalUiPreferences, TerminalUiTheme, TerminalWorkingDirectorySource,
@@ -158,7 +158,7 @@ use oxideterm_gpui_terminal::{
 use oxideterm_gpui_ui::scroll::ScrollableElement;
 use oxideterm_gpui_ui::{
     ConfirmDialogAction, ConfirmDialogVariant, ConfirmDialogView, checkbox,
-    modal::{popover_backdrop, set_tauri_backdrop_blur_allowed},
+    modal::set_tauri_backdrop_blur_allowed,
     text_input::{TextInputAnchorId, TextInputView, text_input, text_input_anchor_probe},
     toast::{ToastVariant, ToastView, toast_action, toast_close},
     toaster::toaster,
@@ -169,26 +169,20 @@ use oxideterm_render_policy::{
     DetectedGraphics, EffectiveRenderPolicy, RenderProfile, compute_render_policy,
 };
 use oxideterm_session_adapter::{
-    reconnect_max_attempts_from_settings, reconnect_timing_from_settings,
     sftp_runtime_settings_from_settings, terminal_backspace_sequence_from_connection,
     terminal_delete_sequence_from_connection, terminal_encoding_from_connection,
     terminal_encoding_from_settings as session_terminal_encoding,
 };
 use oxideterm_settings::{
     AI_SIDEBAR_ABSOLUTE_MAX_WIDTH, AI_SIDEBAR_ABSOLUTE_MIN_WIDTH, BackgroundFit, BackgroundScope,
-    CursorStyle as SettingsCursorStyle, FontFamily, FrostedGlassMode, GLOBAL_HIGHLIGHT_RULE_SET_ID,
+    CursorStyle as SettingsCursorStyle, FrostedGlassMode, GLOBAL_HIGHLIGHT_RULE_SET_ID,
     HighlightRule, HighlightRuleMatchScope, HighlightRuleRenderMode, Language,
     MAX_TERMINAL_BACKGROUND_OPACITY, MAX_WINDOW_OPACITY, MIN_TERMINAL_BACKGROUND_OPACITY,
     MIN_WINDOW_OPACITY, PersistedSettings, SettingsStore,
     default_settings_path, list_background_images,
 };
 use oxideterm_settings_model::SettingsNavigationLayout;
-use oxideterm_sftp::{
-    BackgroundTransferDirection, BackgroundTransferKind, BackgroundTransferSnapshot,
-    BackgroundTransferState, LazyProgressStore, ProgressStore, RemoteRelayDisposition,
-    SftpTransferGuard, SftpTransferManager, StoredTransferProgress, TransferStrategy,
-    tar_download_directory, tar_upload_directory,
-};
+use oxideterm_sftp::{LazyProgressStore, ProgressStore, RemoteRelayDisposition, SftpTransferManager, StoredTransferProgress};
 use oxideterm_ssh::{
     AuthMethod, ConnectionConsumer, ConnectionPoolConfig, ConnectionProgressReporter,
     ConnectionState, ConnectionTraceEvent, ConnectionTraceMode, ConnectionTracePlan,
@@ -203,12 +197,12 @@ use oxideterm_ssh::{
 };
 use oxideterm_ssh_launch::{NativeConnectionLaunch, TemporarySshLaunch, TemporaryTelnetLaunch};
 use oxideterm_terminal::{
-    LocalPtyConfig, SerialSessionConfig, ShellInfo,
+    SerialSessionConfig, ShellInfo,
     SshSessionConfig, TelnetSessionConfig, TerminalCommandMarkDetectionSource, TerminalCursorShape,
-    TerminalLifecycle, scan_shells,
+    TerminalLifecycle,
 };
 use oxideterm_theme::{
-    AppUiColors, TerminalTheme, ThemeTokens, UiDensityProfile, UiMotionProfile, UiRadii,
+    AppUiColors, ThemeTokens, UiDensityProfile, UiMotionProfile, UiRadii,
     theme_by_id,
 };
 use oxideterm_workspace::{
@@ -230,7 +224,7 @@ use self::ime::{
 use self::launcher::{LauncherWorkspaceEntity, LauncherWorkspaceEvent};
 use self::new_connection::{
     ConnectionFlowEntity, ConnectionFlowEvent, NativeSshPromptHandler, NewConnectionField,
-    NewConnectionForm, SavedConnectionPromptAction, SshAuthTab, SshConnectionIntent,
+    NewConnectionForm, SshAuthTab, SshConnectionIntent,
 };
 use self::onboarding::OnboardingState;
 use self::overlay::{
@@ -245,23 +239,23 @@ use self::sidebar::{
     ActiveSessionContextMenu, ActiveSessionFolderContextMenu, ActiveSessionSidebarViewMode,
     MoveSessionFolderDialogState, NewSessionFolderDialogState, SidebarSection,
 };
-use self::tabs::{TabRemovalTransition, TerminalLocation};
+use self::tabs::TerminalLocation;
 use self::terminal_entity::{WorkspaceTerminalEntity, WorkspaceTerminalEvent};
 use self::window_intent::WorkspaceWindowIntentEntity;
 use crate::{
     CloseOtherTabs, ClosePane, CloseSearch, CloseTab, CommandPalette, Copy, Cut, Find, FindNext,
     FindPrev, FontDecrease, FontIncrease, FontReset, GoToTab1, GoToTab2, GoToTab3, GoToTab4,
     GoToTab5, GoToTab6, GoToTab7, GoToTab8, GoToTab9, NewConnection, NewTerminal, NextTab,
-    OpenSettings, PaletteBroadcast, PaletteCancelReconnect, PaletteCleanupDead,
-    PaletteDetachTerminal, PaletteDisconnectAll, PaletteHealthCheck,
-    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, ShellLauncher,
+    OpenSettings, PaletteBroadcast, PaletteCancelReconnect,
+    PaletteDisconnectAll, PaletteHealthCheck,
+    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab,
     SplitHorizontal, SplitNavLeft, SplitNavRight, SplitVertical, SwitchLocaleChinese,
     SwitchLocaleEnglish, TerminalClearScreen,
     TerminalFreeTypeMode, TerminalRecording, ToggleFullscreen, ToggleSidebar, ZenMode,
 };
 use crate::assets::LucideIcon;
 use oxideterm_gpui_markdown::{
-    MarkdownBlockLayout, MarkdownCodeBlockActions, MarkdownDocument, MarkdownMermaidZoomHandler,
+    MarkdownCodeBlockActions, MarkdownMermaidZoomHandler,
     MarkdownOptions, MarkdownVirtualListScrollHandle, markdown_virtual_with_code_actions,
 };
 
@@ -285,12 +279,11 @@ pub(super) use selectable_text::{
 };
 pub(super) use virtual_list::{
     TauriVirtualListSpec, TauriVirtualScrollAlign, scroll_tauri_virtual_list_to_index,
-    tauri_virtual_list, tauri_virtual_list_is_near_bottom, tauri_virtual_list_state,
+    tauri_virtual_list, tauri_virtual_list_state,
     tauri_virtual_uniform_list, uniform_list_edge_autoscroll,
 };
 use virtual_list::{
     VirtualListSignatureCache, sync_tauri_variable_list_state_by_signatures,
-    sync_tauri_virtual_list_state_by_signatures,
 };
 
 const SETTINGS_SECTION_LIST_INITIAL_ITEM_COUNT: usize = 4;
@@ -310,6 +303,7 @@ const QUICK_COMMAND_LIST_OVERSCAN: usize = 6;
 const ACTIVE_SESSION_SIDEBAR_LIST_INITIAL_ITEM_COUNT: usize = 0;
 const ACTIVE_SESSION_SIDEBAR_LIST_ESTIMATED_HEIGHT: f32 = 40.0;
 const ACTIVE_SESSION_SIDEBAR_LIST_OVERSCAN: usize = 8;
+#[allow(dead_code)]
 const ACTIVE_SESSION_FOCUS_LIST_ESTIMATED_HEIGHT: f32 = 76.0;
 const OXIDE_EXPORT_CONNECTION_LIST_INITIAL_ITEM_COUNT: usize = 0;
 const OXIDE_EXPORT_CONNECTION_LIST_ESTIMATED_HEIGHT: f32 = 58.0;
@@ -497,7 +491,6 @@ pub(crate) struct WorkspaceApp {
     terminal_trigger_settings_pane: Option<PaneId>,
     terminal_trigger_shell_confirmation_pending: bool,
     terminal_triggers: settings::TerminalTriggersSettingsState,
-    terminal_trigger_runtime: terminal_triggers_runtime::TerminalTriggerRuntimeState,
     terminal_trigger_saved_connections:
         HashMap<TerminalSessionId, oxideterm_terminal_triggers::SavedConnectionRef>,
     terminal_semantic_highlight_section_expanded: bool,
@@ -527,9 +520,11 @@ pub(crate) struct WorkspaceApp {
     // paint so divider drags divide by the container, not the window.
     split_group_extents: HashMap<PaneId, f32>,
     sidebar_resizing: bool,
+    sidebar_resize_trace_id: Option<u64>,
     // Tracks the Host Tools (context) sidebar drag separately so the shared
     // cursor-override logic never drives the left sidebar width from it.
     context_sidebar_resizing: bool,
+    context_sidebar_resize_trace_id: Option<u64>,
     embedded_sftp_sidebar_resizing: bool,
     sidebar_resize_hotzone_hovered: bool,
     sidebar_collapsed: bool,
@@ -542,7 +537,9 @@ pub(crate) struct WorkspaceApp {
     needs_active_pane_focus: bool,
     active_sidebar_section: SidebarSection,
     active_surface: ActiveSurface,
+    #[allow(dead_code)]
     active_session_sidebar_view_mode: ActiveSessionSidebarViewMode,
+    #[allow(dead_code)]
     active_session_sidebar_focused_node_id: Option<NodeId>,
     active_session_context_menu: Option<ActiveSessionContextMenu>,
     active_session_folder_context_menu: Option<ActiveSessionFolderContextMenu>,
@@ -616,7 +613,12 @@ pub(crate) struct WorkspaceApp {
     cloud_sync: Option<cloud_sync::CloudSyncRuntime>,
     cloud_sync_config: Option<cloud_sync::ResolvedCloudSyncConfig>,
     cloud_sync_status: Option<String>,
+    cloud_sync_generation: u64,
+    cloud_sync_logs: VecDeque<String>,
+    cloud_sync_progress: Option<f32>,
     cloud_sync_delete_prompt: Option<cloud_sync::CloudSyncDeletePrompt>,
+    cloud_sync_auto_push_task: Option<Task<()>>,
+    cloud_sync_observed_store_state: Option<cloud_sync::CloudSyncStoreState>,
     sftp_progress_store: Arc<dyn ProgressStore>,
     node_router: NodeRouter,
     ssh_nodes: HashMap<NodeId, WorkspaceSshNode>,
@@ -668,6 +670,7 @@ pub(crate) struct WorkspaceApp {
     // Shell discovery spawns helper processes, so the scan is deferred to the
     // first launcher or settings use instead of blocking workspace startup.
     local_shells: RefCell<Vec<ShellInfo>>,
+    #[allow(dead_code)]
     local_shells_scanned: Cell<bool>,
     terminal: Entity<WorkspaceTerminalEntity>,
     _terminal_subscription: Subscription,

@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(dead_code)]
 pub(in crate::workspace) const ONBOARDING_TOTAL_STEPS: usize = 1;
 pub(in crate::workspace) const ONBOARDING_WIDTH: f32 = 800.0; // Tauri DialogContent sm:max-w-[800px].
 pub(in crate::workspace) const ONBOARDING_MAX_HEIGHT: f32 = 720.0;

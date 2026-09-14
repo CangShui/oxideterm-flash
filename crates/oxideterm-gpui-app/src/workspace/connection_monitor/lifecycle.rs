@@ -191,7 +191,7 @@ impl HostToolsEntity {
 }
 
 impl WorkspaceApp {
-    pub(in crate::workspace) fn host_tools_visibility(&self, cx: &App) -> HostToolsVisibility {
+    pub(in crate::workspace) fn host_tools_visibility(&self, _cx: &App) -> HostToolsVisibility {
         let sidebar_visible = self.context_sidebar_visible()
             && self.active_context_sidebar_panel == ContextSidebarPanel::HostTools;
 

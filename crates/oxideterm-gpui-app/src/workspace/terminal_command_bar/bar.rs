@@ -25,13 +25,7 @@ impl WorkspaceApp {
         // inference so local shells that are currently inside SSH show the
         // remote identity consistently in both places.
         let target_label = self.terminal_command_active_target_label(cx);
-        let cwd_display_enabled = self.terminal_current_directory_awareness_enabled()
-            && self
-                .settings_store
-                .settings()
-                .terminal
-                .command_bar
-                .show_current_directory;
+        let cwd_display_enabled = false;
         let cwd_snapshot = cwd_display_enabled
             .then(|| self.active_terminal_cwd_snapshot(cx))
             .flatten();
@@ -379,24 +373,6 @@ impl WorkspaceApp {
                                     ))
                                 },
                             )
-                            .when_some(active_pane_id, |actions, pane_id| {
-                                // Capture the visible pane so the shortcut cannot retarget after a tab switch.
-                                actions.child(self.terminal_command_action_button(
-                                    LucideIcon::Activity,
-                                    rgb(theme.text_muted),
-                                    false,
-                                    None,
-                                    "terminal-command-session-triggers",
-                                    self.i18n.t("terminal.command_selection.manage_triggers"),
-                                    move |this, _event, window, cx| {
-                                        this.open_terminal_trigger_settings_for_pane(
-                                            pane_id, window, cx,
-                                        );
-                                        cx.stop_propagation();
-                                    },
-                                    cx,
-                                ))
-                            })
                             .child(select_anchor_probe(
                                 SelectAnchorId::TerminalBroadcastMenu,
                                 self.terminal_command_action_button(
@@ -937,15 +913,20 @@ impl WorkspaceApp {
     }
     pub(in crate::workspace) fn render_terminal_surface(
         &self,
+        tab_id: TabId,
         root_pane: &PaneNode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let terminal = self.render_pane_tree(root_pane, cx);
+        // The projected tab id stays authoritative for the whole render. Reading
+        // the mutable active-tab selector again could attach a newly selected
+        // tab's chrome to the previous tab's terminal entity for one frame.
+        let terminal = self.render_pane_tree_for_tab(Some(tab_id), root_pane, cx);
         let recording_status = self.active_terminal_recording_status(cx);
         let recording_active = recording_status.state != TerminalRecordingState::Idle;
         if !self.settings_store.settings().terminal.command_bar.enabled {
             return div()
+                .id(("terminal-tab-surface", tab_id.0))
                 .size_full()
                 .relative()
                 .child(terminal)
@@ -956,6 +937,7 @@ impl WorkspaceApp {
         }
 
         div()
+            .id(("terminal-tab-surface", tab_id.0))
             .size_full()
             .flex()
             .flex_col()

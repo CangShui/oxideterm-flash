@@ -20,8 +20,27 @@ impl SftpSession {
     }
 
     pub async fn delete_recursive(&self, path: &str) -> Result<u64, SftpError> {
+        self.delete_recursive_with_progress(path, Arc::new(|| {}))
+            .await
+    }
+
+    /// Counts a tree using the same symlink-safe traversal as recursive deletion.
+    /// The count gives UI callers an honest denominator before destructive work starts.
+    pub async fn count_recursive(&self, path: &str) -> Result<u64, SftpError> {
         let canonical_path = self.resolve_path(path).await?;
-        self.delete_recursive_inner(&canonical_path).await
+        self.count_recursive_inner(&canonical_path).await
+    }
+
+    /// Deletes a tree while reporting each completed filesystem entry.
+    /// Callers own aggregation and throttling so the SFTP layer stays UI-agnostic.
+    pub async fn delete_recursive_with_progress(
+        &self,
+        path: &str,
+        progress: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<u64, SftpError> {
+        let canonical_path = self.resolve_path(path).await?;
+        self.delete_recursive_inner(&canonical_path, &progress)
+            .await
     }
 
     pub async fn mkdir(&self, path: &str) -> Result<(), SftpError> {
@@ -54,7 +73,38 @@ impl SftpSession {
             .map_err(|error| self.map_sftp_error(error, &old_canonical))
     }
 
-    async fn delete_recursive_inner(&self, path: &str) -> Result<u64, SftpError> {
+    async fn count_recursive_inner(&self, path: &str) -> Result<u64, SftpError> {
+        let metadata = self
+            .sftp
+            .symlink_metadata(path)
+            .await
+            .map_err(|error| self.map_sftp_error(error, path))?;
+        if !metadata.is_dir() || metadata.is_symlink() {
+            return Ok(1);
+        }
+
+        let entries = self
+            .list_dir(
+                path,
+                Some(ListFilter {
+                    show_hidden: true,
+                    pattern: None,
+                    sort: SortOrder::Name,
+                }),
+            )
+            .await?;
+        let mut count = 1_u64;
+        for entry in entries {
+            count = count.saturating_add(Box::pin(self.count_recursive_inner(&entry.path)).await?);
+        }
+        Ok(count)
+    }
+
+    async fn delete_recursive_inner(
+        &self,
+        path: &str,
+        progress: &Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<u64, SftpError> {
         let metadata = self
             .sftp
             .symlink_metadata(path)
@@ -65,6 +115,7 @@ impl SftpSession {
                 .remove_file(path)
                 .await
                 .map_err(|error| self.map_sftp_error(error, path))?;
+            progress();
             return Ok(1);
         }
 
@@ -80,12 +131,13 @@ impl SftpSession {
             )
             .await?;
         for entry in entries {
-            deleted_count += Box::pin(self.delete_recursive_inner(&entry.path)).await?;
+            deleted_count += Box::pin(self.delete_recursive_inner(&entry.path, progress)).await?;
         }
         self.sftp
             .remove_dir(path)
             .await
             .map_err(|error| self.map_sftp_error(error, path))?;
+        progress();
         Ok(deleted_count + 1)
     }
 }

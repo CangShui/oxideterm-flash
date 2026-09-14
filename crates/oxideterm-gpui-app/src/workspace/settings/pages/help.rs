@@ -103,9 +103,8 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn help_diagnostics_card(&self, cx: &mut Context<Self>) -> AnyElement {
-        // MemoryDiagnosticsPanel and the keyboard-shortcut reference are Tauri-only Help blocks.
-        // GPUI keeps diagnostics lightweight: file logging is always available, while verbose
-        // debug output is opt-in so normal sessions do not generate oversized logs.
+        // Debug logging is opt-in because the detailed audit sink intentionally
+        // records every accepted UI and runtime transition.
         self.plain_settings_card(vec![
             self.card_title("settings_view.help.diagnostics"),
             self.bool_row(
@@ -617,6 +616,7 @@ impl WorkspaceApp {
         .into_any_element()
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn help_pill_badge(&self, label: String, color: u32) -> AnyElement {
         div()
             .rounded_full()
@@ -904,13 +904,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn help_log_directory(&self) -> std::path::PathBuf {
-        // Tauri stores logs under the app data directory. Native settings use
-        // the same data root, so derive logs beside settings.json.
-        self.settings_store
-            .path()
-            .parent()
-            .map(|parent| parent.join("logs"))
-            .unwrap_or_else(|| std::path::PathBuf::from("logs"))
+        crate::logging::log_directory()
     }
 
     pub(in crate::workspace) fn language_label(&self, language: Language) -> String {

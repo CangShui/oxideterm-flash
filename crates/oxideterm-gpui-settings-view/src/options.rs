@@ -3,10 +3,9 @@ use std::path::Path;
 use oxideterm_gpui_ui::select::SelectAnchorId;
 use oxideterm_i18n::I18n;
 use oxideterm_settings::{
-    AiThinkingStyle, AnimationSpeed, BackgroundFit, ConflictAction,
-    CursorStyle as SettingsCursorStyle, FontFamily, Language, PersistedSettings,
-    TerminalBackspaceSequence, TerminalDeleteSequence, TerminalEncoding, UiDensity, UpdateChannel,
-    UpdateProxyMode, UpdateProxyProtocol,
+    AnimationSpeed, BackgroundFit, ConflictAction, CursorStyle as SettingsCursorStyle, FontFamily,
+    Language, PersistedSettings, TerminalBackspaceSequence, TerminalDeleteSequence,
+    TerminalEncoding, UiDensity, UpdateChannel, UpdateProxyMode, UpdateProxyProtocol,
 };
 pub use oxideterm_settings_model::theme_display_name;
 use oxideterm_theme::BUILT_IN_THEMES;
@@ -309,22 +308,6 @@ pub fn sftp_transfer_count_label(i18n: &I18n, count: i64) -> String {
     i18n.t(key).replace("{{count}}", &count.to_string())
 }
 
-pub fn set_reconnect_enabled(settings: &mut PersistedSettings, value: bool) {
-    settings.reconnect.enabled = value;
-}
-
-pub fn set_reconnect_max_attempts(settings: &mut PersistedSettings, value: i64) {
-    settings.reconnect.max_attempts = value;
-}
-
-pub fn set_reconnect_base_delay(settings: &mut PersistedSettings, value: i64) {
-    settings.reconnect.base_delay_ms = value;
-}
-
-pub fn set_reconnect_max_delay(settings: &mut PersistedSettings, value: i64) {
-    settings.reconnect.max_delay_ms = value;
-}
-
 pub fn set_sftp_concurrent(settings: &mut PersistedSettings, value: i64) {
     settings.sftp.max_concurrent_transfers = value;
 }
@@ -353,14 +336,6 @@ pub fn set_command_bar_project_tasks(settings: &mut PersistedSettings, value: bo
     settings.terminal.command_bar.project_tasks = value;
 }
 
-pub fn set_command_bar_current_directory_awareness(settings: &mut PersistedSettings, value: bool) {
-    settings.terminal.command_bar.current_directory_awareness = value;
-}
-
-pub fn set_command_bar_show_current_directory(settings: &mut PersistedSettings, value: bool) {
-    settings.terminal.command_bar.show_current_directory = value;
-}
-
 pub fn set_quick_commands_enabled(settings: &mut PersistedSettings, value: bool) {
     settings.terminal.command_bar.quick_commands_enabled = value;
 }
@@ -378,10 +353,6 @@ pub fn set_quick_commands_confirm(settings: &mut PersistedSettings, value: bool)
 
 pub fn set_quick_commands_toast(settings: &mut PersistedSettings, value: bool) {
     settings.terminal.command_bar.quick_commands_show_toast = value;
-}
-
-pub fn set_terminal_trigger_shell_execution(settings: &mut PersistedSettings, value: bool) {
-    settings.terminal.triggers.explicit_shell_enabled = value;
 }
 
 pub fn set_diagnostics_debug_logging(settings: &mut PersistedSettings, value: bool) {

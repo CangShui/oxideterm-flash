@@ -23,10 +23,8 @@ pub fn settings_tab_from_ai_section(section: &str) -> Option<SettingsTab> {
         "general" => Some(SettingsTab::General),
         "terminal" => Some(SettingsTab::Terminal),
         "appearance" => Some(SettingsTab::Appearance),
-        "local" | "local_terminal" => Some(SettingsTab::Terminal),
         "connections" | "connection_manager" => Some(SettingsTab::Connections),
         "ssh" | "ssh_keys" => Some(SettingsTab::Connections),
-        "reconnect" => Some(SettingsTab::Connections),
         "sftp" => Some(SettingsTab::Sftp),
         "help" => Some(SettingsTab::Help),
         _ => None,
@@ -35,7 +33,6 @@ pub fn settings_tab_from_ai_section(section: &str) -> Option<SettingsTab> {
 
 pub fn terminal_settings_page_from_ai_section(section: &str) -> Option<TerminalSettingsPage> {
     match section {
-        "local" | "local_terminal" => Some(TerminalSettingsPage::Local),
         _ => None,
     }
 }
@@ -63,23 +60,12 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             Self::TerminalBackspaceSequence => SelectAnchorId::SettingsTerminalBackspaceSequence,
             Self::TerminalDeleteSequence => SelectAnchorId::SettingsTerminalDeleteSequence,
             Self::TerminalCursorStyle => SelectAnchorId::SettingsTerminalCursorStyle,
-            Self::TerminalTriggerMatchMode => SelectAnchorId::SettingsTerminalTriggerMatchMode,
-            Self::TerminalTriggerAction => SelectAnchorId::SettingsTerminalTriggerAction,
-            Self::TerminalTriggerProcessMode => SelectAnchorId::SettingsTerminalTriggerProcessMode,
-            Self::TerminalTriggerQuickCommand => {
-                SelectAnchorId::SettingsTerminalTriggerQuickCommand
-            }
-            Self::TerminalTriggerTiming => SelectAnchorId::SettingsTerminalTriggerTiming,
-            Self::TerminalTriggerScope => SelectAnchorId::SettingsTerminalTriggerScope,
             Self::CloudSyncMode => SelectAnchorId::SettingsCloudSyncMode,
             Self::LocalShell => SelectAnchorId::SettingsLocalShell,
             Self::LocalShellSemanticScheme(index) => {
                 SelectAnchorId::SettingsLocalShellSemanticScheme(index)
             }
             Self::ConnectionIdleTimeout => SelectAnchorId::SettingsConnectionIdleTimeout,
-            Self::ReconnectMaxAttempts => SelectAnchorId::SettingsReconnectMaxAttempts,
-            Self::ReconnectBaseDelay => SelectAnchorId::SettingsReconnectBaseDelay,
-            Self::ReconnectMaxDelay => SelectAnchorId::SettingsReconnectMaxDelay,
             Self::NetworkApplicationProxyMode => {
                 SelectAnchorId::SettingsNetworkApplicationProxyMode
             }
@@ -119,19 +105,7 @@ mod tests {
     #[test]
     fn ai_section_aliases_map_to_settings_tabs() {
         assert_eq!(
-            settings_tab_from_ai_section("local_terminal"),
-            Some(SettingsTab::Terminal)
-        );
-        assert_eq!(
-            terminal_settings_page_from_ai_section("local_terminal"),
-            Some(TerminalSettingsPage::Local)
-        );
-        assert_eq!(
             settings_tab_from_ai_section("ssh_keys"),
-            Some(SettingsTab::Connections)
-        );
-        assert_eq!(
-            settings_tab_from_ai_section("reconnect"),
             Some(SettingsTab::Connections)
         );
         assert_eq!(settings_tab_from_ai_section("missing"), None);
@@ -161,19 +135,8 @@ mod tests {
             SettingsSelect::TerminalBackspaceSequence,
             SettingsSelect::TerminalDeleteSequence,
             SettingsSelect::TerminalCursorStyle,
-            SettingsSelect::TerminalTriggerMatchMode,
-            SettingsSelect::TerminalTriggerAction,
-            SettingsSelect::TerminalTriggerProcessMode,
-            SettingsSelect::TerminalTriggerQuickCommand,
-            SettingsSelect::TerminalTriggerTiming,
-            SettingsSelect::TerminalTriggerScope,
             SettingsSelect::CloudSyncMode,
-            SettingsSelect::LocalShell,
-            SettingsSelect::LocalShellSemanticScheme(0),
             SettingsSelect::ConnectionIdleTimeout,
-            SettingsSelect::ReconnectMaxAttempts,
-            SettingsSelect::ReconnectBaseDelay,
-            SettingsSelect::ReconnectMaxDelay,
             SettingsSelect::NetworkApplicationProxyMode,
             SettingsSelect::NetworkProxyProtocol,
             SettingsSelect::NetworkProxyAuth,

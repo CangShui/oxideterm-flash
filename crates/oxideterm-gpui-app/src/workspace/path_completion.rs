@@ -40,6 +40,7 @@ pub(super) struct PathCompletionCandidate {
     pub(super) name: String,
     pub(super) path: String,
     pub(super) is_directory: bool,
+    pub(super) is_favorite: bool,
 }
 
 #[derive(Default)]
@@ -108,6 +109,28 @@ impl PathCompletionState {
         self.loading_parent = None;
         self.entries.clear();
         self.suggestions.clear();
+        self.selected_index = 0;
+        self.scroll_handle = ScrollHandle::new();
+    }
+
+    pub(super) fn show_favorites(
+        &mut self,
+        favorites: &[oxideterm_connections::RemotePathFavorite],
+    ) {
+        self.generation = self.generation.wrapping_add(1);
+        self.request = None;
+        self.loaded_parent = None;
+        self.loading_parent = None;
+        self.entries.clear();
+        self.suggestions = favorites
+            .iter()
+            .map(|favorite| PathCompletionCandidate {
+                name: favorite.path.clone(),
+                path: favorite.path.clone(),
+                is_directory: favorite.is_directory,
+                is_favorite: true,
+            })
+            .collect();
         self.selected_index = 0;
         self.scroll_handle = ScrollHandle::new();
     }
@@ -305,7 +328,11 @@ impl WorkspaceApp {
 
         for (index, candidate) in suggestions.into_iter().enumerate() {
             let label = if candidate.is_directory {
-                format!("{}/", candidate.name)
+                if candidate.is_favorite {
+                    candidate.name.clone()
+                } else {
+                    format!("{}/", candidate.name)
+                }
             } else {
                 candidate.name.clone()
             };
@@ -327,9 +354,17 @@ impl WorkspaceApp {
                     })
                     .child(Self::render_lucide_icon(
                         if candidate.is_directory {
-                            LucideIcon::Folder
+                            if candidate.is_favorite {
+                                LucideIcon::Star
+                            } else {
+                                LucideIcon::Folder
+                            }
                         } else {
-                            LucideIcon::File
+                            if candidate.is_favorite {
+                                LucideIcon::Star
+                            } else {
+                                LucideIcon::File
+                            }
                         },
                         13.0,
                         rgb(if candidate.is_directory {
@@ -437,6 +472,7 @@ mod tests {
             name: name.to_string(),
             path: format!("/root/{name}"),
             is_directory,
+            is_favorite: false,
         }
     }
 
@@ -528,5 +564,21 @@ mod tests {
         }
 
         assert_eq!(state.selected_index(), PATH_COMPLETION_VISIBLE_ROWS);
+    }
+
+    #[test]
+    fn remote_favorites_open_as_direct_path_candidates() {
+        let mut state = PathCompletionState::default();
+        state.show_favorites(&[
+            oxideterm_connections::RemotePathFavorite::new("/srv/apps", true).unwrap(),
+            oxideterm_connections::RemotePathFavorite::new("/var/log/app.log", false).unwrap(),
+        ]);
+
+        assert!(state.is_visible());
+        assert_eq!(state.suggestions()[0].path, "/srv/apps");
+        assert!(state.suggestions()[0].is_directory);
+        assert!(state.suggestions()[0].is_favorite);
+        assert_eq!(state.suggestions()[1].path, "/var/log/app.log");
+        assert!(!state.suggestions()[1].is_directory);
     }
 }

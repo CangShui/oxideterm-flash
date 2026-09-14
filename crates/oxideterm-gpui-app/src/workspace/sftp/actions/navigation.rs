@@ -1,6 +1,127 @@
 use super::*;
 
 impl WorkspaceApp {
+    pub(in crate::workspace::sftp) fn active_sftp_saved_connection_id(
+        &self,
+        cx: &App,
+    ) -> Option<String> {
+        let SftpRemoteId::Node(node_id) = self.visible_sftp_remote_id(cx)? else {
+            return None;
+        };
+        self.ssh_nodes
+            .get(&node_id)
+            .and_then(|node| node.saved_connection_id.clone())
+    }
+
+    pub(in crate::workspace::sftp) fn active_sftp_remote_path_favorites(
+        &self,
+        cx: &App,
+    ) -> Vec<oxideterm_connections::RemotePathFavorite> {
+        self.active_sftp_saved_connection_id(cx)
+            .and_then(|id| self.connection_store.get(&id))
+            .map(|connection| connection.options.remote_path_favorites.clone())
+            .unwrap_or_default()
+    }
+
+    pub(in crate::workspace::sftp) fn active_sftp_path_is_favorite(
+        &self,
+        path: &str,
+        cx: &App,
+    ) -> bool {
+        // Use the same normalization as persistence so menu state cannot drift
+        // when an SFTP server returns redundant separators.
+        let Ok(normalized) = oxideterm_connections::RemotePathFavorite::new(path, false) else {
+            return false;
+        };
+        self.active_sftp_remote_path_favorites(cx)
+            .iter()
+            .any(|favorite| favorite.path == normalized.path)
+    }
+
+    pub(in crate::workspace::sftp) fn toggle_active_sftp_path_favorite(
+        &mut self,
+        file: SftpFileEntry,
+        cx: &mut Context<Self>,
+    ) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        let Some(connection_id) = self.active_sftp_saved_connection_id(cx) else {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "sftp.favorite",
+                result = "blocked",
+                reason = "the active SSH node is not backed by a saved connection",
+                business_impact = "the remote path favorite was not persisted",
+                "remote path favorite request was rejected"
+            );
+            return;
+        };
+        let is_directory = file.file_type == SftpFileType::Directory;
+        let path = if file.path.is_empty() {
+            join_sftp_path(&self.sftp_view.read(cx).remote_path, &file.name)
+        } else {
+            file.path
+        };
+        let previous_count = self
+            .connection_store
+            .get(&connection_id)
+            .map(|connection| connection.options.remote_path_favorites.len())
+            .unwrap_or(0);
+        match self
+            .connection_store
+            .toggle_remote_path_favorite(&connection_id, &path, is_directory)
+        {
+            Ok(Some(enabled)) => {
+                let next_count = self
+                    .connection_store
+                    .get(&connection_id)
+                    .map(|connection| connection.options.remote_path_favorites.len())
+                    .unwrap_or(previous_count);
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "sftp.favorite",
+                    result = "persisted",
+                    enabled,
+                    path_character_count = path.chars().count(),
+                    is_directory,
+                    favorite_count_before = previous_count,
+                    favorite_count_after = next_count,
+                    business_impact = "the saved SSH profile favorite list changed",
+                    "remote path favorite was persisted"
+                );
+                self.cloud_sync_broadcast_snapshot(cx);
+                self.push_sftp_toast(
+                    self.i18n.t(if enabled {
+                        "sftp.toast.favorite_added"
+                    } else {
+                        "sftp.toast.favorite_removed"
+                    }),
+                    None,
+                    TerminalNoticeVariant::Success,
+                    cx,
+                );
+            }
+            Ok(None) | Err(_) => {
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "sftp.favorite",
+                    result = "failed",
+                    path_character_count = path.chars().count(),
+                    business_impact = "the saved SSH profile favorite list did not change",
+                    "remote path favorite could not be persisted"
+                );
+                self.push_sftp_toast(
+                    self.i18n.t("sftp.toast.favorite_failed"),
+                    None,
+                    TerminalNoticeVariant::Error,
+                    cx,
+                );
+            }
+        }
+    }
+
     pub(in crate::workspace) fn handle_sftp_key(
         &mut self,
         event: &KeyDownEvent,
@@ -323,8 +444,14 @@ impl WorkspaceApp {
         pane: SftpPane,
         cx: &mut Context<Self>,
     ) {
+        let favorites = (pane == SftpPane::Remote)
+            .then(|| self.active_sftp_remote_path_favorites(cx))
+            .unwrap_or_default();
         self.sftp_view.update(cx, |sftp, cx| {
             sftp.start_path_edit(pane);
+            if pane == SftpPane::Remote {
+                sftp.remote_path_completion.show_favorites(&favorites);
+            }
             cx.notify();
         });
     }
@@ -481,7 +608,7 @@ impl WorkspaceApp {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some((candidate, parent_path)) = ({
+        let Some((candidate, completion_parent_path)) = ({
             let sftp = self.sftp_view.read(cx);
             let state = match pane {
                 SftpPane::Local => &sftp.local_path_completion,
@@ -506,6 +633,11 @@ impl WorkspaceApp {
             self.set_sftp_path(pane, candidate.path, cx);
             return;
         }
+        let parent_path = if candidate.is_favorite && pane == SftpPane::Remote {
+            parent_path(&candidate.path, true)
+        } else {
+            completion_parent_path
+        };
         self.set_sftp_path(pane, parent_path.clone(), cx);
         match pane {
             SftpPane::Local => {
@@ -1182,5 +1314,6 @@ fn sftp_path_completion_candidate(entry: SftpFileEntry) -> PathCompletionCandida
         name: entry.name,
         path: entry.path,
         is_directory: entry.file_type == SftpFileType::Directory,
+        is_favorite: false,
     }
 }

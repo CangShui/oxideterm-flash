@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(dead_code)]
 pub(in crate::workspace) fn semantic_scheme_label_for_id(
     settings: &PersistedSettings,
     scheme_id: &str,
@@ -20,6 +21,7 @@ pub(in crate::workspace) fn semantic_scheme_label_for_id(
     }
 }
 
+#[allow(dead_code)]
 pub(in crate::workspace) fn application_semantic_scheme_label(
     settings: &PersistedSettings,
     i18n: &I18n,
@@ -30,4 +32,3 @@ pub(in crate::workspace) fn application_semantic_scheme_label(
         .map(|scheme| scheme.name.clone())
         .unwrap_or_else(|| terminal_semantic_scheme_label(settings.terminal.semantic_scheme, i18n))
 }
-

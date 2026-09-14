@@ -36,7 +36,8 @@ use oxideterm_sftp::{
     SortOrder as RemoteSortOrder, StoredTransferProgress, TarCapabilities,
     TransferDirection as SftpTransferDirection, TransferProgress,
     TransferProtocol as RemoteTransferProtocol, TransferStrategy as RemoteTransferStrategy,
-    TransferType as RemoteTransferType, encode_to_encoding, scp_download_directory,
+    TransferType as RemoteTransferType, encode_to_encoding, error_is_sftp_protocol_unavailable,
+    list_remote_directory_via_shell, plan_remote_copy_command, scp_download_directory,
     scp_download_file, scp_upload_directory, scp_upload_file, tar_download_directory,
     tar_upload_directory,
 };
@@ -81,7 +82,7 @@ const SFTP_SIDEBAR_TRANSFER_MAX_ROWS: usize = 3;
 const SFTP_INCOMPLETE_TRANSFER_LIST_INITIAL_ITEM_COUNT: usize = 0;
 const SFTP_INCOMPLETE_TRANSFER_LIST_ESTIMATED_HEIGHT: f32 = 52.0;
 const SFTP_INCOMPLETE_TRANSFER_LIST_OVERSCAN: usize = 4;
-const SFTP_TEXT_XS: f32 = 12.0; // Tauri text-xs
+pub(in crate::workspace) const SFTP_TEXT_XS: f32 = 12.0; // Tauri text-xs
 const SFTP_TEXT_SM: f32 = 14.0; // Tauri text-sm
 const SFTP_TEXT_10: f32 = 10.0; // Tauri text-[10px]
 const SFTP_ICON_SM: f32 = 12.0; // Tauri h-3 w-3
@@ -128,7 +129,7 @@ const SFTP_ORANGE: u32 = ui_palette::ORANGE_400;
 const SFTP_RED: u32 = ui_palette::RED_400;
 const SFTP_DESTRUCTIVE_TEXT: u32 = 0xffffff;
 const SFTP_CONTEXT_MENU_WIDTH: f32 = 180.0; // Tauri min-w-[180px]
-const SFTP_CONTEXT_MENU_MAX_HEIGHT: f32 = 288.0; // 8 items + separators, clamped like fixed portal menu
+const SFTP_CONTEXT_MENU_MAX_HEIGHT: f32 = 408.0; // File operations add copy/cut/paste while retaining viewport clamping.
 const SFTP_CONTEXT_MENU_PADDING: f32 = 4.0; // Tauri py-1
 const SFTP_CONTEXT_MENU_ITEM_HEIGHT: f32 = 30.0; // Tauri px-3 py-1.5 text-xs
 const SFTP_BUTTON_TRANSPARENT_ALPHA: u32 = 0x00; // Tauri Button border-transparent/bg-transparent
@@ -233,8 +234,10 @@ pub(super) struct SftpFileEntry {
     file_type: SftpFileType,
     size: u64,
     modified: Option<i64>,
+    #[allow(dead_code)]
     permissions: Option<String>,
     owner: Option<String>,
+    #[allow(dead_code)]
     group: Option<String>,
     is_symlink: bool,
     symlink_target: Option<String>,
@@ -337,6 +340,30 @@ pub(super) enum SftpRemoteBackend {
 }
 
 impl SftpRemoteBackend {
+    fn external_edit_connection_id(&self) -> Option<String> {
+        match self {
+            Self::Node { router, node_id } => router.connection_id_for_node(node_id),
+            Self::Standalone { handle } => Some(handle.connection_id().to_string()),
+        }
+    }
+
+    fn external_edit_owner_exists(&self) -> bool {
+        match self {
+            Self::Node { router, node_id } => router.contains_node(node_id),
+            Self::Standalone { handle } => !matches!(
+                handle.state(),
+                oxideterm_ssh::ConnectionState::Disconnecting
+                    | oxideterm_ssh::ConnectionState::Disconnected
+            ),
+        }
+    }
+
+    pub(in crate::workspace::sftp) async fn connection_handle(
+        &self,
+    ) -> Result<SshConnectionHandle, String> {
+        self.resolve_connection().await
+    }
+
     async fn resolve_connection(&self) -> Result<SshConnectionHandle, String> {
         match self {
             Self::Node { router, node_id } => router
@@ -388,6 +415,7 @@ pub(super) enum SftpWorkerResult {
         remote_id: SftpRemoteId,
     },
     RemoteList {
+        trace_id: u64,
         surface_id: SftpSurfaceId,
         remote_id: SftpRemoteId,
         view_generation: u64,
@@ -432,6 +460,12 @@ pub(super) enum SftpWorkerResult {
         refresh_remote: bool,
         refresh_local: bool,
     },
+    RemoteMutationProgress {
+        key: String,
+        title: String,
+        completed: u64,
+        total: u64,
+    },
     ResumeIncompleteTransferLoaded {
         remote_id: SftpRemoteId,
         transfer_id: String,
@@ -442,6 +476,7 @@ pub(super) enum SftpWorkerResult {
         refresh_remote: bool,
         refresh_local: bool,
         toast: Option<SftpMutationToast>,
+        progress_key: Option<String>,
     },
     IncompleteTransfersLoaded {
         remote_id: SftpRemoteId,
@@ -455,6 +490,7 @@ pub(super) enum SftpWorkerResult {
         remote_id: SftpRemoteId,
         result: Result<Vec<BackgroundTransferSnapshot>, String>,
     },
+    #[allow(dead_code)]
     PreviewLoaded {
         generation: u64,
         path: String,
@@ -467,6 +503,9 @@ pub(super) enum SftpWorkerResult {
         result: Result<PreviewContent, String>,
     },
     PreviewSaved {
+        progress_key: String,
+        success_title: String,
+        error_title: String,
         generation: u64,
         path: String,
         content: Arc<str>,
@@ -515,6 +554,14 @@ pub(in crate::workspace::sftp) enum SftpWorkspaceEffect {
         title: String,
         description: Option<String>,
         variant: TerminalNoticeVariant,
+    },
+    PluginProgress {
+        key: String,
+        notice: TerminalNotice,
+        ttl: Duration,
+    },
+    DismissPluginProgress {
+        key: String,
     },
     ReloadLocalDirectory {
         view_generation: u64,
@@ -574,6 +621,7 @@ pub(super) enum SftpWorkspaceEvent {
         delivery: delivery::ActiveDeliverySender<SftpWorkerResult>,
     },
     PreviewSaveRequested {
+        progress_key: String,
         path: String,
         content: Arc<str>,
         encoding: Arc<str>,
@@ -603,6 +651,28 @@ struct SftpContextMenu {
     file: Option<SftpFileEntry>,
     x: f32,
     y: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SftpRemoteClipboardOperation {
+    Copy,
+    Cut,
+}
+
+impl SftpRemoteClipboardOperation {
+    fn audit_name(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Cut => "cut",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SftpRemoteClipboard {
+    remote_id: SftpRemoteId,
+    operation: SftpRemoteClipboardOperation,
+    files: Vec<SftpFileEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -873,6 +943,13 @@ mod directory_progress_tests {
 #[derive(Clone, Debug)]
 pub(super) enum SftpDialog {
     Drives,
+    Archive {
+        remote_id: SftpRemoteId,
+        directory: String,
+        names: Vec<String>,
+        extract: bool,
+        trace_id: String,
+    },
     Rename {
         pane: SftpPane,
         old_name: String,
@@ -1029,6 +1106,11 @@ pub(super) struct SftpWorkspaceEntity {
     context_menu: Option<SftpContextMenu>,
     context_menu_presence: oxideterm_gpui_ui::motion::ExitPresence,
     context_menu_exit_generation: Option<u64>,
+    remote_clipboard: Option<SftpRemoteClipboard>,
+    archive_task: Option<Task<()>>,
+    // The SFTP workspace owns external-editor watchers. Dropping the workspace
+    // cancels them and lets each cache guard apply its synchronized/pending policy.
+    external_edit_tasks: Vec<Task<()>>,
     folder_picker_task: Option<Task<()>>,
     drag_state: Option<SftpDragState>,
     drag_over_pane: Option<SftpPane>,
@@ -1175,6 +1257,9 @@ impl Default for SftpWorkspaceEntity {
             context_menu: None,
             context_menu_presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
             context_menu_exit_generation: None,
+            remote_clipboard: None,
+            archive_task: None,
+            external_edit_tasks: Vec::new(),
             folder_picker_task: None,
             drag_state: None,
             drag_over_pane: None,
@@ -1460,10 +1545,12 @@ impl SftpWorkspaceEntity {
         self.dialog = Some(dialog);
     }
 
+    #[allow(dead_code)]
     pub(super) fn current_remote_path(&self) -> &str {
         &self.remote_path
     }
 
+    #[allow(dead_code)]
     pub(super) fn selected_remote_files(&self) -> Vec<String> {
         let mut files = self.remote_selected.iter().cloned().collect::<Vec<_>>();
         files.sort();
@@ -1525,6 +1612,7 @@ mod entity_delivery_tests {
                 success_description: None,
                 error_title: "unused".to_string(),
             }),
+            progress_key: None,
         }
     }
 
@@ -1649,10 +1737,8 @@ mod entity_delivery_tests {
             // A live current-generation request registers both the view flag
             // and its in-flight key; the stale response must not clobber it.
             sftp.remote_load_inflight = true;
-            sftp.remote_load_inflight_keys.insert((
-                SftpRemoteId::Node(NodeId::new("current-node")),
-                2,
-            ));
+            sftp.remote_load_inflight_keys
+                .insert((SftpRemoteId::Node(NodeId::new("current-node")), 2));
         });
         let effect_events = Arc::new(AtomicUsize::new(0));
         let observed_events = effect_events.clone();
@@ -1667,6 +1753,7 @@ mod entity_delivery_tests {
 
         sender
             .send(SftpWorkerResult::RemoteList {
+                trace_id: 1,
                 surface_id: SftpSurfaceId::Tab(TabId(1)),
                 remote_id: SftpRemoteId::Node(NodeId::new("current-node")),
                 view_generation: 1,
@@ -1714,6 +1801,7 @@ mod entity_delivery_tests {
 
         sender
             .send(SftpWorkerResult::RemoteList {
+                trace_id: 2,
                 surface_id: SftpSurfaceId::Tab(TabId(1)),
                 remote_id: SftpRemoteId::Node(NodeId::new("current-node")),
                 view_generation: 1,
@@ -1754,6 +1842,7 @@ mod entity_delivery_tests {
 
         sender
             .send(SftpWorkerResult::RemoteList {
+                trace_id: 3,
                 surface_id: SftpSurfaceId::Tab(TabId(1)),
                 remote_id: SftpRemoteId::Node(NodeId::new("current-node")),
                 view_generation: 1,
@@ -1831,12 +1920,12 @@ use helpers::{
     is_sftp_incomplete_store_compat_error, join_local_path, join_sftp_path, list_local_files,
     load_remote_sftp_completion_listing, load_remote_sftp_listing, load_remote_sftp_preview,
     load_remote_sftp_preview_hex, local_drives, new_sftp_transfer_id,
-    normalize_external_dropped_path, normalize_remote_path, parent_directory_entry,
-    parent_path, preview_content_text,
-    refreshed_local_files, remote_directory_prefixes, save_remote_sftp_preview, sftp_bg,
-    sftp_border, sftp_card_surface, sftp_conflict_resolution_from_settings, sftp_diff_visual_lines,
-    sftp_editor_language, sftp_editor_language_id, sftp_file_name, sftp_hover_bg, sftp_panel_bg,
-    sftp_path_segments, sftp_preview_editor_is_network_error, sftp_preview_is_markdown,
+    normalize_external_dropped_path, normalize_remote_path, parent_directory_entry, parent_path,
+    preview_content_text, refreshed_local_files, remote_directory_prefixes,
+    save_remote_sftp_preview, sftp_bg, sftp_border, sftp_card_surface,
+    sftp_conflict_resolution_from_settings, sftp_diff_visual_lines, sftp_editor_language,
+    sftp_editor_language_id, sftp_file_name, sftp_hover_bg, sftp_panel_bg, sftp_path_segments,
+    sftp_preview_editor_is_network_error, sftp_preview_is_markdown,
     sftp_source_not_newer_than_target, sftp_transfer_conflicts,
     sftp_transfer_state_from_background, sorted_sftp_files, unique_sftp_conflict_name,
 };

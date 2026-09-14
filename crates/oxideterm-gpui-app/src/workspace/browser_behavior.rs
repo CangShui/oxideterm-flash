@@ -44,6 +44,7 @@ pub(crate) fn browser_select_next_index(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn toggle_browser_highlighted_select_from_pointer<T>(
     open_select: &mut Option<T>,
     focused_select: &mut Option<T>,
@@ -70,6 +71,7 @@ where
     true
 }
 
+#[allow(dead_code)]
 pub(crate) fn clear_browser_highlighted_select_focus<T>(
     open_select: &mut Option<T>,
     focused_select: &mut Option<T>,
@@ -176,6 +178,7 @@ pub(crate) enum ModalFooterKeyAction<T> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum ModalFooterInputKeyAction<T> {
     Cancel,
     FocusInput,
@@ -184,6 +187,7 @@ pub(crate) enum ModalFooterInputKeyAction<T> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum InlineFooterInputKeyAction<T> {
     ClearFocus,
     FocusInput,
@@ -238,6 +242,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn modal_footer_input_key_action<T>(
     key: &str,
     shift: bool,
@@ -296,6 +301,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn inline_footer_input_key_action<T>(
     key: &str,
     shift: bool,

@@ -214,6 +214,7 @@ impl ForwardingWorkspaceEntity {
         self.tab_nodes.get(&tab_id).cloned()
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn tab_for_node(&self, node_id: &NodeId) -> Option<TabId> {
         self.tab_nodes
             .iter()

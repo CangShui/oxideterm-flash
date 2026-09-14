@@ -49,6 +49,7 @@ fn forward_rule_row_signature(rule: &ForwardRule) -> u64 {
 }
 
 impl WorkspaceApp {
+    #[allow(dead_code)]
     pub(in crate::workspace) fn open_forwards_tab(
         &mut self,
         node_id: NodeId,

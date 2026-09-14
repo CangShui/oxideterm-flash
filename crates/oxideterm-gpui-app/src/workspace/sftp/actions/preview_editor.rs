@@ -34,6 +34,8 @@ impl WorkspaceApp {
                 SftpPane::Remote => self.sftp_view.read(cx).remote_path.clone(),
             };
             self.set_sftp_path(pane, join_sftp_path(&base, &file.name), cx);
+        } else if pane == SftpPane::Remote && oxideterm_sftp::archive_kind(&file.name).is_some() {
+            self.open_remote_archive_dialog(true, Some(file.name.clone()), cx);
         } else if pane == SftpPane::Remote {
             // Editing goes through the configured external editor (MobaXterm
             // style): download to a temp copy, open it, watch for saves and
@@ -407,6 +409,7 @@ impl WorkspaceApp {
         }
     }
 
+    #[allow(dead_code)]
     fn spawn_remote_sftp_preview(&self, path: String, generation: u64, cx: &App) {
         let Some(remote_id) = self.visible_sftp_remote_id(cx) else {
             return;
@@ -478,6 +481,7 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn spawn_remote_sftp_preview_save(
         &self,
+        progress_key: String,
         path: String,
         content: Arc<str>,
         encoding: Arc<str>,
@@ -493,8 +497,21 @@ impl WorkspaceApp {
             return false;
         };
         let network_error_message = self.i18n.t("sftp.preview.network_error");
+        let success_title = self.i18n.t("sftp.toast.edit_complete");
+        let error_title = self.i18n.t("sftp.toast.edit_failed");
+        let progress_title = self.i18n.t("sftp.toast.editing");
+        let total = content.len().max(1) as u64;
         let runtime = self.forwarding_runtime.clone();
         runtime.spawn(async move {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id = %progress_key,
+                stage = "sftp.edit.upload",
+                total_bytes = total,
+                result = "started",
+                business_impact = "the edited remote file is being uploaded",
+                "远程文件编辑保存已进入后端写入执行"
+            );
             let result = save_remote_sftp_preview(
                 backend,
                 &path,
@@ -503,7 +520,31 @@ impl WorkspaceApp {
                 line_ending,
             )
             .await;
+            if result.is_ok() {
+                let _ = tx.send(SftpWorkerResult::RemoteMutationProgress {
+                    key: progress_key.clone(),
+                    title: progress_title,
+                    completed: total,
+                    total,
+                });
+            }
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id = %progress_key,
+                stage = "sftp.edit.response",
+                result = if result.is_ok() { "completed" } else { "failed" },
+                failure_detail_redacted = result.is_err(),
+                business_impact = if result.is_ok() {
+                    "the edited content was saved to the remote file"
+                } else {
+                    "the remote file kept its previous saved content"
+                },
+                "远程文件编辑保存已返回最终结果"
+            );
             let _ = tx.send(SftpWorkerResult::PreviewSaved {
+                progress_key,
+                success_title,
+                error_title,
                 generation,
                 path,
                 content,
@@ -553,7 +594,9 @@ impl SftpWorkspaceEntity {
         self.preview_editor_save_error = None;
         self.preview_editor_network_error = false;
         self.preview_generation = self.preview_generation.wrapping_add(1);
+        let progress_key = format!("sftp-edit-{}", uuid::Uuid::new_v4());
         cx.emit(SftpWorkspaceEvent::PreviewSaveRequested {
+            progress_key,
             path,
             content: Arc::<str>::from(content),
             encoding: Arc::<str>::from(self.preview_editor_encoding.as_str()),

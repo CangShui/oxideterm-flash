@@ -1,6 +1,5 @@
 use super::*;
 
-use oxideterm_topology::TopologyViewStatus;
 
 use crate::workspace::selectable_text::{SelectableTextRenderState, selectable_document_group_id};
 
@@ -48,6 +47,7 @@ pub(super) fn host_tools_tooltip_icon_button(
     .into_any_element()
 }
 
+#[allow(dead_code)]
 pub(super) fn monitor_center_state(
     app: &WorkspaceApp,
     icon: LucideIcon,

@@ -6,7 +6,7 @@
 //!
 //! Gated behind OXIDETERM_RDP_LIVE_TARGET so `cargo test` never dials out.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -120,7 +120,7 @@ fn live_rdp_session_renders_a_readable_desktop() {
     let mut canvas: Option<Canvas> = None;
     let mut frames = 0usize;
     let mut updates = 0usize;
-    let mut last_frame_at: Option<Instant> = None;
+    let mut _last_frame_at: Option<Instant> = None;
 
     loop {
         // Frames stream as length-prefixed binary records; read_event_line
@@ -174,7 +174,7 @@ fn live_rdp_session_renders_a_readable_desktop() {
             }
             RemoteDesktopHelperEvent::Frame { frame } => {
                 frames += 1;
-                last_frame_at = Some(Instant::now());
+                _last_frame_at = Some(Instant::now());
                 let update = RemoteDesktopFrameUpdate::new(
                     frame.size,
                     RemoteDesktopRect::new(0, 0, frame.size.width, frame.size.height),
@@ -187,13 +187,13 @@ fn live_rdp_session_renders_a_readable_desktop() {
             }
             RemoteDesktopHelperEvent::FrameUpdate { update } => {
                 updates += 1;
-                last_frame_at = Some(Instant::now());
+                _last_frame_at = Some(Instant::now());
                 canvas.as_mut().expect("canvas before update").apply(&update);
             }
             RemoteDesktopHelperEvent::FrameUpdateBatch { batch } => {
                 for update in batch.updates {
                     updates += 1;
-                    last_frame_at = Some(Instant::now());
+                    _last_frame_at = Some(Instant::now());
                     canvas.as_mut().expect("canvas before update").apply(&update);
                 }
             }

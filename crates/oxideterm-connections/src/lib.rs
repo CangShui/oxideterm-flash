@@ -53,6 +53,7 @@ pub use store::{
     LocalSyncMetadata, ManagedSshKeyInfo, ManagedSshKeyOrigin,
     ManagedSshKeyUsage, PreparedSavedConnectionsSync, ProxyHopInfo,
     RemoteDesktopProfile, RemoteDesktopProfilesSyncSnapshot, SaveConnectionRequest,
+    RemotePathFavorite,
     SaveRemoteDesktopProfileRequest,
     SaveSerialProfileRequest, SaveStandaloneSftpProfileRequest, SaveTelnetProfileRequest,
     SavedAuth, SavedConnection, SavedConnectionRuntimeSecrets, SavedConnectionSyncRecord,

@@ -38,7 +38,7 @@ const TERMINAL_CONTEXT_MENU_WIDTH: f32 = 220.0;
 const TERMINAL_CONTEXT_MENU_ACTION_COUNT: f32 = 13.0;
 const TERMINAL_CONTEXT_MENU_SEPARATOR_COUNT: f32 = 4.0;
 const TERMINAL_MODEM_SUBMENU_ACTION_COUNT: f32 = 6.0;
-const TERMINAL_CONTEXT_MENU_ACTIONS_BEFORE_MODEM: f32 = 9.0;
+const TERMINAL_CONTEXT_MENU_ACTIONS_BEFORE_MODEM: f32 = 8.0;
 const TERMINAL_CONTEXT_MENU_SEPARATORS_BEFORE_MODEM: f32 = 2.0;
 const TERMINAL_CONTEXT_MENU_MARGIN: f32 = 8.0;
 const SERIAL_CONTROL_BAR_HEIGHT: f32 = 34.0;
@@ -964,11 +964,6 @@ impl TerminalPane {
             .replace_command_with_selection
             .clone();
         let find_label = self.preferences.command_selection_labels.find.clone();
-        let manage_triggers_label = self
-            .preferences
-            .command_selection_labels
-            .manage_triggers
-            .clone();
         let select_command_label = self
             .preferences
             .command_selection_labels
@@ -1106,18 +1101,6 @@ impl TerminalPane {
                     false,
                     |this, _event, _window, cx| {
                         this.request_context_action(TerminalContextAction::OpenSearch, false, cx);
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    manage_triggers_label,
-                    false,
-                    |this, _event, _window, cx| {
-                        this.request_context_action(
-                            TerminalContextAction::OpenSessionTriggers,
-                            false,
-                            cx,
-                        );
                     },
                     cx,
                 ))

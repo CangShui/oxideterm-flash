@@ -247,7 +247,13 @@ impl WorkspaceApp {
                 .bg(rgb(theme.bg_panel))
                 .text_size(px(10.0))
                 .text_color(rgb(theme.text_muted))
-                .child(div().flex_1().min_w(px(0.0)).truncate().child(self.i18n.t("sftp.columns.name")))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .child(self.i18n.t("sftp.columns.name")),
+                )
                 .child(
                     div()
                         .w(px(SFTP_SIZE_COL))
@@ -386,7 +392,13 @@ impl WorkspaceApp {
                         let owner_text = file
                             .owner
                             .as_deref()
-                            .map(|owner| if owner == "0" { "root".to_string() } else { owner.to_string() })
+                            .map(|owner| {
+                                if owner == "0" {
+                                    "root".to_string()
+                                } else {
+                                    owner.to_string()
+                                }
+                            })
                             .unwrap_or_else(|| "-".to_string());
                         let size_text = if file.file_type == SftpFileType::Directory {
                             "-".to_string()

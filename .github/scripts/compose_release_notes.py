@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 CHANGELOG_MARKER = "<!-- RELEASE_CHANGELOG -->"
 DOWNLOADS_MARKER = "<!-- RELEASE_DOWNLOADS -->"
-REPOSITORY_RELEASE_URL = "https://github.com/AnalyseDeCircuit/oxideterm/releases/download"
+REPOSITORY_RELEASE_URL = "https://github.com/CangShui/oxideterm-flash/releases/download"
 
 
 def normalize_leading_summary(section: str) -> str:
@@ -47,18 +47,13 @@ def release_asset_url(tag: str, filename: str) -> str:
 
 
 def stable_download_table(version: str, tag: str) -> str:
-    """Render the recommended installer matrix without listing portable variants."""
+    """Render this fork's Windows-only download table from its real release assets."""
     filenames = {
-        "windows_x64": f"OxideTerm_{version}_windows_x64-setup.exe",
-        "windows_arm64": f"OxideTerm_{version}_windows_arm64-setup.exe",
-        "macos_x64": f"OxideTerm_{version}_macos_x64.dmg",
-        "macos_arm64": f"OxideTerm_{version}_macos_arm64.dmg",
-        "linux_x64_appimage": f"OxideTerm_{version}_linux_x64.AppImage",
-        "linux_x64_deb": f"OxideTerm_{version}_linux_x64.deb",
-        "linux_x64_rpm": f"OxideTerm_{version}_linux_x64.rpm",
-        "linux_arm64_appimage": f"OxideTerm_{version}_linux_arm64.AppImage",
-        "linux_arm64_deb": f"OxideTerm_{version}_linux_arm64.deb",
-        "linux_arm64_rpm": f"OxideTerm_{version}_linux_arm64.rpm",
+        "app": "oxideterm-native.exe",
+        "cli": "oxideterm.exe",
+        "rdp": "oxideterm-rdp-helper.exe",
+        "vnc": "oxideterm-vnc-helper.exe",
+        "sums": "SHA256SUMS.txt",
     }
 
     def link(label: str, key: str) -> str:
@@ -66,15 +61,17 @@ def stable_download_table(version: str, tag: str) -> str:
 
     return "\n".join(
         [
-            "## 📥 Download for your system",
+            "## \U0001f4e5 Download (Windows x64)",
             "",
-            "| Operating system | x64 | ARM64 |",
-            "|---|---|---|",
-            f"| **Windows** | {link('Setup (.exe)', 'windows_x64')} | {link('Setup (.exe)', 'windows_arm64')} |",
-            f"| **macOS** | {link('DMG (Intel)', 'macos_x64')} | {link('DMG (Apple Silicon)', 'macos_arm64')} |",
-            f"| **Linux** | {link('AppImage', 'linux_x64_appimage')} · {link('DEB', 'linux_x64_deb')} · {link('RPM', 'linux_x64_rpm')} | {link('AppImage', 'linux_arm64_appimage')} · {link('DEB', 'linux_arm64_deb')} · {link('RPM', 'linux_arm64_rpm')} |",
+            "| Artifact | Link |",
+            "|---|---|",
+            f"| **OxideTerm** (GUI) | {link('oxideterm-native.exe', 'app')} |",
+            f"| **OxideTerm CLI** | {link('oxideterm.exe', 'cli')} |",
+            f"| **RDP helper** | {link('oxideterm-rdp-helper.exe', 'rdp')} |",
+            f"| **VNC helper** | {link('oxideterm-vnc-helper.exe', 'vnc')} |",
+            f"| **SHA256 checksums** | {link('SHA256SUMS.txt', 'sums')} |",
             "",
-            "Portable archives, signatures, and `sha256sums.txt` remain available in the release assets below.",
+            "This community fork currently ships Windows x64 builds only.",
         ]
     )
 

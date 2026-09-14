@@ -86,7 +86,7 @@ fn ensure_versioned_snapshot(
             data_dir.display()
         ));
     }
-    let mut ignored_runtime_paths =
+    let ignored_runtime_paths =
         crate::single_instance::single_instance_runtime_paths_for_data_dir(data_dir).to_vec();
     if !directory_contains_migration_source_data(data_dir, &ignored_runtime_paths)? {
         write_completion_marker(&paths.marker)?;

@@ -1627,6 +1627,7 @@ impl WorkspaceApp {
         window: &mut Window,
     ) -> gpui::ShapedLine {
         let font = font(self.ime_target_font_family(target));
+        let font_size = self.ime_target_font_size(target);
         let shared = SharedString::from(text.to_string());
         let run = TextRun {
             len: shared.len(),
@@ -1636,9 +1637,18 @@ impl WorkspaceApp {
             underline: None,
             strikethrough: None,
         };
-        window
-            .text_system()
-            .shape_line(shared, px(self.tokens.metrics.ui_text_sm), &[run], None)
+        window.text_system().shape_line(shared, font_size, &[run], None)
+    }
+
+    fn ime_target_font_size(&self, target: WorkspaceImeTarget) -> Pixels {
+        match target {
+            // SFTP inline text is painted at the smaller file-browser size.
+            // Shaping must use the same metric, otherwise a click that maps to
+            // a UTF-16 index at 14px lands on a different glyph than the one
+            // the caret is drawn next to at 12px.
+            WorkspaceImeTarget::Sftp(_) => px(super::sftp::SFTP_TEXT_XS),
+            _ => px(self.tokens.metrics.ui_text_sm),
+        }
     }
 
     fn ime_target_font_family(&self, target: WorkspaceImeTarget) -> SharedString {
@@ -2944,6 +2954,7 @@ fn ime_target_is_secret(target: WorkspaceImeTarget) -> bool {
     ) || matches!(target, WorkspaceImeTarget::Settings(input) if input.is_secret())
         || matches!(target, WorkspaceImeTarget::SessionManager(input) if input.is_secret())
 }
+
 
 fn ime_target_should_blink_caret(target: WorkspaceImeTarget) -> bool {
     !ime_target_is_read_only(target)

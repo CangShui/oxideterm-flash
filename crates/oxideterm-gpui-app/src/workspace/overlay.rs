@@ -20,15 +20,18 @@ const TERMINAL_FONT_SIZE_HUD_BACKGROUND_ALPHA: u32 = 0xe6;
 
 /// Typed cross-system updates accepted by the window overlay owner.
 pub(in crate::workspace) enum WorkspaceOverlayIntent {
+    #[allow(dead_code)]
     Notice {
         notice: TerminalNotice,
         ttl: Duration,
     },
+    #[allow(dead_code)]
     PluginProgress {
         key: String,
         notice: TerminalNotice,
         ttl: Duration,
     },
+    #[allow(dead_code)]
     DismissPluginProgress {
         key: String,
     },
@@ -58,6 +61,7 @@ pub(in crate::workspace) enum WorkspaceOverlayConfirmKind {
     SettingsReset,
     LegalNotice,
     NativeUpdateReleaseNotes,
+    #[allow(dead_code)]
     NodeDisconnect {
         node_id: NodeId,
         display_name: Arc<str>,

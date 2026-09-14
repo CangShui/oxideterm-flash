@@ -149,8 +149,6 @@
     "features_host_tools_description": "监控资源，并处理进程、服务、日志、端口、软件包、容器、计划任务和 tmux。",
     "features_sftp_title": "重构 SFTP 链路",
     "features_sftp_description": "节点级所有权、并行队列、归档传输、短读恢复、更准确的进度统计和可续传阶段共同改善文件操作。",
-    "features_reconnect_title": "宽限期重连",
-    "features_reconnect_description": "短暂断网时会先尝试恢复原 SSH 运行时，再决定是否替换连接。",
     "features_editor_title": "原生文件与远程编辑",
     "features_editor_description": "本地文件管理、预览、项目树、安全写入、冲突处理、语法与工作区恢复已完成整合。",
     "internal_eyebrow": "第 6 页 · 基础能力",

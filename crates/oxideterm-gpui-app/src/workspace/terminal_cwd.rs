@@ -19,6 +19,7 @@ use oxideterm_environment::{
 };
 use oxideterm_sftp::{FileType as RemotePathFileType, ListFilter, SortOrder};
 use oxideterm_ssh::NodeId;
+use oxideterm_terminal::TerminalSessionKind;
 
 use super::*;
 
@@ -282,20 +283,21 @@ impl WorkspaceTerminalEntity {
         &mut self,
         generation: u64,
         pane: gpui::WeakEntity<TerminalPane>,
+        trace_id: u64,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |terminal, cx| {
             for _ in 0..TERMINAL_CWD_REPORT_POLL_ATTEMPTS {
                 gpui::Timer::after(TERMINAL_CWD_REPORT_POLL_INTERVAL).await;
                 match terminal.update(cx, |terminal, cx| {
-                    terminal.apply_cwd_report_if_ready(generation, &pane, cx)
+                    terminal.apply_cwd_report_if_ready(generation, &pane, trace_id, cx)
                 }) {
                     Ok(true) | Err(_) => return,
                     Ok(false) => {}
                 }
             }
             let _ = terminal.update(cx, |terminal, cx| {
-                terminal.finish_cwd_report_timeout(generation);
+                terminal.finish_cwd_report_timeout(generation, trace_id);
                 cx.notify();
             });
         })
@@ -306,6 +308,7 @@ impl WorkspaceTerminalEntity {
         &mut self,
         generation: u64,
         pane: &gpui::WeakEntity<TerminalPane>,
+        trace_id: u64,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.cwd_picker.open || self.cwd_picker.generation != generation {
@@ -319,16 +322,34 @@ impl WorkspaceTerminalEntity {
         };
         let Some(pane) = pane.upgrade() else {
             self.finish_cwd_probe_unavailable(generation);
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe.response",
+                result = "unavailable",
+                reason = "the active terminal pane closed before it reported a directory",
+                business_impact = "the directory picker cannot browse the active terminal location",
+                "working-directory report could not complete"
+            );
             return true;
         };
         let Some(snapshot) = terminal_cwd_snapshot_from_pane(scope, pane.read(cx)) else {
             return false;
         };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "cwd.probe.response",
+            result = "completed",
+            source = ?snapshot.source(),
+            business_impact = "the directory picker can now browse the active terminal location",
+            "working-directory report was accepted"
+        );
         self.open_cwd_picker_for_snapshot_generation(snapshot, generation, cx);
         true
     }
 
-    fn finish_cwd_report_timeout(&mut self, generation: u64) {
+    fn finish_cwd_report_timeout(&mut self, generation: u64, trace_id: u64) {
         if !self.cwd_picker.open
             || self.cwd_picker.generation != generation
             || self.cwd_picker.snapshot.is_some()
@@ -337,6 +358,15 @@ impl WorkspaceTerminalEntity {
         }
         self.cwd_picker.loading = false;
         self.cwd_picker.error = Some(TerminalCwdError::Unavailable);
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "cwd.probe.response",
+            result = "timed_out",
+            reason = "the active shell did not emit a valid directory report before the bounded wait expired",
+            business_impact = "the directory picker cannot browse the active terminal location",
+            "working-directory report timed out"
+        );
     }
 
     pub(in crate::workspace) fn close_cwd_picker(&mut self) -> bool {
@@ -694,11 +724,7 @@ fn terminal_cwd_snapshot_from_pane(
 
 impl WorkspaceApp {
     pub(in crate::workspace) fn terminal_current_directory_awareness_enabled(&self) -> bool {
-        self.settings_store
-            .settings()
-            .terminal
-            .command_bar
-            .current_directory_awareness
+        false
     }
 
     pub(in crate::workspace) fn active_terminal_cwd_snapshot(
@@ -736,6 +762,7 @@ impl WorkspaceApp {
             .is_some_and(|pane| pane.read(cx).current_working_directory_is_pending())
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn active_local_terminal_cwd_path(
         &self,
         cx: &mut Context<Self>,
@@ -774,17 +801,26 @@ impl WorkspaceApp {
     ) -> Option<(CurrentDirectoryScope, PaneId)> {
         let tab = self.active_tab(cx)?;
         let pane_id = tab.active_pane_id?;
-        let scope = match tab.kind {
-            TabKind::SshTerminal => {
+        let session_kind = self
+            .tab_host
+            .read(cx)
+            .panes()
+            .get(&pane_id)?
+            .read(cx)
+            .session_kind();
+        let ssh_node_id = match session_kind {
+            TerminalSessionKind::SshPty => {
                 let session_id = self.active_terminal_session_id(cx)?;
-                let node_id = self
-                    .workspace_runtime
-                    .read(cx)
-                    .ssh_terminal_node_id(session_id)?;
-                CurrentDirectoryScope::ssh_node(node_id.0.clone())
+                Some(
+                    self.workspace_runtime
+                        .read(cx)
+                        .ssh_terminal_node_id(session_id)?
+                        .0,
+                )
             }
-            _ => return None,
+            _ => None,
         };
+        let scope = terminal_cwd_scope_for_session(session_kind, ssh_node_id.as_deref())?;
         Some((scope, pane_id))
     }
 
@@ -800,12 +836,31 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn open_terminal_cwd_picker(&mut self, cx: &mut Context<Self>) {
+        let trace_id = crate::logging::next_audit_trace_id();
         if !self.terminal_current_directory_awareness_enabled() {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe",
+                result = "blocked",
+                reason = "working-directory awareness is disabled in settings",
+                business_impact = "the directory picker was not opened",
+                "working-directory request was blocked before probing the terminal"
+            );
             return;
         }
         self.prepare_terminal_cwd_picker(cx);
 
         if let Some(snapshot) = self.active_terminal_cwd_snapshot(cx) {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe",
+                result = "cached",
+                source = ?snapshot.source(),
+                business_impact = "the directory picker opened without sending a shell probe",
+                "working-directory picker used an existing terminal directory report"
+            );
             self.terminal.update(cx, |terminal, cx| {
                 terminal.open_cwd_picker_for_snapshot(snapshot, cx);
             });
@@ -813,9 +868,27 @@ impl WorkspaceApp {
         };
 
         let Some((scope, pane_id)) = self.active_terminal_cwd_scope_and_pane(cx) else {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe",
+                result = "blocked",
+                reason = "the active session has no local or SSH filesystem scope",
+                business_impact = "the directory picker was not opened",
+                "working-directory request was rejected before entering the probe"
+            );
             return;
         };
         let Some(pane) = self.tab_host.read(cx).panes().get(&pane_id).cloned() else {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe",
+                result = "blocked",
+                reason = "the active terminal pane is no longer registered",
+                business_impact = "the directory picker was not opened",
+                "working-directory request was rejected before entering the probe"
+            );
             return;
         };
         let remote_scope = matches!(&scope, CurrentDirectoryScope::SshNode(_));
@@ -823,11 +896,17 @@ impl WorkspaceApp {
             .terminal
             .update(cx, |terminal, _cx| terminal.begin_cwd_probe(scope));
 
-        if remote_scope {
-            // SSH fallback probes used to write a hidden-looking command into the
-            // interactive PTY, but remote shells can echo it visibly. Until the
-            // prompt-owned hook is installed, unknown remote cwd must degrade
-            // instead of mutating the user's terminal input stream.
+        if !pane.read(cx).can_switch_working_directory_from_chrome() {
+            // A full-screen program owns the PTY input protocol, so a cwd probe
+            // must not inject shell bytes into an alternate-screen application.
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe",
+                result = "blocked",
+                reason = "alternate-screen terminal owns the input protocol",
+                "working-directory probe was not sent"
+            );
             self.terminal.update(cx, |terminal, _cx| {
                 terminal.finish_cwd_probe_unavailable(generation);
             });
@@ -839,12 +918,29 @@ impl WorkspaceApp {
         if pane.update(cx, |pane, cx| {
             pane.send_internal_control_command_line(command, cx)
         }) {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe",
+                result = "sent",
+                remote = remote_scope,
+                "working-directory report command was sent to the active shell"
+            );
             self.terminal.update(cx, |terminal, cx| {
                 // The report task observes the pane weakly so closing the pane
                 // never delays terminal consumer release or shared-node cleanup.
-                terminal.spawn_cwd_report_poll(generation, pane.downgrade(), cx);
+                terminal.spawn_cwd_report_poll(generation, pane.downgrade(), trace_id, cx);
             });
         } else {
+            tracing::debug!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "cwd.probe",
+                result = "failed",
+                reason = "the terminal did not accept the internal directory-report command",
+                business_impact = "the directory picker cannot browse the active terminal location",
+                "working-directory report command was not delivered"
+            );
             self.terminal.update(cx, |terminal, _cx| {
                 terminal.finish_cwd_probe_unavailable(generation);
             });
@@ -1041,9 +1137,55 @@ fn terminal_cwd_entry_confirms_directory(kind: TerminalCwdVisibleEntryKind) -> b
     )
 }
 
+fn terminal_cwd_scope_for_session(
+    session_kind: TerminalSessionKind,
+    ssh_node_id: Option<&str>,
+) -> Option<CurrentDirectoryScope> {
+    match session_kind {
+        TerminalSessionKind::LocalPty => Some(CurrentDirectoryScope::Local),
+        TerminalSessionKind::SshPty => ssh_node_id.map(CurrentDirectoryScope::ssh_node),
+        // Telnet and serial transports do not establish a local or node-owned
+        // filesystem scope, so exposing a directory picker would target data
+        // that does not belong to the active terminal.
+        TerminalSessionKind::Telnet | TerminalSessionKind::Serial => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_pty_uses_the_local_directory_scope() {
+        assert_eq!(
+            terminal_cwd_scope_for_session(TerminalSessionKind::LocalPty, None),
+            Some(CurrentDirectoryScope::Local)
+        );
+    }
+
+    #[test]
+    fn ssh_pty_requires_its_own_node_scope() {
+        assert_eq!(
+            terminal_cwd_scope_for_session(TerminalSessionKind::SshPty, Some("node-7")),
+            Some(CurrentDirectoryScope::ssh_node("node-7"))
+        );
+        assert_eq!(
+            terminal_cwd_scope_for_session(TerminalSessionKind::SshPty, None),
+            None
+        );
+    }
+
+    #[test]
+    fn transports_without_a_filesystem_scope_are_not_misclassified_as_local() {
+        assert_eq!(
+            terminal_cwd_scope_for_session(TerminalSessionKind::Telnet, None),
+            None
+        );
+        assert_eq!(
+            terminal_cwd_scope_for_session(TerminalSessionKind::Serial, None),
+            None
+        );
+    }
 
     #[test]
     fn only_resolved_rows_update_cwd_optimistically() {

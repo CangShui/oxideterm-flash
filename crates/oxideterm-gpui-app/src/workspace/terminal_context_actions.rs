@@ -40,10 +40,6 @@ impl WorkspaceApp {
                 cx.notify();
                 true
             }
-            TerminalContextAction::OpenSessionTriggers => {
-                self.open_terminal_trigger_settings_for_pane(pane_id, window, cx);
-                true
-            }
         }
     }
 }

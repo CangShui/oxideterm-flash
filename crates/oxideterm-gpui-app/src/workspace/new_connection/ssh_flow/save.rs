@@ -26,6 +26,7 @@ fn saved_authentication_plan(
     )
 }
 
+#[allow(dead_code)]
 fn runtime_authentication_plan(
     fallback: AuthMethod,
     enabled: bool,
@@ -594,6 +595,7 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn open_save_runtime_node_form(
         &mut self,
         node_id: NodeId,
@@ -656,6 +658,7 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(super) fn runtime_proxy_hops_for_parent_path(
         &self,
         parent_id: &NodeId,
@@ -740,6 +743,65 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let form_audit = self.connection_form_state(cx).form.as_ref().map(|form| {
+            (
+                form.audit_trace_id,
+                form.transport,
+                form.name.clone(),
+                form.host.clone(),
+                form.port.clone(),
+                form.username.clone(),
+                form.password.chars().count(),
+                form.passphrase.chars().count(),
+            )
+        });
+        let Some((
+            trace_id,
+            audit_transport,
+            audit_name,
+            audit_host,
+            audit_port,
+            audit_username,
+            password_character_count,
+            passphrase_character_count,
+        )) = form_audit
+        else {
+            let trace_id = crate::logging::next_audit_trace_id();
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.form.submit",
+                action = ?action,
+                result = "rejected",
+                reason = "the form draft no longer exists",
+                business_impact = "the request did not enter protocol validation or persistence",
+                "session form submission was rejected before business processing"
+            );
+            return;
+        };
+        // A synchronous span preserves the form trace after successful saves clear the draft.
+        // Transport events keep their existing explicit cross-device trace linkage.
+        let dispatch_span = tracing::info_span!(target: "oxideterm::audit", "session.form.dispatch", form_trace_id = trace_id);
+        let _dispatch_guard = dispatch_span.enter();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "session.form.submit",
+            action = ?action,
+            transport = ?audit_transport,
+            name = %audit_name,
+            host = %audit_host,
+            port = %audit_port,
+            username = %audit_username,
+            password_present = password_character_count > 0,
+            password_character_count,
+            passphrase_present = passphrase_character_count > 0,
+            passphrase_character_count,
+            secret_detail_redacted = true,
+            result = "received",
+            business_impact = "the complete session draft entered duplicate-submit and protocol validation",
+            "session form submission reached the shared dispatcher"
+        );
         // Footer buttons disable themselves while a submission is in flight,
         // but the Enter path reaches this shared dispatcher without that gate.
         // Re-entry would start a second concurrent handshake and duplicate the
@@ -750,6 +812,17 @@ impl WorkspaceApp {
             .as_ref()
             .is_some_and(|form| form.pending)
         {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.form.submit.validation",
+                action = ?action,
+                transport = ?audit_transport,
+                result = "rejected",
+                reason = "another submission is already pending",
+                business_impact = "no duplicate connection, save, or sync operation was started",
+                "session form submission was blocked by the in-flight guard"
+            );
             return;
         }
         let (transport, mode) = {
@@ -774,9 +847,30 @@ impl WorkspaceApp {
                     form.error = Some(message);
                 }
             });
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.form.submit.validation",
+                action = ?action,
+                transport = ?audit_transport,
+                result = "rejected",
+                reason = "the SSH connection timeout draft is not a positive integer",
+                business_impact = "the request did not enter protocol connection or persistence",
+                "session form submission failed validation"
+            );
             cx.notify();
             return;
         }
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "session.form.submit.validation",
+            action = ?action,
+            transport = ?audit_transport,
+            result = "accepted",
+            business_impact = "the request is being routed to the selected protocol handler",
+            "session form submission passed shared validation"
+        );
         if transport == Some(NewConnectionTransport::Serial)
             && mode == NewConnectionFormMode::NewConnection
         {
@@ -857,10 +951,33 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<SavedConnectionRuntimeHandoff> {
+        let trace_id = self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .map(|form| form.audit_trace_id)
+            .unwrap_or_else(crate::logging::next_audit_trace_id);
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "session.save.request",
+            result = "received",
+            business_impact = "the current protocol session draft entered uniqueness checks and persistence",
+            "session save request reached the persistence path"
+        );
         self.ensure_new_connection_save_name_is_unique(cx);
         let request = match self.save_request_for_current_form(cx) {
             Some(Ok(request)) => request,
             Some(Err(error)) => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.save.validation",
+                    error_detail_redacted = true,
+                    result = "rejected",
+                    business_impact = "the invalid draft did not reach persistence or cloud sync",
+                    "session save was rejected during request construction"
+                );
                 self.update_connection_form_state(cx, |state| {
                     if let Some(form) = state.form.as_mut() {
                         form.error = Some(error.to_string());
@@ -869,8 +986,35 @@ impl WorkspaceApp {
                 cx.notify();
                 return None;
             }
-            None => return None,
+            None => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.save.validation",
+                    result = "rejected",
+                    reason = "the form draft was empty",
+                    business_impact = "no connection record was created or updated",
+                    "session save was rejected because the form draft was missing"
+                );
+                return None;
+            }
         };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "session.save.persistence.request",
+            requested_id = ?request.id,
+            requested_name = %request.name,
+            requested_host = %request.host,
+            requested_port = request.port,
+            requested_username = %request.username,
+            auth_kind = request.auth.auth_type().as_str(),
+            proxy_hop_count = request.proxy_chain.len(),
+            secret_detail_redacted = true,
+            result = "accepted",
+            business_impact = "the connection store will persist this record by stable id, not by matching host and port",
+            "session save reached connection-store persistence"
+        );
         let auth_override = self.with_connection_form_mut(cx, |_this, form, _cx| {
             let form = form?;
             (form.auth_tab == SshAuthTab::Password && !form.save_password)
@@ -879,8 +1023,38 @@ impl WorkspaceApp {
 
         // The Save and Save & Connect buttons mean "persist this draft now",
         // so duplicate-name and keychain failures should block connection start.
-        match self.connection_store.upsert_with_runtime_secrets(request) {
+        match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_with_runtime_secrets", || self.connection_store.upsert_with_runtime_secrets(request)) {
             Ok((connection, secrets)) => {
+                tracing::info!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.save.persistence.response",
+                    saved_connection_id = %connection.id,
+                    saved_name = %connection.name,
+                    saved_host = %connection.host,
+                    saved_port = connection.port,
+                    saved_username = %connection.username,
+                    result = "completed",
+                    business_impact = "the saved record kept its own name and stable identity",
+                    "session save completed persistence"
+                );
+                let sync_queued = self.cloud_sync_broadcast_snapshot(cx);
+                tracing::info!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.save.sync_handoff",
+                    saved_connection_id = %connection.id,
+                    sync_queued,
+                    result = if sync_queued { "queued" } else { "not_queued" },
+                    business_impact = if sync_queued {
+                        "the saved record entered encrypted cloud snapshot delivery"
+                    } else {
+                        "the local save persisted but no cloud snapshot entered the queue"
+                    },
+                    "session save reached the cloud-sync handoff"
+                );
                 Some(SavedConnectionRuntimeHandoff {
                     connection_id: connection.id,
                     secrets,
@@ -888,6 +1062,15 @@ impl WorkspaceApp {
                 })
             }
             Err(error) => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.save.persistence.response",
+                    error_detail_redacted = true,
+                    result = "failed",
+                    business_impact = "no connection record was changed and no sync was queued",
+                    "session save failed during connection-store persistence"
+                );
                 self.update_connection_form_state(cx, |state| {
                     if let Some(form) = state.form.as_mut() {
                         form.error = Some(format!(
@@ -912,7 +1095,7 @@ impl WorkspaceApp {
             self.report_saved_next_hop_error("modals.new_connection.save_failed", cx);
             return;
         };
-        let Some(mut config) = ssh_config_from_saved_connection_with_runtime_secrets(
+        let Some(config) = ssh_config_from_saved_connection_with_runtime_secrets(
             &self.connection_store,
             self.settings_store.settings(),
             &connection,
@@ -946,15 +1129,20 @@ impl WorkspaceApp {
             .filter(|connection| connection.id != editing_id.as_deref().unwrap_or_default())
             .map(|connection| connection.name.clone())
             .collect();
-        self.update_connection_form_state(cx, |state| {
+        let previous_name = self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .map(|form| form.name.clone());
+        let next_name = self.update_connection_form_state(cx, |state| {
             let Some(form) = state.form.as_mut() else {
-                return;
+                return None;
             };
             let fallback_name = if form.name.trim().is_empty() {
                 let host = form.host.trim();
                 let username = form.username.trim();
                 if host.is_empty() || username.is_empty() {
-                    return;
+                    return None;
                 }
                 format!("{username}@{host}")
             } else {
@@ -973,8 +1161,25 @@ impl WorkspaceApp {
             } else {
                 fallback_name
             };
-            form.name = next_name;
+            form.name = next_name.clone();
+            Some((next_name, name_exists, form.audit_trace_id))
         });
+        if let Some((next_name, name_exists, trace_id)) = next_name {
+            if previous_name.as_deref() != Some(next_name.as_str()) {
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.save.name_uniqueness",
+                    previous_name = previous_name.as_deref().unwrap_or(""),
+                    next_name = %next_name,
+                    collision = name_exists,
+                    editing_saved_connection_id = editing_id.as_deref().unwrap_or(""),
+                    result = "rewritten",
+                    business_impact = "the draft display name was adjusted before persistence so two catalog rows would not share one label",
+                    "session save uniqueness pass rewrote the draft name"
+                );
+            }
+        }
     }
 
     pub(super) fn save_request_for_current_form(
@@ -1087,9 +1292,12 @@ impl WorkspaceApp {
         if action == NewConnectionSubmitAction::Save {
             let request =
                 save_request.expect("serial save action must build a serial profile request");
-            match self.connection_store.upsert_serial_profile(request) {
+            match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_serial_profile", || self.connection_store.upsert_serial_profile(request)) {
                 Ok(_) => {
                     self.update_connection_form_state(cx, ConnectionFormState::clear);
+                    self.cloud_sync_broadcast_snapshot(cx);
                 }
                 Err(error) => {
                     self.update_connection_form_state(cx, |state| {
@@ -1111,8 +1319,12 @@ impl WorkspaceApp {
             let request = save_request
                 .take()
                 .expect("serial save-and-open action must build a serial profile request");
-            match self.connection_store.upsert_serial_profile(request) {
-                Ok(_) => {}
+            match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_serial_profile", || self.connection_store.upsert_serial_profile(request)) {
+                Ok(_) => {
+                    self.cloud_sync_broadcast_snapshot(cx);
+                }
                 Err(error) => {
                     self.update_connection_form_state(cx, |state| {
                         if let Some(form) = state.form.as_mut() {
@@ -1132,7 +1344,9 @@ impl WorkspaceApp {
         match self.create_serial_terminal_tab(config, window, cx) {
             Ok(session_id) => {
                 if let Some(request) = save_request {
-                    match self.connection_store.upsert_serial_profile(request) {
+                    match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_serial_profile", || self.connection_store.upsert_serial_profile(request)) {
                         Ok(profile) => {
                             self.register_terminal_trigger_saved_connection(
                                 session_id,
@@ -1140,6 +1354,7 @@ impl WorkspaceApp {
                                 profile.id,
                                 cx,
                             );
+                            self.cloud_sync_broadcast_snapshot(cx);
                         }
                         Err(error) => {
                             let message = format!(
@@ -1230,9 +1445,12 @@ impl WorkspaceApp {
         if action == NewConnectionSubmitAction::Save {
             let request =
                 save_request.expect("telnet save action must build a telnet profile request");
-            match self.connection_store.upsert_telnet_profile(request) {
+            match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_telnet_profile", || self.connection_store.upsert_telnet_profile(request)) {
                 Ok(_) => {
                     self.update_connection_form_state(cx, ConnectionFormState::clear);
+                    self.cloud_sync_broadcast_snapshot(cx);
                 }
                 Err(error) => {
                     self.update_connection_form_state(cx, |state| {
@@ -1255,9 +1473,12 @@ impl WorkspaceApp {
             let request = save_request
                 .take()
                 .expect("telnet save-and-open action must build a telnet profile request");
-            match self.connection_store.upsert_telnet_profile(request) {
+            match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_telnet_profile", || self.connection_store.upsert_telnet_profile(request)) {
                 Ok(profile) => {
                     connected_profile_id = Some(profile.id);
+                    self.cloud_sync_broadcast_snapshot(cx);
                 }
                 Err(error) => {
                     self.update_connection_form_state(cx, |state| {
@@ -1280,9 +1501,12 @@ impl WorkspaceApp {
         match self.create_telnet_terminal_tab(config, terminal_options, window, cx) {
             Ok(session_id) => {
                 if let Some(request) = save_request {
-                    match self.connection_store.upsert_telnet_profile(request) {
+                    match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_telnet_profile", || self.connection_store.upsert_telnet_profile(request)) {
                         Ok(profile) => {
                             connected_profile_id = Some(profile.id);
+                            self.cloud_sync_broadcast_snapshot(cx);
                         }
                         Err(error) => {
                             let message = format!(
@@ -1451,11 +1675,16 @@ impl WorkspaceApp {
             return;
         };
 
-        let (profile, runtime_secrets) = match self
+        let (profile, runtime_secrets) = match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_standalone_sftp_profile_with_runtime_secrets", || self
             .connection_store
-            .upsert_standalone_sftp_profile_with_runtime_secrets(request)
+            .upsert_standalone_sftp_profile_with_runtime_secrets(request))
         {
-            Ok(saved) => saved,
+            Ok(saved) => {
+                self.cloud_sync_broadcast_snapshot(cx);
+                saved
+            }
             Err(error) => {
                 self.update_connection_form_state(cx, |state| {
                     if let Some(form) = state.form.as_mut() {
@@ -1715,11 +1944,14 @@ impl WorkspaceApp {
         };
 
         if let Some(request) = save_request {
-            match self.connection_store.upsert_remote_desktop_profile(request) {
+            match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert_remote_desktop_profile", || self.connection_store.upsert_remote_desktop_profile(request)) {
                 Ok(saved) => {
                     profile.id = saved.id;
                     profile.label = saved.name;
                     profile.credential_ref = saved.credential_ref;
+                    self.cloud_sync_broadcast_snapshot(cx);
                     if action != NewConnectionSubmitAction::Save && runtime_password.is_none() {
                         match self
                             .connection_store
@@ -1978,6 +2210,7 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn open_saved_connection_reconnect_editor(
         &mut self,
         node_id: NodeId,
@@ -2111,7 +2344,10 @@ impl WorkspaceApp {
             .is_some_and(|form| form.save_password)
     }
 
-    pub(super) fn sync_saved_connection_node_title(&mut self, saved_connection_id: &str) -> bool {
+    pub(in crate::workspace) fn sync_saved_connection_node_title(
+        &mut self,
+        saved_connection_id: &str,
+    ) -> bool {
         let Some(title) = self
             .connection_store
             .get(saved_connection_id)
@@ -2122,7 +2358,10 @@ impl WorkspaceApp {
         sync_saved_connection_node_title_for_nodes(&mut self.ssh_nodes, saved_connection_id, &title)
     }
 
-    pub(super) fn sync_saved_connection_x11_forwarding(&self, saved_connection_id: &str) -> bool {
+    pub(in crate::workspace) fn sync_saved_connection_x11_forwarding(
+        &self,
+        saved_connection_id: &str,
+    ) -> bool {
         let Some(options) = self
             .connection_store
             .get(saved_connection_id)
@@ -2139,16 +2378,54 @@ impl WorkspaceApp {
     }
 
     pub(super) fn save_editing_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let trace_id = self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .map(|form| form.audit_trace_id)
+            .unwrap_or_else(crate::logging::next_audit_trace_id);
         let Some(id) = self
             .connection_form_state(cx)
             .editing_saved_connection_id
             .clone()
         else {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.edit.validation",
+                result = "rejected",
+                reason = "the edit form did not retain a saved connection id",
+                business_impact = "no connection record was changed and no sync was queued",
+                "saved session edit was rejected before persistence"
+            );
             return;
         };
         let Some(existing_connection) = self.connection_store.get(&id).cloned() else {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "session.edit.validation",
+                saved_connection_id = %id,
+                result = "rejected",
+                reason = "the saved connection disappeared before the save click was processed",
+                business_impact = "no connection record was changed and no sync was queued",
+                "saved session edit was rejected before persistence"
+            );
             return;
         };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "session.edit.request",
+            saved_connection_id = %id,
+            previous_name = %existing_connection.name,
+            previous_host = %existing_connection.host,
+            previous_port = existing_connection.port,
+            previous_username = %existing_connection.username,
+            result = "accepted",
+            business_impact = "the edited form is being converted into a persistence request for the same stable id",
+            "saved session edit entered request construction"
+        );
         let existing_auth = existing_connection.auth.clone();
         let Some(save_request) = self.with_connection_form_mut(cx, |this, form, _cx| {
             let form = form?;
@@ -2187,11 +2464,82 @@ impl WorkspaceApp {
         };
         match save_request {
             Ok(request) => {
-                match self.connection_store.upsert(request) {
-                    Ok(_) => {
+                tracing::debug!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.edit.persistence.request",
+                    saved_connection_id = %id,
+                    requested_id = ?request.id,
+                    requested_name = %request.name,
+                    requested_host = %request.host,
+                    requested_port = request.port,
+                    requested_username = %request.username,
+                    auth_kind = request.auth.auth_type().as_str(),
+                    proxy_hop_count = request.proxy_chain.len(),
+                    secret_detail_redacted = true,
+                    result = "accepted",
+                    business_impact = "the connection store will update the record selected by stable id rather than endpoint",
+                    "saved session edit reached connection-store persistence"
+                );
+                match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert", || self.connection_store.upsert(request)) {
+                    Ok(saved_connection) => {
+                        let same_endpoint_other_ids: Vec<_> = self
+                            .connection_store
+                            .connections()
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.id != saved_connection.id
+                                    && candidate.host == saved_connection.host
+                                    && candidate.port == saved_connection.port
+                                    && candidate.username == saved_connection.username
+                            })
+                            .map(|candidate| candidate.id.as_str())
+                            .collect();
+                        tracing::info!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "session.edit.persistence.response",
+                            saved_connection_id = %saved_connection.id,
+                            saved_name = %saved_connection.name,
+                            saved_host = %saved_connection.host,
+                            saved_port = saved_connection.port,
+                            saved_username = %saved_connection.username,
+                            result = "completed",
+                            business_impact = "the edited connection retained its stable identity and persisted display name",
+                            "saved session edit completed persistence"
+                        );
+                        tracing::debug!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "session.edit.identity_check",
+                            saved_connection_id = %saved_connection.id,
+                            same_endpoint_other_connection_count = same_endpoint_other_ids.len(),
+                            same_endpoint_other_connection_ids = %same_endpoint_other_ids.join(","),
+                            identity_rule = "stable saved connection id",
+                            result = "verified",
+                            business_impact = "connections may share an endpoint, but sidebar titles and runtime ownership remain isolated by stable id",
+                            "saved session identity was checked after persistence"
+                        );
                         self.sync_saved_connection_node_title(&id);
                         self.sync_saved_connection_x11_forwarding(&id);
                         self.apply_saved_connection_terminal_preferences(&id, cx);
+                        let sync_queued = self.cloud_sync_broadcast_snapshot(cx);
+                        tracing::info!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "session.edit.sync_handoff",
+                            saved_connection_id = %id,
+                            sync_queued,
+                            result = if sync_queued { "queued" } else { "not_queued" },
+                            business_impact = if sync_queued {
+                                "the edited record entered encrypted cloud snapshot delivery"
+                            } else {
+                                "the local edit persisted but no cloud snapshot entered the queue"
+                            },
+                            "saved session edit reached the cloud-sync handoff"
+                        );
                         let connect_after_save_node_id =
                             self.update_connection_form_state(cx, |state| {
                                 let node_id = state
@@ -2238,6 +2586,16 @@ impl WorkspaceApp {
                         }
                     }
                     Err(error) => {
+                        tracing::warn!(
+                            target: "oxideterm::audit",
+                            trace_id,
+                            stage = "session.edit.persistence.response",
+                            saved_connection_id = %id,
+                            error_detail_redacted = true,
+                            result = "failed",
+                            business_impact = "the existing connection record remained unchanged and no sync was queued",
+                            "saved session edit failed during connection-store persistence"
+                        );
                         self.update_connection_form_state(cx, |state| {
                             if let Some(form) = state.form.as_mut() {
                                 form.error = Some(error.to_string());
@@ -2247,6 +2605,16 @@ impl WorkspaceApp {
                 }
             }
             Err(error) => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "session.edit.validation",
+                    saved_connection_id = %id,
+                    error_detail_redacted = true,
+                    result = "rejected",
+                    business_impact = "the invalid draft did not reach persistence or cloud sync",
+                    "saved session edit failed request construction"
+                );
                 self.update_connection_form_state(cx, |state| {
                     if let Some(form) = state.form.as_mut() {
                         form.error = Some(error.to_string());
@@ -2332,9 +2700,12 @@ impl WorkspaceApp {
             return;
         };
         match save_request {
-            Ok(request) => match self.connection_store.upsert(request) {
+            Ok(request) => match super::super::audit::persistence(
+            self.connection_form_state(cx).form.as_ref().map(|form| form.audit_trace_id).unwrap_or_else(crate::logging::next_audit_trace_id),
+            "upsert", || self.connection_store.upsert(request)) {
                 Ok(_) => {
                     self.update_connection_form_state(cx, ConnectionFormState::clear);
+                    self.cloud_sync_broadcast_snapshot(cx);
                     let message = self.i18n.t("sessionManager.toast.connection_duplicated");
                     self.push_command_palette_toast(
                         message,
@@ -2402,6 +2773,7 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn open_saved_standalone_sftp_profile(
         &mut self,
         id: &str,

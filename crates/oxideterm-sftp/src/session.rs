@@ -18,7 +18,7 @@ use russh_sftp::{
         error::Error as SftpErrorInner,
         fs::{PipelinedDownloaderSnapshot, PipelinedUploaderSnapshot},
     },
-    protocol::{FileAttributes, OpenFlags},
+    protocol::{FileAttributes, OpenFlags, StatusCode},
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -100,6 +100,7 @@ impl fmt::Debug for SftpSession {
 }
 
 include!("session/basic.rs");
+include!("session/open.rs");
 include!("session/preview.rs");
 include!("session/file_ops.rs");
 include!("session/directory_scheduler.rs");
@@ -107,3 +108,5 @@ include!("session/transfers.rs");
 include!("session/relay.rs");
 include!("session/preview_helpers.rs");
 include!("session/helpers.rs");
+
+include!("session/create_tests.rs");

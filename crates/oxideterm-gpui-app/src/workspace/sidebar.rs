@@ -1,6 +1,7 @@
 use super::*;
 use oxideterm_gpui_ui::button::ButtonRadius;
-use oxideterm_gpui_ui::{IconButtonOptions, TreeBranchMetrics, tree_child};
+use oxideterm_gpui_ui::IconButtonOptions;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 // Active sessions are a high-frequency navigator, so keep its density closer
 // to a compact desktop connection list than to a settings or form surface.
@@ -8,10 +9,12 @@ use oxideterm_gpui_ui::{IconButtonOptions, TreeBranchMetrics, tree_child};
 // so session cards, icons, and labels stay readable in the active sessions
 // sidebar without turning every row into a dense two-line collision.
 const SESSION_TREE_NODE_HEIGHT: f32 = 40.0;
+#[allow(dead_code)]
 const SESSION_TREE_ITEM_HEIGHT: f32 = 34.0;
 const SESSION_TREE_TEXT_SIZE: f32 = 13.0;
 const SESSION_TREE_META_TEXT_SIZE: f32 = 11.0;
 const SESSION_TREE_ICON_SIZE: f32 = 19.0;
+#[allow(dead_code)]
 const SESSION_TREE_CHILD_ICON_SIZE: f32 = 16.0;
 // Primary sidebar content needs a small inset below the header divider so the
 // first interactive surface does not visually merge with workspace chrome.
@@ -20,12 +23,19 @@ const PRIMARY_SIDEBAR_CONTENT_TOP_INSET: f32 = 4.0;
 // `bg-oxide-accent/5`, `border-oxide-accent/50`, and `bg-emerald-500/20`.
 // Keep the translated alpha roles named so this card view does not drift into
 // feature-local magic colors.
+#[allow(dead_code)]
 const SESSION_FOCUS_CARD_SELECTED_BG_ALPHA: u32 = 0x0d;
+#[allow(dead_code)]
 const SESSION_FOCUS_CARD_SELECTED_BORDER_ALPHA: u32 = 0x80;
+#[allow(dead_code)]
 const SESSION_FOCUS_CARD_BORDER_ALPHA: u32 = 0x80;
+#[allow(dead_code)]
 const SESSION_FOCUS_TERMINAL_BADGE_BG_ALPHA: u32 = 0x33;
+#[allow(dead_code)]
 const SESSION_FOCUS_TERMINAL_BADGE_HOVER_ALPHA: u32 = 0x4d;
+#[allow(dead_code)]
 const SESSION_FOCUS_ACTION_BG_ALPHA: u32 = 0x1a;
+#[allow(dead_code)]
 const SESSION_FOCUS_DIVIDER_ALPHA: u32 = 0x4d;
 // Active-session list rows share one thin bottom separator so connected,
 // connecting, and saved-bookmark rows read as one coherent list instead of
@@ -33,16 +43,30 @@ const SESSION_FOCUS_DIVIDER_ALPHA: u32 = 0x4d;
 const SESSION_ROW_SEPARATOR_ALPHA: u32 = 0x26;
 // Tauri FocusedNodeList empty state uses `w-8 h-8 opacity-30`,
 // `text-sm`, `text-xs`, and `opacity-60` for the helper text.
+#[allow(dead_code)]
 const SESSION_FOCUS_EMPTY_ICON_SIZE: f32 = 32.0;
+#[allow(dead_code)]
 const SESSION_FOCUS_EMPTY_ICON_ALPHA: u32 = 0x4d;
+#[allow(dead_code)]
 const SESSION_FOCUS_EMPTY_TITLE_TEXT_SIZE: f32 = 14.0;
+#[allow(dead_code)]
 const SESSION_FOCUS_EMPTY_SUBTITLE_TEXT_SIZE: f32 = 12.0;
+#[allow(dead_code)]
 const SESSION_FOCUS_EMPTY_SUBTITLE_ALPHA: f32 = 0.6;
+#[allow(dead_code)]
 const SESSION_FOCUS_EMERALD: u32 = 0x10b981;
+static NEXT_SIDEBAR_RESIZE_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_sidebar_resize_trace_id() -> u64 {
+    NEXT_SIDEBAR_RESIZE_TRACE_ID
+        .fetch_add(1, AtomicOrdering::Relaxed)
+        .max(1)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarSection {
     Sessions,
+    #[allow(dead_code)]
     Connections,
     HostTools,
     Automation,
@@ -74,6 +98,7 @@ pub(super) enum ContextSidebarTool {
     Packages,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(in crate::workspace) struct SessionStatusStyle {
     icon: LucideIcon,
@@ -83,6 +108,7 @@ pub(in crate::workspace) struct SessionStatusStyle {
     ring: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(in crate::workspace) enum SessionActionVariant {
     Primary,
@@ -109,9 +135,12 @@ pub(in crate::workspace) struct ActiveSessionContextMenu {
 pub(in crate::workspace) struct MoveSessionFolderDialogState {
     pub connection_id: String,
     pub connection_title: String,
+    #[allow(dead_code)]
     pub current_group: Option<String>,
     pub selected_group: Option<String>,
+    #[allow(dead_code)]
     pub custom_folder_name: String,
+    #[allow(dead_code)]
     pub is_custom: bool,
     pub profile_kind: Option<sessions::PendingSessionProfileKind>,
 }

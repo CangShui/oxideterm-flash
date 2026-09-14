@@ -98,7 +98,7 @@
       "agent_not_detected": "SSH Agent not detected",
       "two_factor_desc": "Two-Factor Authentication (Keyboard-Interactive)",
       "two_factor_hint": "The server will prompt for credentials during connection. Common uses: TOTP code, hardware token, challenge-response.",
-      "two_factor_warning": "Note: 2FA connections cannot auto-reconnect. You will need to reconnect manually if the session disconnects.",
+      "two_factor_warning": "If the session disconnects, reconnect it manually and complete the authentication prompt again.",
       "key_path_required": "SSH key path is required for key authentication.",
       "certificate_paths_required": "SSH key and certificate paths are required for certificate authentication.",
       "proxy_jump_title": "Add Jump Server",

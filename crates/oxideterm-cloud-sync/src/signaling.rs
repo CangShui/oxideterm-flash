@@ -20,14 +20,31 @@ pub type WsMessage = Message;
 /// Connects to the signaling room and returns the established stream.
 pub async fn connect_room(server_url: &str, room_passphrase: &str) -> Result<WsStream> {
     let url = crate::room_url(server_url, room_passphrase);
+    let log_base = room_log_base(server_url);
     let result = connect_async(url.as_str()).await;
     match &result {
-        Ok(_) => eprintln!("[cloud-sync] connected to {url}"),
-        Err(error) => eprintln!("[cloud-sync] FAILED to connect to {url}: {error}"),
+        Ok(_) => tracing::info!(
+            target: "oxideterm_cloud_sync::signaling",
+            server = %log_base,
+            stage = "room-connected",
+            "cloud sync signaling room connected"
+        ),
+        Err(error) => tracing::warn!(
+            target: "oxideterm_cloud_sync::signaling",
+            server = %log_base,
+            stage = "room-connect-failed",
+            "cloud sync signaling room connect failed: {error}"
+        ),
     }
     let (stream, _response) = result
         .with_context(|| format!("failed to connect signaling room {url}"))?;
     Ok(stream)
+}
+
+/// Returns a server base URL that never includes the passphrase-derived room
+/// path segment, so connection diagnostics cannot leak the room identity.
+fn room_log_base(server_url: &str) -> String {
+    server_url.trim().trim_end_matches('/').to_string()
 }
 
 /// Wraps an application frame into the worker's relayed `clip` message.

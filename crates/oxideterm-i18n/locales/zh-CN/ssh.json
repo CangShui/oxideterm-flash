@@ -98,7 +98,7 @@
       "agent_not_detected": "未检测到 SSH Agent",
       "two_factor_desc": "双因素认证 (Keyboard-Interactive)",
       "two_factor_hint": "服务器将在连接时提示输入凭据。常见用途: TOTP 验证码、硬件令牌、质询-响应。",
-      "two_factor_warning": "注意: 2FA 连接无法自动重连。会话断开时需要手动重连。",
+      "two_factor_warning": "会话断开后请手动重连，并再次完成身份验证提示。",
       "key_path_required": "SSH 密钥路径是密钥认证必填项。",
       "certificate_paths_required": "证书认证需要 SSH 密钥路径和证书路径。",
       "proxy_jump_title": "添加跳板机",

@@ -69,7 +69,9 @@ pub(in crate::workspace) struct ActiveSessionSidebarRow {
     group: Option<String>,
     node_view: ActiveSessionNode,
     depth: usize,
+    #[allow(dead_code)]
     is_last: bool,
+    #[allow(dead_code)]
     has_children: bool,
     standalone_session: Option<StandaloneActiveSession>,
     pending_profile: Option<PendingSessionProfileKind>,
@@ -79,6 +81,59 @@ pub(in crate::workspace) struct ActiveSessionSidebarRow {
     /// Child rows carry their folder's node id so the virtual list can keep
     /// rows collapsed when the folder node is absent from the rows cache.
     parent_is_folder: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeRowClaimIdentity<'a> {
+    saved_connection_id: Option<&'a str>,
+    host: &'a str,
+    username: &'a str,
+    port: u16,
+}
+
+fn runtime_row_claim_index(
+    runtime_rows: &[RuntimeRowClaimIdentity<'_>],
+    consumed: &[bool],
+    connection: &SavedConnection,
+) -> Option<usize> {
+    runtime_rows
+        .iter()
+        .enumerate()
+        .find(|(index, row)| {
+            !consumed[*index] && row.saved_connection_id == Some(connection.id.as_str())
+        })
+        .map(|(index, _)| index)
+        .or_else(|| {
+            runtime_rows
+                .iter()
+                .enumerate()
+                .find(|(index, row)| {
+                    !consumed[*index]
+                        // Endpoint fallback is only for ad-hoc runtime nodes. A node
+                        // owned by another saved id cannot lend its display identity.
+                        && row.saved_connection_id.is_none()
+                        && !row.host.is_empty()
+                        && row.host == connection.host
+                        && row.port == connection.port
+                        && row.username == connection.username
+                })
+                .map(|(index, _)| index)
+        })
+}
+
+
+fn leftover_runtime_row_is_duplicate(
+    depth: usize,
+    saved_connection_id: Option<&str>,
+    host: &str,
+    port: u16,
+    username: &str,
+    claimed_endpoints: &HashSet<(String, u16, String)>,
+) -> bool {
+    depth == 0
+        && saved_connection_id.is_none()
+        && !host.is_empty()
+        && claimed_endpoints.contains(&(host.to_string(), port, username.to_string()))
 }
 
 fn standalone_terminal_kind(kind: TerminalSessionKind) -> Option<StandaloneActiveSessionKind> {
@@ -154,9 +209,13 @@ fn active_session_readiness(readiness: &NodeReadiness) -> ActiveSessionReadiness
 #[derive(Clone, Copy, Debug)]
 pub(in crate::workspace) struct SessionStatusStyle {
     pub icon: LucideIcon,
+    #[allow(dead_code)]
     pub text_color: u32,
+    #[allow(dead_code)]
     pub dot_color: u32,
+    #[allow(dead_code)]
     pub opacity: f32,
+    #[allow(dead_code)]
     pub ring: bool,
 }
 
@@ -316,22 +375,21 @@ impl WorkspaceApp {
                 })
                 .collect()
         };
-        // A catalog entry claims its runtime node by saved id first, then by
-        // endpoint identity, mirroring the historical dedup rules.
+        // A catalog entry claims its runtime node by saved id first. Endpoint
+        // fallback remains available only for runtime nodes without a saved owner.
         let mut consumed = vec![false; runtime_rows.len()];
+        let runtime_claim_identities: Vec<_> = runtime_rows
+            .iter()
+            .map(|row| RuntimeRowClaimIdentity {
+                saved_connection_id: row.saved_connection_id.as_deref(),
+                host: &row.host,
+                username: &row.username,
+                port: row.port,
+            })
+            .collect();
         let mut claim_runtime_row = |connection: &SavedConnection| -> Option<ActiveSessionSidebarRow> {
-            let by_id = runtime_rows.iter().position(|row| {
-                row.saved_connection_id.as_deref() == Some(connection.id.as_str())
-            });
-            let by_endpoint = runtime_rows.iter().position(|row| {
-                !row.host.is_empty()
-                    && row.host == connection.host
-                    && row.port == connection.port
-                    && row.username == connection.username
-            });
-            let index = by_id
-                .filter(|index| !consumed[*index])
-                .or_else(|| by_endpoint.filter(|index| !consumed[*index]))?;
+            let index =
+                runtime_row_claim_index(&runtime_claim_identities, &consumed, connection)?;
             consumed[index] = true;
             Some(runtime_rows[index].clone())
         };
@@ -361,6 +419,10 @@ impl WorkspaceApp {
                 Some(mut node_row) => {
                     node_row.depth = if is_folder_child { 1 } else { 0 };
                     node_row.parent_is_folder = is_folder_child;
+                    // Catalog display identity is owned by the saved record, not
+                    // by whichever runtime node happened to match an endpoint.
+                    node_row.title = connection.name.clone();
+                    node_row.node_view.title = connection.name.clone();
                     node_row
                 }
                 None => Self::pending_connection_row(connection),
@@ -371,7 +433,9 @@ impl WorkspaceApp {
             let is_folder_child = profile.group.is_some();
             let mut row = match standalone_by_profile.remove(&profile.id) {
                 Some(mut running_row) => {
-                    // The running row inherits the catalog endpoint metadata.
+                    // The running row inherits the catalog identity and endpoint.
+                    running_row.title = profile.name.clone();
+                    running_row.node_view.title = profile.name.clone();
                     running_row.host = profile.host.clone();
                     running_row.port = profile.port;
                     running_row
@@ -386,6 +450,8 @@ impl WorkspaceApp {
             let is_folder_child = profile.group.is_some();
             let mut row = match standalone_by_profile.remove(&profile.id) {
                 Some(mut running_row) => {
+                    running_row.title = profile.name.clone();
+                    running_row.node_view.title = profile.name.clone();
                     running_row.host = profile.port_path.clone();
                     running_row
                 }
@@ -399,6 +465,8 @@ impl WorkspaceApp {
             let is_folder_child = profile.group.is_some();
             let mut row = match standalone_by_profile.remove(&profile.id) {
                 Some(mut running_row) => {
+                    running_row.title = profile.name.clone();
+                    running_row.node_view.title = profile.name.clone();
                     running_row.host = profile.host.clone();
                     running_row.port = profile.port;
                     running_row
@@ -472,13 +540,17 @@ impl WorkspaceApp {
             if consumed[index] {
                 continue;
             }
-            let duplicate_identity = row.depth == 0
-                && !row.host.is_empty()
-                && claimed_endpoints
-                    .contains(&(row.host.clone(), row.port, row.username.clone()));
-            if !duplicate_identity {
-                rows.push(row);
+            if leftover_runtime_row_is_duplicate(
+                row.depth,
+                row.saved_connection_id.as_deref(),
+                &row.host,
+                row.port,
+                &row.username,
+                &claimed_endpoints,
+            ) {
+                continue;
             }
+            rows.push(row);
         }
         rows
     }
@@ -990,7 +1062,7 @@ impl WorkspaceApp {
                         if let Some(id) = saved_connection_id.as_deref() {
                             this.open_saved_connection_new_terminal(id, window, cx);
                         } else {
-                            this.duplicate_ssh_node_connection(&node_id, window, cx);
+                            let _ = this.duplicate_ssh_node_connection(&node_id, window, cx);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -1464,6 +1536,7 @@ impl WorkspaceApp {
                                             }
                                         }
                                     }
+                                    this.cloud_sync_broadcast_snapshot(cx);
                                     let msg = this
                                         .i18n
                                         .t("sessions.dialog.delete_success")
@@ -1630,6 +1703,7 @@ impl WorkspaceApp {
             return;
         };
         let _ = self.connection_store.delete_group(&group);
+        self.cloud_sync_broadcast_snapshot(cx);
         let msg = self
             .i18n
             .t("sessions.dialog.folder_deleted")
@@ -2207,5 +2281,97 @@ impl WorkspaceApp {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod runtime_row_claim_tests {
+    use chrono::Utc;
+    use oxideterm_connections::{
+        ConnectionOptions, SavedAuth, SavedConnection, SavedUpstreamProxyPolicy,
+    };
+
+    use super::{
+        RuntimeRowClaimIdentity, leftover_runtime_row_is_duplicate, runtime_row_claim_index,
+    };
+
+    fn saved_connection(id: &str) -> SavedConnection {
+        let now = Utc::now();
+        SavedConnection {
+            id: id.to_string(),
+            version: 1,
+            name: format!("{id} session"),
+            group: None,
+            notes: None,
+            host: "192.0.2.10".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            auth: SavedAuth::Agent,
+            proxy_chain: Vec::new(),
+            upstream_proxy: SavedUpstreamProxyPolicy::UseGlobal,
+            proxy_command: None,
+            options: ConnectionOptions::default(),
+            created_at: now,
+            last_used_at: None,
+            updated_at: Some(now),
+            color: None,
+            icon_background_color: None,
+            icon: None,
+            tags: Vec::new(),
+            post_connect_command: None,
+        }
+    }
+
+    #[test]
+    fn identical_endpoint_does_not_claim_runtime_row_owned_by_another_saved_id() {
+        let runtime_rows = [RuntimeRowClaimIdentity {
+            saved_connection_id: Some("original"),
+            host: "192.0.2.10",
+            username: "root",
+            port: 22,
+        }];
+
+        assert_eq!(
+            runtime_row_claim_index(&runtime_rows, &[false], &saved_connection("edited")),
+            None
+        );
+    }
+
+    #[test]
+    fn identical_endpoint_can_claim_ad_hoc_runtime_row_without_saved_owner() {
+        let runtime_rows = [RuntimeRowClaimIdentity {
+            saved_connection_id: None,
+            host: "192.0.2.10",
+            username: "root",
+            port: 22,
+        }];
+
+        assert_eq!(
+            runtime_row_claim_index(&runtime_rows, &[false], &saved_connection("edited")),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn leftover_owned_runtime_row_is_not_hidden_just_because_endpoint_matches() {
+        let claimed = [("192.0.2.10".to_string(), 22, "root".to_string())]
+            .into_iter()
+            .collect();
+        assert!(!leftover_runtime_row_is_duplicate(
+            0,
+            Some("edited"),
+            "192.0.2.10",
+            22,
+            "root",
+            &claimed,
+        ));
+        assert!(leftover_runtime_row_is_duplicate(
+            0,
+            None,
+            "192.0.2.10",
+            22,
+            "root",
+            &claimed,
+        ));
     }
 }

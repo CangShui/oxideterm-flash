@@ -448,7 +448,6 @@ impl WorkspaceApp {
             (LucideIcon::Monitor, "migration.features_remote"),
             (LucideIcon::Activity, "migration.features_host_tools"),
             (LucideIcon::FolderOpen, "migration.features_sftp"),
-            (LucideIcon::RefreshCw, "migration.features_reconnect"),
             (LucideIcon::FileCode, "migration.features_editor"),
         ];
         self.version_migration_page_shell(

@@ -269,6 +269,7 @@ impl WorkspaceApp {
         )
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn settings_text_input_control_with_align(
         &self,
         input: SettingsInput,

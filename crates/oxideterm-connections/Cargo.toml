@@ -23,6 +23,7 @@ oxideterm-secret-store = { path = "../oxideterm-secret-store" }
 russh = { path = "../russh" }
 sha2.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 whoami.workspace = true
 zeroize.workspace = true

@@ -363,7 +363,7 @@ impl WorkspaceApp {
         let group_id = self.alloc_pane_id(cx);
         let pane_id = self.alloc_pane_id(cx);
         let session_id = self.alloc_session_id(cx);
-        let mut preferences = self.prepare_terminal_preferences_for_tab_kind(&tab_kind, cx);
+        let preferences = self.prepare_terminal_preferences_for_tab_kind(&tab_kind, cx);
         let pane = cx.new(|cx| {
             TerminalPane::new_with_preferences(preferences, window, cx)
                 .expect("failed to initialize split terminal pane")
@@ -558,10 +558,6 @@ impl WorkspaceApp {
         if updated {
             cx.notify();
         }
-    }
-
-    pub(super) fn render_pane_tree(&self, node: &PaneNode, cx: &mut Context<Self>) -> AnyElement {
-        self.render_pane_tree_for_tab(self.active_tab_id(cx), node, cx)
     }
 
     pub(super) fn render_pane_tree_for_tab(

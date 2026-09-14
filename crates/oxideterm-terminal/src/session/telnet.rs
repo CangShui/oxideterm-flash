@@ -172,11 +172,7 @@ impl TelnetCodec {
                         | TELNET_OPTION_TERMINAL_TYPE
                         | TELNET_OPTION_NAWS
                 ) {
-                    let mut responses = vec![vec![
-                        TELNET_COMMAND_IAC,
-                        TELNET_COMMAND_WILL,
-                        option,
-                    ]];
+                    let mut responses = vec![vec![TELNET_COMMAND_IAC, TELNET_COMMAND_WILL, option]];
                     if option == TELNET_OPTION_NAWS {
                         responses.push(self.naws_message());
                     }
@@ -295,7 +291,10 @@ impl TelnetSession {
         format!("Telnet {}", self.config.endpoint_label())
     }
 
-    fn drain_worker_events_with_budget(&mut self, budget: TerminalDrainBudget) -> TerminalDrainReport {
+    fn drain_worker_events_with_budget(
+        &mut self,
+        budget: TerminalDrainBudget,
+    ) -> TerminalDrainReport {
         let started = Instant::now();
         let mut report = TerminalDrainReport::default();
         loop {
@@ -417,12 +416,6 @@ impl TelnetSession {
                         self.pending_events.push(TerminalEvent::EncodingHint(hint));
                     }
                     let decoded = self.output_decoder.decode_to_utf8_bytes(&terminal_bytes);
-                    if let Some(stream) = self.trigger_stream.as_mut() {
-                        stream.observe_bytes(decoded.as_ref(), |matched| {
-                            self.pending_events
-                                .push(TerminalEvent::TriggerMatched(matched));
-                        });
-                    }
                     if self.output_events_enabled {
                         // Apply the same private-OSC recording boundary as PTY sessions.
                         let (_, recordable) = self.shell_integration.advance_with_recording(
@@ -442,8 +435,10 @@ impl TelnetSession {
                             |event| self.pending_events.push(event),
                         );
                     }
-                    self.graphics
-                        .clear_for_alt_screen_transition(&term, &mut self.graphics_alt_screen_active);
+                    self.graphics.clear_for_alt_screen_transition(
+                        &term,
+                        &mut self.graphics_alt_screen_active,
+                    );
                     cursor.set(graphics_cursor_from_term(&term, size));
                 }
                 TerminalGraphicsSegment::Event(event) => {
@@ -481,7 +476,9 @@ impl TelnetSession {
     fn handle_modem_consumer_events(&mut self, events: Vec<ModemConsumerEvent>) {
         for event in events {
             match event {
-                ModemConsumerEvent::WriteTerminal(bytes) => self.feed_plain_transport_output(&bytes),
+                ModemConsumerEvent::WriteTerminal(bytes) => {
+                    self.feed_plain_transport_output(&bytes)
+                }
                 ModemConsumerEvent::SendServer(bytes) => {
                     let _ = self.write_protocol_bytes(&bytes);
                 }
@@ -513,7 +510,8 @@ impl TelnetSession {
     fn push_output_event(&mut self, bytes: &[u8]) {
         if self.output_events_enabled && !bytes.is_empty() {
             // File consumers are opt-in, so keep this allocation off the normal rendering path.
-            self.pending_events.push(TerminalEvent::Output(bytes.to_vec()));
+            self.pending_events
+                .push(TerminalEvent::Output(bytes.to_vec()));
         }
     }
 
@@ -861,11 +859,7 @@ impl TerminalSessionBackend for TelnetSession {
         )
     }
 
-    fn snapshot_with_display_offset(
-        &self,
-        display_offset: usize,
-        rows: usize,
-    ) -> TerminalSnapshot {
+    fn snapshot_with_display_offset(&self, display_offset: usize, rows: usize) -> TerminalSnapshot {
         let term = self.term.lock();
         snapshot_from_term_with_display_offset(
             &term,
@@ -938,7 +932,10 @@ impl TelnetLoginAutomation {
             }
         }
 
-        let prompt = self.prompt_tail.strip_suffix(b" ").unwrap_or(&self.prompt_tail);
+        let prompt = self
+            .prompt_tail
+            .strip_suffix(b" ")
+            .unwrap_or(&self.prompt_tail);
         match self.stage {
             TelnetLoginStage::Username
                 if [b"login:".as_slice(), b"username:", b"user:"]
@@ -1012,25 +1009,23 @@ async fn run_telnet_worker(
     worker_tx: crate::backpressure::ByteBoundedSender<TelnetWorkerEvent>,
 ) {
     let endpoint = (config.host.as_str(), config.port);
-    let stream = match tokio::time::timeout(
-        TELNET_DEFAULT_CONNECT_TIMEOUT,
-        TcpStream::connect(endpoint),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            let _ = worker_tx.send_control(TelnetWorkerEvent::Failed(error.to_string()));
-            return;
-        }
-        Err(_) => {
-            let _ = worker_tx.send_control(TelnetWorkerEvent::Failed(format!(
-                "timed out connecting to {}",
-                config.endpoint_label()
-            )));
-            return;
-        }
-    };
+    let stream =
+        match tokio::time::timeout(TELNET_DEFAULT_CONNECT_TIMEOUT, TcpStream::connect(endpoint))
+            .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                let _ = worker_tx.send_control(TelnetWorkerEvent::Failed(error.to_string()));
+                return;
+            }
+            Err(_) => {
+                let _ = worker_tx.send_control(TelnetWorkerEvent::Failed(format!(
+                    "timed out connecting to {}",
+                    config.endpoint_label()
+                )));
+                return;
+            }
+        };
 
     let _ = worker_tx.send_control(TelnetWorkerEvent::Connected);
     let (mut reader, mut writer) = stream.into_split();
@@ -1224,8 +1219,9 @@ mod telnet_tests {
 
     #[test]
     fn terminal_output_processor_transforms_and_suppresses_parser_input() {
-        let transform: Option<TerminalOutputProcessor> =
-            Some(Arc::new(|bytes| bytes.iter().map(u8::to_ascii_uppercase).collect()));
+        let transform: Option<TerminalOutputProcessor> = Some(Arc::new(|bytes| {
+            bytes.iter().map(u8::to_ascii_uppercase).collect()
+        }));
         assert_eq!(
             apply_terminal_output_processor(&transform, b"prompt").as_ref(),
             b"PROMPT"

@@ -62,6 +62,7 @@ fn normalize_sftp_speed_limit_key(settings: &mut Value, raw: &Value) {
     sftp.insert("speedLimitKBps".to_string(), value);
 }
 
+#[allow(dead_code)]
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -278,13 +279,34 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
     }
     normalize_sftp_speed_limit_key(&mut settings, &raw);
     migrate_removed_bundled_font_families(&mut settings, &mut migration_warnings);
-    // The whole AI feature was removed; drop any saved ai section so it cannot
-    // leak into serde flatten extras or exported snapshots.
+    // Retired top-level sections must be removed before deserialization so
+    // serde flatten extras cannot preserve settings for deleted features.
     if let Some(object) = settings.as_object_mut() {
         if object.remove("ai").is_some() {
-            migration_warnings
-                .push("Removed the retired ai settings section".to_string());
+            migration_warnings.push("Removed the retired ai settings section".to_string());
         }
+        if object.remove("reconnect").is_some() {
+            migration_warnings.push("Removed the retired reconnect settings section".to_string());
+        }
+    }
+    if let Some(command_bar) = settings
+        .pointer_mut("/terminal/commandBar")
+        .and_then(|value| value.as_object_mut())
+    {
+        for key in ["currentDirectoryAwareness", "showCurrentDirectory"] {
+            if command_bar.remove(key).is_some() {
+                migration_warnings.push(format!("Removed the retired {key} setting"));
+            }
+        }
+    }
+    if settings
+        .pointer_mut("/terminal")
+        .and_then(|value| value.as_object_mut())
+        .and_then(|object| object.remove("triggers"))
+        .is_some()
+    {
+        migration_warnings
+            .push("Removed the retired terminal triggers settings section".to_string());
     }
 
     if saved_version < u64::from(SETTINGS_SCHEMA_VERSION)
@@ -328,9 +350,6 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
         ("sftp.maxConcurrentTransfers", 3, 1, 10),
         ("sftp.directoryParallelism", 4, 1, 16),
         ("sftp.speedLimitKBps", 0, 0, 10_000_000),
-        ("reconnect.maxAttempts", 5, 1, 20),
-        ("reconnect.baseDelayMs", 1000, 500, 10_000),
-        ("reconnect.maxDelayMs", 15_000, 5_000, 60_000),
         ("connectionPool.idleTimeoutSecs", 1800, 0, 86_400),
         (
             "terminal.inBandTransfer.maxChunkBytes",
@@ -637,6 +656,33 @@ mod tests {
                 .validation_warnings
                 .iter()
                 .any(|warning| warning.contains("general.updateChannel"))
+        );
+    }
+
+    #[test]
+    fn retired_reconnect_settings_are_removed_before_persistence() {
+        let sanitized = sanitize_settings_value(json!({
+            "reconnect": {
+                "enabled": true,
+                "maxAttempts": 20,
+                "baseDelayMs": 500,
+                "maxDelayMs": 60_000
+            }
+        }))
+        .expect("sanitize retired reconnect settings");
+
+        assert!(
+            sanitized
+                .migration_warnings
+                .iter()
+                .any(|warning| warning.contains("retired reconnect"))
+        );
+        assert!(
+            !sanitized
+                .settings
+                .to_value()
+                .as_object()
+                .is_some_and(|settings| settings.contains_key("reconnect"))
         );
     }
 

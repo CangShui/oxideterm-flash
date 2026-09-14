@@ -759,6 +759,7 @@ async fn sample_loop(
                 } else {
                     &initial_command
                 };
+                let sample_start = std::time::Instant::now();
                 match shell
                     .sample_until(
                         command,
@@ -769,6 +770,15 @@ async fn sample_loop(
                     .await
                 {
                     Ok(output) => {
+                        let elapsed_ms = sample_start.elapsed().as_millis() as u64;
+                        tracing::debug!(
+                            target: "oxideterm::audit",
+                            stage = "monitor.sample.success",
+                            connection_id = %connection_id,
+                            elapsed_ms,
+                            output_bytes = output.len(),
+                            "主机资源采样成功返回并完成标记截取"
+                        );
                         let timestamp_ms = now_ms();
                         let mut metrics =
                             parse_resource_metrics(&output, previous_sample.as_ref(), timestamp_ms);
@@ -812,9 +822,27 @@ async fn sample_loop(
                         previous_sample = previous_sample_from_metrics(&metrics, &output);
                         record_and_emit(&registry, &update_tx, connection_id.clone(), metrics);
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        let elapsed_ms = sample_start.elapsed().as_millis() as u64;
                         consecutive_failures = consecutive_failures.saturating_add(1);
+                        tracing::warn!(
+                            target: "oxideterm::audit",
+                            stage = "monitor.sample.failure",
+                            connection_id = %connection_id,
+                            elapsed_ms,
+                            consecutive_failures,
+                            max_failures = RESOURCE_MAX_CONSECUTIVE_FAILURES,
+                            error = %error,
+                            "主机资源采样单次执行失败（可能由于超时或通道异常）"
+                        );
                         if consecutive_failures >= RESOURCE_MAX_CONSECUTIVE_FAILURES {
+                            tracing::warn!(
+                                target: "oxideterm::audit",
+                                stage = "monitor.sample.degraded",
+                                connection_id = %connection_id,
+                                consecutive_failures,
+                                "主机资源采样连续失败达到上限，标记连接已降级并停止持续采样"
+                            );
                             registry.mark_degraded(&connection_id);
                             let timestamp_ms = now_ms();
                             record_and_emit(

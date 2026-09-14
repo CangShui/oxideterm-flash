@@ -303,6 +303,7 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(super) fn start_port_profiler_for_node(&mut self, node_id: NodeId, cx: &mut Context<Self>) {
         // Port profiling is view sampling, not tunnel ownership. It can stop
         // while hidden without releasing listeners, managers, or SSH consumers.

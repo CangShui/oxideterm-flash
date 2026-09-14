@@ -2,7 +2,7 @@ use super::*;
 use crate::workspace::root::init::terminal_highlight_rules;
 use crate::workspace::root::init::terminal_preference_overrides;
 
-const SETTINGS_SESSION_IMPORT_SECTION_INDEX: usize = 0;
+const SETTINGS_SESSION_IMPORT_SECTION_INDEX: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SettingsNavSelectionMotion {
@@ -50,30 +50,6 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         self.open_settings_tab(window, cx);
-    }
-
-    pub(in crate::workspace) fn open_connection_importers_settings(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.settings_workspace.update(cx, |settings, cx| {
-            settings.set_active_tab(SettingsTab::SessionIO, cx);
-        });
-        self.close_settings_select();
-        self.focused_settings_input = None;
-        self.settings_slider_drag = None;
-        self.clear_ime_selection();
-        self.sync_settings_section_list_state(cx);
-        // Target the importer row directly so callers do not merely land at
-        // the top of a long Session I/O settings page.
-        self.settings_section_list_state
-            .scroll_to(gpui::ListOffset {
-                item_ix: SETTINGS_SECTION_HEADER_ITEM_COUNT
-                    + SETTINGS_SESSION_IMPORT_SECTION_INDEX,
-                offset_in_item: px(0.0),
-            });
-        self.open_settings(window, cx);
     }
 
     pub(in crate::workspace) fn close_settings(
@@ -787,6 +763,12 @@ impl WorkspaceApp {
         let previous_settings = self.settings_store.settings().clone();
         edit(self.settings_store.settings_mut());
         let settings = self.settings_store.settings().clone();
+        crate::logging::audit_settings_change(
+            self.settings_store.path(),
+            &previous_settings,
+            &settings,
+            true,
+        );
         self.apply_loaded_settings_to_runtime(&settings, cx);
         let _ = self.settings_store.save();
         self.settings_workspace.update(cx, |settings, _cx| {
@@ -804,8 +786,15 @@ impl WorkspaceApp {
         edit: impl FnOnce(&mut PersistedSettings),
         cx: &mut Context<Self>,
     ) {
+        let previous_settings = self.settings_store.settings().clone();
         edit(self.settings_store.settings_mut());
         let settings = self.settings_store.settings().clone();
+        crate::logging::audit_settings_change(
+            self.settings_store.path(),
+            &previous_settings,
+            &settings,
+            false,
+        );
         self.apply_loaded_settings_to_runtime(&settings, cx);
         self.settings_save_pending = true;
         self.sync_tab_titles(cx);
@@ -825,6 +814,12 @@ impl WorkspaceApp {
             format!("Failed to reload connections after external sync: {error}")
         })?;
         let settings = next_settings.settings().clone();
+        crate::logging::audit_settings_change(
+            self.settings_store.path(),
+            &previous_settings,
+            &settings,
+            false,
+        );
         self.settings_store = next_settings;
         self.connection_store = next_connections;
         self.sync_ssh_config_sync_service();
@@ -851,6 +846,10 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         install_application_proxy_policy_from_settings(settings, &self.connection_store);
+        // The debug-logging toggle owns a live log writer plus CPU sampler pair,
+        // so it must follow every settings path (checkbox, cloud sync, startup),
+        // not only the diagnostics checkbox handler.
+        let _ = crate::logging::set_debug_logging(settings.diagnostics.debug_logging);
         crate::app_icon::install_runtime_app_icon(settings.appearance.app_icon);
         let previous_locale = self.i18n.locale();
         self.i18n
@@ -884,25 +883,12 @@ impl WorkspaceApp {
             // Close stale project task UI when the owning awareness feature is disabled.
             self.close_terminal_project_panel(cx);
         }
-        if !settings.terminal.command_bar.enabled
-            || !settings.terminal.command_bar.current_directory_awareness
-            || !settings.terminal.command_bar.show_current_directory
-        {
-            // CWD picker state is transient command-bar chrome; disabling the
-            // feature should not leave an orphaned popover around.
-            self.close_terminal_cwd_picker(cx);
-        }
+        // Working-directory awareness was removed; never leave a picker open.
+        self.close_terminal_cwd_picker(cx);
         self.ssh_registry.set_idle_timeout(Some(Duration::from_secs(
             settings.connection_pool.idle_timeout_secs as u64,
         )));
-        self.workspace_runtime.update(cx, |runtime, cx| {
-            runtime.configure_reconnect(
-                settings.reconnect.enabled,
-                reconnect_timing_from_settings(&settings),
-                reconnect_max_attempts_from_settings(&settings),
-                cx,
-            );
-        });
+
         self.tab_host.update(cx, |tab_host, _cx| {
             tab_host
                 .configure_terminal_output_highlight(settings.terminal.highlight_tab_on_new_output);

@@ -8,6 +8,12 @@ use oxideterm_remote_desktop::{
 use oxideterm_session_adapter::managed_key_resolver_from_store;
 use oxideterm_ssh_launch::{RemoteDesktopLaunchProtocol, TemporaryRemoteDesktopLaunch};
 
+// Runtime origin is authoritative even when the UI index is stale after restore.
+fn saved_runtime_owner_matches(router: &NodeRouter, node_id: &NodeId, saved_id: &str) -> bool {
+    router.node_metadata(node_id)
+        .is_some_and(|metadata| metadata.origin.saved_connection_id() == Some(saved_id))
+}
+
 fn attach_saved_owner_to_reused_ssh_node(
     node: &mut WorkspaceSshNode,
     saved_connection_id: &str,
@@ -286,7 +292,9 @@ impl WorkspaceApp {
         if let Some(node_id) = indexed_node_id.clone().filter(|node_id| {
             saved_node_route_matches_config(&self.node_router, node_id, &config)
                 && self.ssh_nodes.get(node_id).is_some_and(|node| {
-                    node.endpoint.host == config.host
+                    node.saved_connection_id.as_deref() == Some(saved_connection_id.as_str())
+                        && saved_runtime_owner_matches(&self.node_router, node_id, &saved_connection_id)
+                        && node.endpoint.host == config.host
                         && node.endpoint.port == config.port
                         && node.endpoint.username == config.username
                 })
@@ -380,7 +388,7 @@ impl WorkspaceApp {
             )?;
             return Ok(());
         } else {
-            if let Some(existing_node_id) = self.existing_direct_root_node_for_saved_config(&config)
+            if let Some(existing_node_id) = self.existing_direct_root_node_for_saved_config(&saved_connection_id, &config)
             {
                 self.ensure_workspace_ssh_node_from_runtime(&existing_node_id);
                 self.associate_existing_node_with_saved_connection(
@@ -560,6 +568,7 @@ impl WorkspaceApp {
                 .node_metadata(node_id)
                 .is_some_and(|snapshot| {
                     snapshot.depth == 0
+                        && saved_runtime_owner_matches(&self.node_router, node_id, saved_connection_id)
                         && snapshot.host == connection.host
                         && snapshot.port == connection.port
                         && snapshot.username == connection.username
@@ -572,7 +581,6 @@ impl WorkspaceApp {
         }) else {
             return false;
         };
-        let _ = saved_connection_id;
         self.duplicate_ssh_node_connection(&node_id, window, cx).is_ok()
     }
 
@@ -606,15 +614,18 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::info!(target: "oxideterm::audit", trace_id, stage = "session.open.request", saved_connection_id,
+            "检查此保存会话是否有可复用的终端，其他会话即使地址相同也不得复用");
         let Some(session_id) = self.ssh_nodes.iter().find_map(|(node_id, _node)| {
-            // Match Tauri connectToSaved: a saved connection with missing
-            // credentials may still focus an already-active root node with the
-            // same endpoint, but it must not create a new terminal.
+            // Missing credentials may only reuse this saved owner. Endpoint equality
+            // must never grant access to another saved session or its secrets.
             let matching_root = self
                 .node_router
                 .node_metadata(node_id)
                 .is_some_and(|snapshot| {
                     snapshot.depth == 0
+                        && saved_runtime_owner_matches(&self.node_router, node_id, saved_connection_id)
                         && snapshot.host == connection.host
                         && snapshot.port == connection.port
                         && snapshot.username == connection.username
@@ -632,6 +643,10 @@ impl WorkspaceApp {
                 .ssh_terminal_session_ids_for_node(node_id)
                 .first()
                 .copied();
+            tracing::debug!(target: "oxideterm::audit", trace_id, stage = "session.open.candidate",
+                saved_connection_id, node_id = %node_id.0, owner_matches_and_endpoint_matches = matching_root,
+                runtime_ready, has_terminal = session_id.is_some(),
+                "检查运行节点归属、地址和就绪状态，只有本会话拥有的终端允许激活");
             (matching_root && runtime_ready)
                 .then_some(session_id)
                 .flatten()
@@ -640,18 +655,23 @@ impl WorkspaceApp {
         };
 
         if !self.focus_terminal_session(session_id, window, cx) {
+            tracing::warn!(target: "oxideterm::audit", trace_id, stage = "session.open.response", saved_connection_id,
+                result = "focus_failed", "终端已不可聚焦，继续正常打开流程");
             return false;
         }
+        tracing::info!(target: "oxideterm::audit", trace_id, stage = "session.open.response", saved_connection_id,
+            terminal_id = ?session_id, result = "focused", "已激活此保存会话自己拥有的终端");
         let _ = self.connection_store.mark_used(saved_connection_id);
         true
     }
 
-    fn existing_direct_root_node_for_saved_config(&self, config: &SshConfig) -> Option<NodeId> {
+    fn existing_direct_root_node_for_saved_config(&self, saved_connection_id: &str, config: &SshConfig) -> Option<NodeId> {
         self.node_router
             .flatten_tree()
             .into_iter()
             .find(|node| {
                 node.depth == 0
+                    && saved_runtime_owner_matches(&self.node_router, &NodeId::new(node.id.clone()), saved_connection_id)
                     && node.host == config.host
                     && node.port == config.port
                     && node.username == config.username
@@ -689,6 +709,10 @@ impl WorkspaceApp {
             return node_id;
         }
 
+        tracing::info!(target: "oxideterm::audit", trace_id = crate::logging::next_audit_trace_id(),
+            stage = "session.open.materialize", saved_connection_id = ?saved_connection_id,
+            next_node_sequence = self.next_ssh_node_id,
+            "为此会话建立独立运行节点，不按相同主机地址借用其他保存会话");
         let node_id = NodeId::new(format!("ssh-{}", self.next_ssh_node_id));
         self.next_ssh_node_id += 1;
         let origin = saved_connection_id
@@ -807,6 +831,7 @@ impl WorkspaceApp {
         Ok(expansion)
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn expand_saved_connection_tree_under_parent(
         &mut self,
         parent_node_id: NodeId,
@@ -1136,6 +1161,7 @@ impl WorkspaceApp {
             cx.notify();
             return;
         }
+        self.cloud_sync_broadcast_snapshot(cx);
     }
 
     pub(in crate::workspace) fn queue_ssh_terminal_tab_for_node_with_mark_used(
@@ -1485,6 +1511,22 @@ mod create_tests {
             "other-owner"
         ));
         assert_eq!(node.saved_connection_id.as_deref(), Some("existing-owner"));
+    }
+
+    #[test]
+    fn saved_runtime_reuse_isolated_for_identical_configs_and_different_owners() {
+        let router = NodeRouter::new(SshConnectionRegistry::new(ConnectionPoolConfig::default()));
+        let config = SshConfig::default();
+        let original = NodeId::new("original-node");
+        let duplicate = NodeId::new("duplicate-node");
+        router.upsert_node_with_origin(original.clone(), config.clone(),
+            NodeOrigin::Restored { saved_connection_id: "original".into() });
+        router.upsert_node_with_origin(duplicate.clone(), config,
+            NodeOrigin::Restored { saved_connection_id: "duplicate".into() });
+        assert!(saved_runtime_owner_matches(&router, &original, "original"));
+        assert!(!saved_runtime_owner_matches(&router, &original, "duplicate"));
+        assert!(saved_runtime_owner_matches(&router, &duplicate, "duplicate"));
+        assert!(!saved_runtime_owner_matches(&router, &duplicate, "original"));
     }
 
     #[test]

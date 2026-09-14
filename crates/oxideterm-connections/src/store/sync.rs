@@ -1,3 +1,16 @@
+static NEXT_STORE_SYNC_TRACE_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+/// Generates a store-local correlation id for sync operations started without
+/// a caller-provided trace (CLI, tests, import). Cloud sync passes its own
+/// transport trace through `prepare_saved_connections_snapshot_with_trace`.
+pub(crate) fn next_store_sync_trace_id() -> String {
+    format!(
+        "connections-store-{}",
+        NEXT_STORE_SYNC_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 enum SavedConnectionsStoreFileCheckpoint {
     Missing,
     Present(Vec<u8>),
@@ -171,7 +184,20 @@ impl ConnectionStore {
         snapshot: SavedConnectionsSyncSnapshot,
         strategy: SavedConnectionsConflictStrategy,
     ) -> Result<ApplySavedConnectionsSyncOutcome> {
-        let prepared = self.prepare_saved_connections_snapshot(snapshot, strategy)?;
+        let trace_id = next_store_sync_trace_id();
+        self.apply_saved_connections_snapshot_with_trace(snapshot, strategy, &trace_id)
+    }
+
+    /// Applies one snapshot and correlates every store-level decision with a
+    /// caller-provided trace id (for example the cloud-sync envelope trace).
+    pub fn apply_saved_connections_snapshot_with_trace(
+        &mut self,
+        snapshot: SavedConnectionsSyncSnapshot,
+        strategy: SavedConnectionsConflictStrategy,
+        trace_id: &str,
+    ) -> Result<ApplySavedConnectionsSyncOutcome> {
+        let prepared =
+            self.prepare_saved_connections_snapshot_with_trace(snapshot, strategy, trace_id)?;
         let mut cleanup = self.commit_prepared_saved_connections_snapshot(prepared)?;
         let outcome = cleanup.outcome().clone();
 
@@ -200,11 +226,7 @@ impl ConnectionStore {
             if !record.deleted {
                 continue;
             }
-            let record_updated_at =
-                parse_connection_sync_timestamp(&record.updated_at, "saved connection sync updated_at")?;
-            let would_delete = existing_by_id
-                .get(&record.id)
-                .is_some_and(|existing| connection_sync_updated_at(existing) <= record_updated_at);
+            let would_delete = existing_by_id.contains_key(&record.id);
             if would_delete {
                 deletions += 1;
             }
@@ -212,11 +234,108 @@ impl ConnectionStore {
         Ok(deletions)
     }
 
+    /// Counts how many locally stored serial profiles an incoming snapshot
+    /// would delete, mirroring `preview_saved_connections_snapshot_deletions`.
+    pub fn preview_serial_profiles_snapshot_deletions(
+        &self,
+        snapshot: &SerialProfilesSyncSnapshot,
+    ) -> usize {
+        snapshot
+            .tombstones
+            .iter()
+            .filter(|tombstone| {
+                self.data
+                    .serial_profiles
+                    .iter()
+                    .find(|profile| profile.id == tombstone.id)
+                    .is_some()
+            })
+            .count()
+    }
+
+    /// Counts how many locally stored Telnet profiles an incoming snapshot
+    /// would delete.
+    pub fn preview_telnet_profiles_snapshot_deletions(
+        &self,
+        snapshot: &TelnetProfilesSyncSnapshot,
+    ) -> usize {
+        snapshot
+            .tombstones
+            .iter()
+            .filter(|tombstone| {
+                self.data
+                    .telnet_profiles
+                    .iter()
+                    .find(|profile| profile.id == tombstone.id)
+                    .is_some()
+            })
+            .count()
+    }
+
+    /// Counts how many locally stored standalone SFTP profiles an incoming
+    /// snapshot would delete.
+    pub fn preview_standalone_sftp_profiles_snapshot_deletions(
+        &self,
+        snapshot: &StandaloneSftpProfilesSyncSnapshot,
+    ) -> usize {
+        snapshot
+            .tombstones
+            .iter()
+            .filter(|tombstone| {
+                self.data
+                    .standalone_sftp_profiles
+                    .iter()
+                    .find(|profile| profile.id == tombstone.id)
+                    .is_some()
+            })
+            .count()
+    }
+
+    /// Counts how many locally stored remote desktop profiles an incoming
+    /// snapshot would delete.
+    pub fn preview_remote_desktop_profiles_snapshot_deletions(
+        &self,
+        snapshot: &RemoteDesktopProfilesSyncSnapshot,
+    ) -> usize {
+        snapshot
+            .tombstones
+            .iter()
+            .filter(|tombstone| {
+                self.data
+                    .remote_desktop_profiles
+                    .iter()
+                    .find(|profile| profile.id == tombstone.id)
+                    .is_some()
+            })
+            .count()
+    }
+
     pub fn prepare_saved_connections_snapshot(
         &mut self,
         snapshot: SavedConnectionsSyncSnapshot,
         strategy: SavedConnectionsConflictStrategy,
     ) -> Result<PreparedSavedConnectionsSync> {
+        let trace_id = next_store_sync_trace_id();
+        self.prepare_saved_connections_snapshot_with_trace(snapshot, strategy, &trace_id)
+    }
+
+    /// Prepares one snapshot merge while correlating every decision with a
+    /// caller-provided trace id. Cloud sync uses this entry point so a remote
+    /// envelope trace reaches the per-record store decisions.
+    pub fn prepare_saved_connections_snapshot_with_trace(
+        &mut self,
+        snapshot: SavedConnectionsSyncSnapshot,
+        strategy: SavedConnectionsConflictStrategy,
+        trace_id: &str,
+    ) -> Result<PreparedSavedConnectionsSync> {
+        tracing::debug!(
+            target: "oxideterm_connections",
+            trace_id,
+            stage = "sync.merge.request",
+            strategy = ?strategy,
+            record_count = snapshot.records.len(),
+            "会话同步快照进入存储层合并：将逐条记录按稳定 id、名称回退和收藏保留规则处理"
+        );
         let checkpoint = self.create_checkpoint()?;
         let mut result = ApplySavedConnectionsSyncSnapshotResult::default();
         let mut deleted_connection_ids = Vec::new();
@@ -243,21 +362,28 @@ impl ConnectionStore {
                 )?;
 
                 if record.deleted {
-                    if existing_by_id.get(&record.id).is_some_and(|existing| {
-                        connection_sync_updated_at(existing) > record_updated_at
-                    }) {
-                        result.skipped += 1;
-                        result.conflicts += 1;
-                        continue;
-                    }
-
+                    tracing::debug!(
+                        target: "oxideterm_connections",
+                        trace_id,
+                        stage = "sync.merge.record",
+                        record_id = %record.id,
+                        decision = "delete",
+                        "收到此会话的删除墓碑，开始删除本地记录并记录墓碑时间"
+                    );
+                    let effective_deleted_at = existing_by_id
+                        .get(&record.id)
+                        .map(connection_sync_updated_at)
+                        .map(|updated_at| updated_at + Duration::nanoseconds(1))
+                        .map(|updated_at| updated_at.max(record_updated_at))
+                        .unwrap_or(record_updated_at);
                     if let Some(removed) =
-                        self.remove_connection_with_tombstone_at(&record.id, record_updated_at)
+                        self.remove_connection_with_tombstone_at(&record.id, effective_deleted_at)
                     {
                         deleted_connection_ids.push(removed.id.clone());
                         keychain_ids_to_delete.extend(collect_connection_keychain_ids(&removed));
                         result.applied += 1;
-                    } else if self.upsert_connection_tombstone(record.id.clone(), record_updated_at)
+                    } else if self
+                        .upsert_connection_tombstone(record.id.clone(), effective_deleted_at)
                     {
                         result.applied += 1;
                     } else {
@@ -267,6 +393,15 @@ impl ConnectionStore {
                 }
 
                 let Some(payload) = record.payload else {
+                    tracing::warn!(
+                        target: "oxideterm_connections",
+                        trace_id,
+                        stage = "sync.merge.record",
+                        record_id = %record.id,
+                        decision = "skip",
+                        reason = "record carried no payload",
+                        "无法合并：远端记录缺少会话数据"
+                    );
                     result.skipped += 1;
                     result.conflicts += 1;
                     continue;
@@ -276,6 +411,15 @@ impl ConnectionStore {
                     .get(&record.id)
                     .is_some_and(|tombstone| tombstone.deleted_at >= record_updated_at)
                 {
+                    tracing::debug!(
+                        target: "oxideterm_connections",
+                        trace_id,
+                        stage = "sync.merge.record",
+                        record_id = %record.id,
+                        decision = "skip",
+                        reason = "local deletion tombstone is newer",
+                        "本地删除标记更新，跳过这条远端会话"
+                    );
                     result.skipped += 1;
                     result.conflicts += 1;
                     continue;
@@ -298,6 +442,15 @@ impl ConnectionStore {
                     && existing_by_name.is_some()
                     && strategy == SavedConnectionsConflictStrategy::Skip
                 {
+                    tracing::warn!(
+                        target: "oxideterm_connections",
+                        trace_id,
+                        stage = "sync.merge.record",
+                        record_id = %record.id,
+                        decision = "skip",
+                        reason = "skip strategy found a same-name conflict",
+                        "跳过策略遇到同名会话冲突，未应用远端记录"
+                    );
                     result.skipped += 1;
                     result.conflicts += 1;
                     continue;
@@ -312,6 +465,18 @@ impl ConnectionStore {
                 }
 
                 let baseline = existing_by_id.as_ref().or(existing_by_name.as_ref());
+                let matched_by_name = existing_by_id.is_none() && existing_by_name.is_some();
+                tracing::debug!(
+                    target: "oxideterm_connections",
+                    trace_id,
+                    stage = "sync.merge.record",
+                    record_id = %record.id,
+                    decision = "apply",
+                    matched_by_name,
+                    had_existing = baseline.is_some(),
+                    preserve_local_auth = baseline.is_some() && strategy.preserves_local_auth(),
+                    "按稳定 id 或名称回退匹配后应用此会话"
+                );
                 let next_connection = build_saved_connection_from_sync_payload(
                     &payload,
                     record.options.as_ref(),
@@ -319,6 +484,21 @@ impl ConnectionStore {
                     baseline,
                     baseline.is_some() && strategy.preserves_local_auth(),
                 )?;
+
+                if let Some(existing) = baseline
+                    && !existing.options.remote_path_favorites.is_empty()
+                    && next_connection.options.remote_path_favorites == existing.options.remote_path_favorites
+                {
+                    tracing::info!(
+                        target: "oxideterm_connections",
+                        trace_id,
+                        stage = "sync.merge.record",
+                        record_id = %record.id,
+                        decision = "favorites_preserved",
+                        preserved_favorite_count = existing.options.remote_path_favorites.len(),
+                        "远端快照未携带本会话收藏时保留本地收藏，遵循会话编辑不丢收藏的策略"
+                    );
+                }
 
                 if let Some(existing) = baseline {
                     let existing_keychain_ids: HashSet<String> =
@@ -346,6 +526,16 @@ impl ConnectionStore {
             if result.applied > 0 {
                 self.save()?;
             }
+            tracing::info!(
+                target: "oxideterm_connections",
+                trace_id,
+                stage = "sync.merge.response",
+                strategy = ?strategy,
+                applied = result.applied,
+                skipped = result.skipped,
+                conflicts = result.conflicts,
+                "会话同步快照合并完成"
+            );
             Ok::<(), anyhow::Error>(())
         })();
 
@@ -448,12 +638,56 @@ impl ConnectionStore {
             profile.validate()?;
         }
         let mut applied = 0usize;
+        // Apply remote deletions first; a profile removed here must stay gone
+        // even if an older active record appears later in the same snapshot.
+        for tombstone in &snapshot.tombstones {
+            let effective_deleted_at = self
+                .data
+                .serial_profiles
+                .iter()
+                .find(|existing| existing.id == tombstone.id)
+                .map(|existing| existing.updated_at + Duration::nanoseconds(1))
+                .map(|updated_at| updated_at.max(tombstone.deleted_at))
+                .unwrap_or(tombstone.deleted_at);
+            let had_local = self
+                .data
+                .serial_profiles
+                .iter()
+                .any(|existing| existing.id == tombstone.id);
+            self.data
+                .serial_profiles
+                .retain(|existing| existing.id != tombstone.id);
+            if upsert_profile_tombstone(
+                &mut self.data.serial_profile_tombstones,
+                tombstone.id.clone(),
+                effective_deleted_at,
+            ) {
+                applied += 1;
+            } else if had_local {
+                // A local profile was removed even though the tombstone already
+                // existed; still count it so the deletion persists.
+                applied += 1;
+            }
+        }
         for profile in snapshot.records {
+            let profile_id = profile.id.clone();
+            if self
+                .data
+                .serial_profile_tombstones
+                .iter()
+                .any(|tombstone| {
+                    tombstone.id == profile_id && tombstone.deleted_at >= profile.updated_at
+                })
+            {
+                // A retained deletion tombstone wins regardless of wall-clock
+                // skew; locally recreating the asset assigns a fresh identity.
+                continue;
+            }
             if let Some(existing) = self
                 .data
                 .serial_profiles
                 .iter_mut()
-                .find(|existing| existing.id == profile.id)
+                .find(|existing| existing.id == profile_id)
             {
                 if profile.updated_at >= existing.updated_at {
                     *existing = profile;
@@ -463,6 +697,9 @@ impl ConnectionStore {
                 self.data.serial_profiles.push(profile);
                 applied += 1;
             }
+            self.data
+                .serial_profile_tombstones
+                .retain(|tombstone| tombstone.id != profile_id);
         }
         if applied > 0 {
             self.normalize();
@@ -480,12 +717,50 @@ impl ConnectionStore {
             profile.validate()?;
         }
         let mut applied = 0usize;
+        for tombstone in &snapshot.tombstones {
+            let effective_deleted_at = self
+                .data
+                .telnet_profiles
+                .iter()
+                .find(|existing| existing.id == tombstone.id)
+                .map(|existing| existing.updated_at + Duration::nanoseconds(1))
+                .map(|updated_at| updated_at.max(tombstone.deleted_at))
+                .unwrap_or(tombstone.deleted_at);
+            let had_local = self
+                .data
+                .telnet_profiles
+                .iter()
+                .any(|existing| existing.id == tombstone.id);
+            self.data
+                .telnet_profiles
+                .retain(|existing| existing.id != tombstone.id);
+            if upsert_profile_tombstone(
+                &mut self.data.telnet_profile_tombstones,
+                tombstone.id.clone(),
+                effective_deleted_at,
+            ) {
+                applied += 1;
+            } else if had_local {
+                applied += 1;
+            }
+        }
         for profile in snapshot.records {
+            let profile_id = profile.id.clone();
+            if self
+                .data
+                .telnet_profile_tombstones
+                .iter()
+                .any(|tombstone| {
+                    tombstone.id == profile_id && tombstone.deleted_at >= profile.updated_at
+                })
+            {
+                continue;
+            }
             if let Some(existing) = self
                 .data
                 .telnet_profiles
                 .iter_mut()
-                .find(|existing| existing.id == profile.id)
+                .find(|existing| existing.id == profile_id)
             {
                 if profile.updated_at >= existing.updated_at {
                     *existing = profile;
@@ -495,6 +770,9 @@ impl ConnectionStore {
                 self.data.telnet_profiles.push(profile);
                 applied += 1;
             }
+            self.data
+                .telnet_profile_tombstones
+                .retain(|tombstone| tombstone.id != profile_id);
         }
         if applied > 0 {
             self.normalize();
@@ -512,14 +790,61 @@ impl ConnectionStore {
             profile.validate()?;
         }
         let mut applied = 0usize;
+        for tombstone in &snapshot.tombstones {
+            let effective_deleted_at = self
+                .data
+                .remote_desktop_profiles
+                .iter()
+                .find(|existing| existing.id == tombstone.id)
+                .map(|existing| existing.updated_at + Duration::nanoseconds(1))
+                .map(|updated_at| updated_at.max(tombstone.deleted_at))
+                .unwrap_or(tombstone.deleted_at);
+            let had_local = self
+                .data
+                .remote_desktop_profiles
+                .iter()
+                .any(|existing| existing.id == tombstone.id);
+            let credential_ref = self
+                .data
+                .remote_desktop_profiles
+                .iter()
+                .find(|existing| existing.id == tombstone.id)
+                .and_then(|existing| existing.credential_ref.clone());
+            self.data
+                .remote_desktop_profiles
+                .retain(|existing| existing.id != tombstone.id);
+            if let Some(reference) = credential_ref {
+                self.delete_or_queue_connection_keychain_entry(reference)?;
+            }
+            if upsert_profile_tombstone(
+                &mut self.data.remote_desktop_profile_tombstones,
+                tombstone.id.clone(),
+                effective_deleted_at,
+            ) {
+                applied += 1;
+            } else if had_local {
+                applied += 1;
+            }
+        }
         for mut profile in snapshot.records {
+            let profile_id = profile.id.clone();
             // Protected-store references are device-local and cannot be imported as credentials.
             profile.credential_ref = None;
+            if self
+                .data
+                .remote_desktop_profile_tombstones
+                .iter()
+                .any(|tombstone| {
+                    tombstone.id == profile_id && tombstone.deleted_at >= profile.updated_at
+                })
+            {
+                continue;
+            }
             if let Some(existing) = self
                 .data
                 .remote_desktop_profiles
                 .iter_mut()
-                .find(|existing| existing.id == profile.id)
+                .find(|existing| existing.id == profile_id)
             {
                 if profile.updated_at >= existing.updated_at {
                     // Updating portable metadata must not disconnect a valid local credential.
@@ -531,6 +856,9 @@ impl ConnectionStore {
                 self.data.remote_desktop_profiles.push(profile);
                 applied += 1;
             }
+            self.data
+                .remote_desktop_profile_tombstones
+                .retain(|tombstone| tombstone.id != profile_id);
         }
         if applied > 0 {
             self.normalize();
@@ -545,17 +873,65 @@ impl ConnectionStore {
     ) -> Result<usize> {
         // Treat every incoming snapshot as portable metadata, even when it came from a .oxide file.
         let mut applied = 0usize;
+        for tombstone in &snapshot.tombstones {
+            let effective_deleted_at = self
+                .data
+                .standalone_sftp_profiles
+                .iter()
+                .find(|existing| existing.id == tombstone.id)
+                .map(|existing| existing.updated_at + Duration::nanoseconds(1))
+                .map(|updated_at| updated_at.max(tombstone.deleted_at))
+                .unwrap_or(tombstone.deleted_at);
+            let had_local = self
+                .data
+                .standalone_sftp_profiles
+                .iter()
+                .any(|existing| existing.id == tombstone.id);
+            let keychain_ids = self
+                .data
+                .standalone_sftp_profiles
+                .iter()
+                .find(|existing| existing.id == tombstone.id)
+                .map(collect_standalone_sftp_keychain_ids)
+                .unwrap_or_default();
+            self.data
+                .standalone_sftp_profiles
+                .retain(|existing| existing.id != tombstone.id);
+            for keychain_id in keychain_ids {
+                let _ = self.keychain.delete(&keychain_id);
+            }
+            if upsert_profile_tombstone(
+                &mut self.data.standalone_sftp_profile_tombstones,
+                tombstone.id.clone(),
+                effective_deleted_at,
+            ) {
+                applied += 1;
+            } else if had_local {
+                applied += 1;
+            }
+        }
         for mut profile in snapshot.records {
+            let profile_id = profile.id.clone();
             if profile.transfer_mode == StandaloneSftpTransferMode::LocalRemote {
                 profile.secondary_endpoint = None;
             }
             make_standalone_sftp_profile_portable(&mut profile);
             profile.validate()?;
+            if self
+                .data
+                .standalone_sftp_profile_tombstones
+                .iter()
+                .any(|tombstone| {
+                    tombstone.id == profile_id && tombstone.deleted_at >= profile.updated_at
+                })
+            {
+                continue;
+            }
             if let Some(existing) = self
                 .data
                 .standalone_sftp_profiles
                 .iter_mut()
-                .find(|existing| existing.id == profile.id)
+                .find(|existing| existing.id == profile_id)
             {
                 if profile.updated_at >= existing.updated_at {
                     preserve_standalone_sftp_local_secrets(&mut profile, existing);
@@ -566,6 +942,9 @@ impl ConnectionStore {
                 self.data.standalone_sftp_profiles.push(profile);
                 applied += 1;
             }
+            self.data
+                .standalone_sftp_profile_tombstones
+                .retain(|tombstone| tombstone.id != profile_id);
         }
         if applied > 0 {
             self.normalize();
@@ -591,7 +970,7 @@ fn build_saved_connection_from_sync_payload(
     for hop in &proxy_chain {
         hop.ssh_algorithms.validate()?;
     }
-    let options = synced_options
+    let mut options = synced_options
         .cloned()
         .unwrap_or_else(|| ConnectionOptions {
             // Older snapshots exposed only these option fields through
@@ -602,7 +981,18 @@ fn build_saved_connection_from_sync_payload(
             post_connect_command: payload.post_connect_command.clone(),
             ..Default::default()
         });
+    // A device that has never seen this profile's remote-path favorites (an
+    // older snapshot without the options tail) must not erase them. Preserve
+    // the local favorites while the incoming snapshot carries none, so cloud
+    // sync cannot silently drop the saved file-manager shortcuts.
+    if let Some(existing) = existing
+        && !existing.options.remote_path_favorites.is_empty()
+        && options.remote_path_favorites.is_empty()
+    {
+        options.remote_path_favorites = existing.options.remote_path_favorites.clone();
+    }
     options.ssh_algorithms.validate()?;
+    options.normalize_remote_path_favorites();
 
     Ok(SavedConnection {
         id: payload.id.clone(),
@@ -681,10 +1071,17 @@ fn build_serial_profiles_sync_snapshot(
 ) -> Result<SerialProfilesSyncSnapshot> {
     let mut records = data.serial_profiles.clone();
     records.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut tombstones = active_profile_tombstones(&data.serial_profile_tombstones);
+    tombstones.sort_by(|left, right| left.id.cmp(&right.id));
     let revision = sha256_hex(
         &records
             .iter()
             .map(|profile| (&profile.id, profile.updated_at.to_rfc3339()))
+            .chain(
+                tombstones
+                    .iter()
+                    .map(|tombstone| (&tombstone.id, tombstone.deleted_at.to_rfc3339())),
+            )
             .collect::<Vec<_>>(),
     )?;
 
@@ -692,6 +1089,7 @@ fn build_serial_profiles_sync_snapshot(
         revision,
         exported_at: Utc::now().to_rfc3339(),
         records,
+        tombstones,
     })
 }
 
@@ -700,10 +1098,17 @@ fn build_telnet_profiles_sync_snapshot(
 ) -> Result<TelnetProfilesSyncSnapshot> {
     let mut records = data.telnet_profiles.clone();
     records.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut tombstones = active_profile_tombstones(&data.telnet_profile_tombstones);
+    tombstones.sort_by(|left, right| left.id.cmp(&right.id));
     let revision = sha256_hex(
         &records
             .iter()
             .map(|profile| (&profile.id, profile.updated_at.to_rfc3339()))
+            .chain(
+                tombstones
+                    .iter()
+                    .map(|tombstone| (&tombstone.id, tombstone.deleted_at.to_rfc3339())),
+            )
             .collect::<Vec<_>>(),
     )?;
 
@@ -711,6 +1116,7 @@ fn build_telnet_profiles_sync_snapshot(
         revision,
         exported_at: Utc::now().to_rfc3339(),
         records,
+        tombstones,
     })
 }
 
@@ -722,16 +1128,24 @@ fn build_standalone_sftp_profiles_sync_snapshot(
         make_standalone_sftp_profile_portable(profile);
     }
     records.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut tombstones = active_profile_tombstones(&data.standalone_sftp_profile_tombstones);
+    tombstones.sort_by(|left, right| left.id.cmp(&right.id));
     let revision = sha256_hex(
         &records
             .iter()
             .map(|profile| (&profile.id, profile.updated_at.to_rfc3339()))
+            .chain(
+                tombstones
+                    .iter()
+                    .map(|tombstone| (&tombstone.id, tombstone.deleted_at.to_rfc3339())),
+            )
             .collect::<Vec<_>>(),
     )?;
     Ok(StandaloneSftpProfilesSyncSnapshot {
         revision,
         exported_at: Utc::now().to_rfc3339(),
         records,
+        tombstones,
     })
 }
 
@@ -916,6 +1330,7 @@ fn preserve_local_auth_secret(incoming: &mut SavedAuth, existing: &SavedAuth) {
     }
 }
 
+#[allow(dead_code)]
 fn preserve_proxy_chain_local_secrets(
     incoming_proxy_chain: &mut [SavedProxyHop],
     existing_proxy_chain: &[SavedProxyHop],
@@ -1033,10 +1448,17 @@ fn build_remote_desktop_profiles_sync_snapshot(
         profile.credential_ref = None;
     }
     records.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut tombstones = active_profile_tombstones(&data.remote_desktop_profile_tombstones);
+    tombstones.sort_by(|left, right| left.id.cmp(&right.id));
     let revision = sha256_hex(
         &records
             .iter()
             .map(|profile| (&profile.id, profile.updated_at.to_rfc3339()))
+            .chain(
+                tombstones
+                    .iter()
+                    .map(|tombstone| (&tombstone.id, tombstone.deleted_at.to_rfc3339())),
+            )
             .collect::<Vec<_>>(),
     )?;
 
@@ -1044,6 +1466,7 @@ fn build_remote_desktop_profiles_sync_snapshot(
         revision,
         exported_at: Utc::now().to_rfc3339(),
         records,
+        tombstones,
     })
 }
 
@@ -1288,6 +1711,32 @@ fn active_connection_tombstones(
         .filter(|tombstone| tombstone.deleted_at >= cutoff)
         .cloned()
         .collect()
+}
+
+fn active_profile_tombstones(tombstones: &[ProfileTombstone]) -> Vec<ProfileTombstone> {
+    let cutoff = Utc::now() - Duration::days(CONNECTION_TOMBSTONE_RETENTION_DAYS);
+    tombstones
+        .iter()
+        .filter(|tombstone| tombstone.deleted_at >= cutoff)
+        .cloned()
+        .collect()
+}
+
+fn upsert_profile_tombstone(
+    tombstones: &mut Vec<ProfileTombstone>,
+    id: String,
+    deleted_at: DateTime<Utc>,
+) -> bool {
+    *tombstones = active_profile_tombstones(tombstones);
+    if let Some(existing) = tombstones.iter_mut().find(|tombstone| tombstone.id == id) {
+        if existing.deleted_at >= deleted_at {
+            return false;
+        }
+        existing.deleted_at = deleted_at;
+        return true;
+    }
+    tombstones.push(ProfileTombstone { id, deleted_at });
+    true
 }
 
 fn sha256_hex<T: Serialize>(value: &T) -> Result<String> {

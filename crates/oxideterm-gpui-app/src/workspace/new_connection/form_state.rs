@@ -162,6 +162,7 @@ pub(in crate::workspace) enum NewConnectionSelect {
     StandaloneSftpSecondaryUpstreamProxyProtocol,
     StandaloneSftpSecondaryUpstreamProxyAuth,
     RemoteDesktopSshGateway,
+    #[allow(dead_code)]
     LocalShell,
     SerialPort,
     SerialDataBits,
@@ -747,6 +748,9 @@ impl Drop for StandaloneSftpSecondaryForm {
 }
 
 pub(in crate::workspace) struct NewConnectionForm {
+    /// Correlates every field edit, validation decision, save, and sync handoff
+    /// without retaining any credential value outside this form owner.
+    pub(in crate::workspace) audit_trace_id: u64,
     pub(in crate::workspace) transport: NewConnectionTransport,
     /// Selects one discovered shell for this one-shot local terminal launch.
     pub(in crate::workspace) local_shell_id: Option<String>,
@@ -1027,6 +1031,7 @@ impl fmt::Debug for NewConnectionForm {
 impl Default for NewConnectionForm {
     fn default() -> Self {
         Self {
+            audit_trace_id: crate::logging::next_audit_trace_id(),
             transport: NewConnectionTransport::Ssh,
             local_shell_id: None,
             name: String::new(),
@@ -2040,6 +2045,8 @@ pub(in crate::workspace) fn current_connection_field(form: &NewConnectionForm) -
     }
 }
 
+pub(in crate::workspace) use super::audit::{connection_form_audit_snapshot, audit_connection_form_transition};
+
 pub(in crate::workspace) fn select_current_connection_field(form: &mut NewConnectionForm) {
     if current_connection_field(form).is_empty() {
         form.selected_field = None;
@@ -2174,7 +2181,7 @@ mod tests {
     use chrono::Utc;
     use gpui::{Keystroke, Modifiers};
     use oxideterm_connections::{
-        AuthType, ConnectionInfo, RemoteDesktopProfile, SavedAuth, SavedProxyHop,
+        AuthType, ConnectionInfo, RemoteDesktopProfile,
         SavedUpstreamProxyPolicy, SerialFlowControl, SerialParity, SerialProfile, TelnetProfile,
     };
     use oxideterm_remote_desktop::{
@@ -2189,8 +2196,9 @@ mod tests {
         SshAuthFamily, SshAuthTab, SshKeyAuthSource, StandaloneSftpTransferMode,
         apply_transport_default_remote_desktop_options,
         auth_family_from_tab, backspace_current_connection_field, connection_secret_field_visible,
-        form_from_remote_desktop_profile, form_from_serial_profile,
-        form_from_telnet_profile, insert_text_into_current_connection_field, key_source_from_tab,
+        form_from_remote_desktop_profile,
+        form_from_serial_profile, form_from_telnet_profile,
+        insert_text_into_current_connection_field, key_source_from_tab,
         select_current_connection_field, text_from_keystroke,
         toggle_connection_secret_field_visibility,
     };
@@ -2202,6 +2210,8 @@ mod tests {
             key_char: key_char.map(str::to_string),
         }
     }
+
+
 
     #[test]
     fn primary_secret_visibility_is_hidden_and_toggles_independently() {

@@ -19,9 +19,7 @@ use oxideterm_settings_model::{
     SettingsInputDraftApply, add_custom_semantic_rule, apply_persisted_settings_input_draft,
     create_custom_semantic_scheme, delete_custom_semantic_rule, delete_custom_semantic_scheme,
     edit_custom_semantic_scheme, export_custom_semantic_scheme, import_custom_semantic_scheme_named,
-    persisted_settings_input_value, reconnect_base_delay_options,
-    reconnect_max_attempt_options,
-    reconnect_max_delay_options, settings_multiline_line_ranges, settings_multiline_line_selection,
+    persisted_settings_input_value, settings_multiline_line_ranges, settings_multiline_line_selection,
     settings_section_list_identity as settings_model_section_list_identity,
     settings_section_list_item_count as settings_model_section_list_item_count,
 };
@@ -53,7 +51,7 @@ use oxideterm_gpui_ui::{
     },
     select::{
         OverlayAnchor, SelectAnchorId, select_anchor_probe, select_label, select_option,
-        select_option_action, select_overlay_popup, select_panel_overlay_popup_with_max_height,
+        select_option_action, select_overlay_popup,
         select_separator, select_trigger_with_focus_visible,
     },
     separator::{SeparatorOrientation, separator},

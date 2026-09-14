@@ -20,6 +20,28 @@ impl WorkspaceApp {
             8.0,
         );
         let selected_count = self.sftp_selected_names(menu.pane, cx).len();
+        let remote_paste_available = menu.pane == SftpPane::Remote
+            && self
+                .sftp_view
+                .read(cx)
+                .remote_clipboard
+                .as_ref()
+                .is_some_and(|clipboard| {
+                    self.visible_sftp_remote_id(cx).as_ref() == Some(&clipboard.remote_id)
+                });
+        let favorite_state = menu
+            .file
+            .as_ref()
+            .filter(|_| menu.pane == SftpPane::Remote)
+            .filter(|_| self.active_sftp_saved_connection_id(cx).is_some())
+            .map(|file| {
+                let path = if file.path.is_empty() {
+                    join_sftp_path(&self.sftp_view.read(cx).remote_path, &file.name)
+                } else {
+                    file.path.clone()
+                };
+                self.active_sftp_path_is_favorite(&path, cx)
+            });
         let (remote_loading, pair_primary_loading) = {
             let sftp = self.sftp_view.read(cx);
             (sftp.remote_loading, sftp.pair_primary_loading)
@@ -75,8 +97,8 @@ impl WorkspaceApp {
                     selected_count == 1 && sftp_extract_archive_kind(&file.name).is_some();
                 menu_el
                     .child(self.render_sftp_context_menu_guarded_item(
-                        LucideIcon::Eye,
-                        self.i18n.t("sftp.context.preview"),
+                        LucideIcon::Pencil,
+                        self.i18n.t("sftp.context.edit"),
                         false,
                         false,
                         pane_loading,
@@ -130,6 +152,60 @@ impl WorkspaceApp {
                 cx,
             ))
         })
+        .when(
+            menu.pane == SftpPane::Remote && selected_count > 0,
+            |menu_el| {
+                menu_el
+                    .child(self.render_sftp_context_menu_guarded_item(
+                        LucideIcon::FolderArchive,
+                        self.i18n.t("sftp.archive.create"), false, false, pane_loading, has_background,
+                        |this, _event, _window, cx| this.open_remote_archive_dialog(false, None, cx), cx,
+                    ))
+                    .child(self.render_sftp_context_menu_guarded_item(
+                        LucideIcon::FolderArchive,
+                        self.i18n.t("sftp.archive.extract"), false, false, pane_loading, has_background,
+                        |this, _event, _window, cx| this.open_remote_archive_dialog(true, None, cx), cx,
+                    ))
+                    .child(self.render_sftp_context_menu_guarded_item(
+                        LucideIcon::Copy,
+                        self.i18n.t("menu.copy"),
+                        false,
+                        false,
+                        pane_loading,
+                        has_background,
+                        move |this, _event, _window, cx| {
+                            this.set_remote_sftp_clipboard(SftpRemoteClipboardOperation::Copy, cx);
+                        },
+                        cx,
+                    ))
+                    .child(self.render_sftp_context_menu_guarded_item(
+                        LucideIcon::Scissors,
+                        self.i18n.t("menu.cut"),
+                        false,
+                        false,
+                        pane_loading,
+                        has_background,
+                        move |this, _event, _window, cx| {
+                            this.set_remote_sftp_clipboard(SftpRemoteClipboardOperation::Cut, cx);
+                        },
+                        cx,
+                    ))
+            },
+        )
+        .when(menu.pane == SftpPane::Remote, |menu_el| {
+            menu_el.child(self.render_sftp_context_menu_guarded_item(
+                LucideIcon::FolderInput,
+                self.i18n.t("menu.paste"),
+                false,
+                !remote_paste_available,
+                pane_loading,
+                has_background,
+                move |this, _event, _window, cx| {
+                    this.paste_remote_sftp_clipboard(cx);
+                },
+                cx,
+            ))
+        })
         .when_some(menu.file.clone(), |menu_el, file| {
             menu_el.child(self.render_sftp_context_menu_guarded_item(
                 LucideIcon::Copy,
@@ -149,6 +225,28 @@ impl WorkspaceApp {
                     cx.write_to_clipboard(ClipboardItem::new_string(join_sftp_path(
                         &base, &file.name,
                     )));
+                },
+                cx,
+            ))
+        })
+        .when_some(favorite_state, |menu_el, is_favorite| {
+            let file = menu
+                .file
+                .clone()
+                .expect("favorite state requires a context-menu file");
+            menu_el.child(self.render_sftp_context_menu_guarded_item(
+                LucideIcon::Star,
+                self.i18n.t(if is_favorite {
+                    "sftp.context.remove_favorite"
+                } else {
+                    "sftp.context.add_favorite"
+                }),
+                false,
+                false,
+                pane_loading,
+                has_background,
+                move |this, _event, _window, cx| {
+                    this.toggle_active_sftp_path_favorite(file.clone(), cx);
                 },
                 cx,
             ))

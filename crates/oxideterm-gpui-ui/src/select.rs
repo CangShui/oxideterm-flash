@@ -83,9 +83,6 @@ pub enum SelectAnchorId {
     SettingsLocalShell,
     SettingsLocalShellSemanticScheme(usize),
     SettingsConnectionIdleTimeout,
-    SettingsReconnectMaxAttempts,
-    SettingsReconnectBaseDelay,
-    SettingsReconnectMaxDelay,
     SettingsNetworkApplicationProxyMode,
     SettingsNetworkProxyProtocol,
     SettingsNetworkProxyAuth,
@@ -192,9 +189,6 @@ impl SelectAnchorId {
                 | Self::SettingsLocalShell
                 | Self::SettingsLocalShellSemanticScheme(_)
                 | Self::SettingsConnectionIdleTimeout
-                | Self::SettingsReconnectMaxAttempts
-                | Self::SettingsReconnectBaseDelay
-                | Self::SettingsReconnectMaxDelay
                 | Self::SettingsNetworkApplicationProxyMode
                 | Self::SettingsNetworkProxyProtocol
                 | Self::SettingsNetworkProxyAuth

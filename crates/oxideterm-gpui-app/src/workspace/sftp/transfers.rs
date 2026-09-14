@@ -1,4 +1,4 @@
-use super::helpers::format_transfer_eta;
+use super::helpers::{format_transfer_eta, localized_sftp_error_detail};
 use super::*;
 
 fn sftp_transfer_queue_row_signature(transfer: &SftpTransferItem) -> u64 {
@@ -60,6 +60,7 @@ struct SftpTransferRowLabels {
 #[derive(Clone)]
 struct SftpTransferRowRenderer {
     sftp: Entity<SftpWorkspaceEntity>,
+    i18n: I18n,
     theme: AppUiColors,
     radius: f32,
     mono_font: SharedString,
@@ -99,7 +100,8 @@ impl SftpTransferRowRenderer {
             SftpTransferState::Cancelled => self.labels.cancelled.clone(),
             SftpTransferState::Error => transfer
                 .error
-                .clone()
+                .as_deref()
+                .map(|error| localized_sftp_error_detail(&self.i18n, error))
                 .unwrap_or_else(|| self.labels.error.clone()),
         }
     }
@@ -633,7 +635,7 @@ impl SftpTransferRowRenderer {
                                         .text_size(px(SFTP_TEXT_10))
                                         .text_color(rgb(SFTP_RED))
                                         .truncate()
-                                        .child(error),
+                                        .child(localized_sftp_error_detail(&self.i18n, &error)),
                                 )
                             }),
                     )
@@ -694,6 +696,7 @@ impl WorkspaceApp {
     fn sftp_transfer_row_renderer(&self, _cx: &App) -> SftpTransferRowRenderer {
         SftpTransferRowRenderer {
             sftp: self.sftp_view.clone(),
+            i18n: self.i18n.clone(),
             theme: self.tokens.ui,
             radius: self.tokens.radii.sm,
             mono_font: settings_mono_font_family(self.settings_store.settings()),

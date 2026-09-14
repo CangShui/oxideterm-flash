@@ -2,11 +2,15 @@ use super::*;
 
 pub(in crate::workspace) const TERMINAL_SETTINGS_SWITCHER_ID: &str =
     "terminal-settings-page-switcher";
+#[allow(dead_code)]
 pub(in crate::workspace) const AI_SETTINGS_SWITCHER_ID: &str = "ai-settings-page-switcher";
+#[allow(dead_code)]
 pub(in crate::workspace) const CLOUD_SYNC_SWITCHER_ID: &str = "cloud-sync-tab-bar";
+#[allow(dead_code)]
 pub(in crate::workspace) const PLUGIN_MANAGER_SWITCHER_ID: &str = "plugin-manager-tab-bar";
 pub(in crate::workspace) const HOST_TOOLS_SWITCHER_ID: &str = "host-tools-tab-bar";
 pub(in crate::workspace) const SETTINGS_NAVIGATION_ID: &str = "settings-navigation";
+#[allow(dead_code)]
 pub(in crate::workspace) const FILE_MANAGER_NAVIGATION_ID: &str = "file-manager-navigation";
 pub(in crate::workspace) const NEW_CONNECTION_TRANSPORT_SELECTOR_ID: &str =
     "new-connection-transport-selector";

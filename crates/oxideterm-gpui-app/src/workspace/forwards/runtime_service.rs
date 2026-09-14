@@ -920,6 +920,7 @@ impl ForwardingRuntimeService {
     }
 }
 
+#[allow(dead_code)]
 fn forward_update_from_rule(rule: &ForwardRule) -> ForwardUpdate {
     ForwardUpdate {
         forward_type: Some(rule.forward_type),

@@ -95,20 +95,51 @@ impl SftpSession {
             .as_ref()
             .map(|manager| manager.register(transfer_id));
         let _guard = SftpTransferGuard::new(transfer_manager.as_ref(), transfer_id);
-        let canonical_remote = self.resolve_path(remote_path).await?;
-        let remote_info = self.stat(&canonical_remote).await?;
-        self.download_file_inner(
-            &DownloadFileJob {
-                remote_path: canonical_remote,
-                local_path: local_path.to_string(),
-                total_bytes: remote_info.size,
-            },
-            transfer_id,
-            &progress_tx,
-            &transfer_manager,
-        )
-        .await?;
-        Ok(remote_info.size)
+        debug!(
+            target: "oxideterm::audit",
+            trace_id = %transfer_id,
+            stage = "sftp.download.request",
+            direction = "download",
+            "远程文件下载（导出到本地）请求已进入 SFTP 会话"
+        );
+        let result = async {
+            let canonical_remote = self.resolve_path(remote_path).await?;
+            let remote_info = self.stat(&canonical_remote).await?;
+            self.download_file_inner(
+                &DownloadFileJob {
+                    remote_path: canonical_remote,
+                    local_path: local_path.to_string(),
+                    total_bytes: remote_info.size,
+                },
+                transfer_id,
+                &progress_tx,
+                &transfer_manager,
+            )
+            .await?;
+            Ok::<u64, SftpError>(remote_info.size)
+        }
+        .await;
+        match &result {
+            Ok(bytes) => debug!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.download.response",
+                direction = "download",
+                total_bytes = bytes,
+                result = "completed",
+                "远程文件下载（导出到本地）已完成"
+            ),
+            Err(_) => warn!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.download.response",
+                direction = "download",
+                result = "failed",
+                failure_detail_redacted = true,
+                "远程文件下载（导出到本地）失败"
+            ),
+        }
+        result
     }
 
     pub async fn upload_file(
@@ -123,22 +154,53 @@ impl SftpSession {
             .as_ref()
             .map(|manager| manager.register(transfer_id));
         let _guard = SftpTransferGuard::new(transfer_manager.as_ref(), transfer_id);
-        let metadata = tokio::fs::metadata(local_path)
-            .await
-            .map_err(SftpError::IoError)?;
-        let canonical_remote = self.resolve_new_file_path(remote_path).await?;
-        self.upload_file_inner(
-            &UploadFileJob {
-                local_path: local_path.to_string(),
-                remote_path: canonical_remote,
-                total_bytes: metadata.len(),
-            },
-            transfer_id,
-            &progress_tx,
-            &transfer_manager,
-        )
-        .await?;
-        Ok(metadata.len())
+        debug!(
+            target: "oxideterm::audit",
+            trace_id = %transfer_id,
+            stage = "sftp.upload.request",
+            direction = "upload",
+            "本地文件上传（写入远程）请求已进入 SFTP 会话"
+        );
+        let result = async {
+            let metadata = tokio::fs::metadata(local_path)
+                .await
+                .map_err(SftpError::IoError)?;
+            let canonical_remote = self.resolve_new_file_path(remote_path).await?;
+            self.upload_file_inner(
+                &UploadFileJob {
+                    local_path: local_path.to_string(),
+                    remote_path: canonical_remote,
+                    total_bytes: metadata.len(),
+                },
+                transfer_id,
+                &progress_tx,
+                &transfer_manager,
+            )
+            .await?;
+            Ok::<u64, SftpError>(metadata.len())
+        }
+        .await;
+        match &result {
+            Ok(bytes) => debug!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.upload.response",
+                direction = "upload",
+                total_bytes = bytes,
+                result = "completed",
+                "本地文件上传（写入远程）已完成"
+            ),
+            Err(_) => warn!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.upload.response",
+                direction = "upload",
+                result = "failed",
+                failure_detail_redacted = true,
+                "本地文件上传（写入远程）失败"
+            ),
+        }
+        result
     }
 
     pub async fn download_with_resume(
@@ -375,6 +437,13 @@ impl SftpSession {
             .as_ref()
             .map(|manager| manager.register(transfer_id));
         let _guard = SftpTransferGuard::new(transfer_manager.as_ref(), transfer_id);
+        debug!(
+            target: "oxideterm::audit",
+            trace_id = %transfer_id,
+            stage = "sftp.download_dir.request",
+            direction = "download_dir",
+            "远程目录导出请求已进入 SFTP 会话"
+        );
         let canonical_remote = self.resolve_path(remote_path).await?;
         tokio::fs::create_dir_all(local_path)
             .await
@@ -403,6 +472,26 @@ impl SftpSession {
         )
         .map(|(_, completed)| completed);
         pool.close_auxiliary_sessions().await;
+        match &result {
+            Ok(count) => debug!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.download_dir.response",
+                direction = "download_dir",
+                completed_entries = count,
+                result = "completed",
+                "远程目录导出已完成"
+            ),
+            Err(_) => warn!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.download_dir.response",
+                direction = "download_dir",
+                result = "failed",
+                failure_detail_redacted = true,
+                "远程目录导出失败"
+            ),
+        }
         result
     }
 
@@ -418,6 +507,13 @@ impl SftpSession {
             .as_ref()
             .map(|manager| manager.register(transfer_id));
         let _guard = SftpTransferGuard::new(transfer_manager.as_ref(), transfer_id);
+        debug!(
+            target: "oxideterm::audit",
+            trace_id = %transfer_id,
+            stage = "sftp.upload_dir.request",
+            direction = "upload_dir",
+            "本地目录上传（写入远程）请求已进入 SFTP 会话"
+        );
         let canonical_remote = if is_absolute_remote_path(remote_path) {
             remote_path.to_string()
         } else {
@@ -447,6 +543,26 @@ impl SftpSession {
         )
         .map(|(_, completed)| completed);
         pool.close_auxiliary_sessions().await;
+        match &result {
+            Ok(count) => debug!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.upload_dir.response",
+                direction = "upload_dir",
+                completed_entries = count,
+                result = "completed",
+                "本地目录上传（写入远程）已完成"
+            ),
+            Err(_) => warn!(
+                target: "oxideterm::audit",
+                trace_id = %transfer_id,
+                stage = "sftp.upload_dir.response",
+                direction = "upload_dir",
+                result = "failed",
+                failure_detail_redacted = true,
+                "本地目录上传（写入远程）失败"
+            ),
+        }
         result
     }
 
@@ -548,7 +664,7 @@ impl SftpSession {
                     Ok(metadata) => metadata,
                     Err(error) => {
                         warn!(
-                            "Skipping inaccessible local entry {:?}: {error}",
+                            "跳过无法访问的本地条目 {:?}：{error}",
                             local_entry
                         );
                         continue;
@@ -556,7 +672,7 @@ impl SftpSession {
                 };
                 if metadata.file_type().is_symlink() {
                     warn!(
-                        "Skipping local symlink during SFTP upload: {:?}",
+                        "SFTP 上传时跳过本地符号链接：{:?}",
                         local_entry
                     );
                     continue;
@@ -574,7 +690,7 @@ impl SftpSession {
                         .map_err(|_| SftpError::TransferCancelled)?;
                 } else {
                     warn!(
-                        "Skipping special local entry during SFTP upload: {:?}",
+                        "SFTP 上传时跳过特殊本地条目：{:?}",
                         local_entry
                     );
                 }
@@ -690,7 +806,7 @@ impl SftpSession {
                 Ok(session) => pool.push_auxiliary(session),
                 Err(error) => {
                     warn!(
-                        "Failed to open auxiliary SFTP channel for directory transfer: {error}"
+                        "为目录传输打开辅助 SFTP 通道失败：{error}"
                     );
                 }
             }

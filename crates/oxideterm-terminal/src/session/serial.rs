@@ -263,9 +263,7 @@ fn append_serial_escape_pair(output: &mut Vec<u8>, next: u8) {
     match next {
         // Raw serial boot noise can contain unterminated terminal string controls.
         // Passing them to the VTE parser can hide every later printable byte.
-        b']' | b'P' | b'_' | b'^' | b'X' => {
-            output.extend_from_slice(SERIAL_STRING_CONTROL_MARKER)
-        }
+        b']' | b'P' | b'_' | b'^' | b'X' => output.extend_from_slice(SERIAL_STRING_CONTROL_MARKER),
         _ => {
             output.push(ESC_BYTE);
             output.push(next);
@@ -491,12 +489,6 @@ impl SerialSession {
                         self.pending_events.push(TerminalEvent::EncodingHint(hint));
                     }
                     let decoded = self.output_decoder.decode_to_utf8_bytes(&terminal_bytes);
-                    if let Some(stream) = self.trigger_stream.as_mut() {
-                        stream.observe_bytes(decoded.as_ref(), |matched| {
-                            self.pending_events
-                                .push(TerminalEvent::TriggerMatched(matched));
-                        });
-                    }
                     if self.output_events_enabled {
                         // Apply the same private-OSC recording boundary as PTY sessions.
                         let (_, recordable) = self.shell_integration.advance_with_recording(
@@ -516,8 +508,10 @@ impl SerialSession {
                             |event| self.pending_events.push(event),
                         );
                     }
-                    self.graphics
-                        .clear_for_alt_screen_transition(&term, &mut self.graphics_alt_screen_active);
+                    self.graphics.clear_for_alt_screen_transition(
+                        &term,
+                        &mut self.graphics_alt_screen_active,
+                    );
                     cursor.set(graphics_cursor_from_term(&term, size));
                 }
                 TerminalGraphicsSegment::Event(event) => {
@@ -555,7 +549,9 @@ impl SerialSession {
     fn handle_modem_consumer_events(&mut self, events: Vec<ModemConsumerEvent>) {
         for event in events {
             match event {
-                ModemConsumerEvent::WriteTerminal(bytes) => self.feed_plain_transport_output(&bytes),
+                ModemConsumerEvent::WriteTerminal(bytes) => {
+                    self.feed_plain_transport_output(&bytes)
+                }
                 ModemConsumerEvent::SendServer(bytes) => {
                     let _ = self.write_protocol_bytes(&bytes);
                 }
@@ -574,9 +570,7 @@ impl SerialSession {
     fn prepare_display_output(&mut self, bytes: &[u8]) -> Vec<u8> {
         match self.runtime_options.display_mode {
             SerialDisplayMode::Text => self.serial_console_ingress.filter(bytes),
-            SerialDisplayMode::Hex => {
-                format_serial_hexdump(bytes, &mut self.hexdump_offset, false)
-            }
+            SerialDisplayMode::Hex => format_serial_hexdump(bytes, &mut self.hexdump_offset, false),
             SerialDisplayMode::Mixed => {
                 format_serial_hexdump(bytes, &mut self.hexdump_offset, true)
             }
@@ -595,7 +589,8 @@ impl SerialSession {
     fn push_output_event(&mut self, bytes: &[u8]) {
         if self.output_events_enabled && !bytes.is_empty() {
             // File consumers are opt-in, so keep this allocation off the normal rendering path.
-            self.pending_events.push(TerminalEvent::Output(bytes.to_vec()));
+            self.pending_events
+                .push(TerminalEvent::Output(bytes.to_vec()));
         }
     }
 
@@ -631,7 +626,8 @@ impl SerialSession {
                 false
             }
             AlacEvent::ClipboardStore(_, text) => {
-                self.pending_events.push(TerminalEvent::ClipboardStore(text));
+                self.pending_events
+                    .push(TerminalEvent::ClipboardStore(text));
                 false
             }
             AlacEvent::ClipboardLoad(_, formatter) => {
@@ -787,11 +783,7 @@ impl TerminalSessionBackend for SerialSession {
         Some(self.control_state)
     }
 
-    fn set_serial_control_line(
-        &mut self,
-        line: SerialControlLine,
-        asserted: bool,
-    ) -> Result<()> {
+    fn set_serial_control_line(&mut self, line: SerialControlLine, asserted: bool) -> Result<()> {
         if !self.lifecycle.is_running() {
             return Ok(());
         }
@@ -978,11 +970,7 @@ impl TerminalSessionBackend for SerialSession {
         )
     }
 
-    fn snapshot_with_display_offset(
-        &self,
-        display_offset: usize,
-        rows: usize,
-    ) -> TerminalSnapshot {
+    fn snapshot_with_display_offset(&self, display_offset: usize, rows: usize) -> TerminalSnapshot {
         let term = self.term.lock();
         snapshot_from_term_with_display_offset(
             &term,
@@ -1194,7 +1182,10 @@ fn open_serial_port(
 fn map_serial_port_info(port: serialport::SerialPortInfo) -> SerialPortInfo {
     match port.port_type {
         serialport::SerialPortType::UsbPort(info) => SerialPortInfo {
-            display_name: info.product.clone().unwrap_or_else(|| port.port_name.clone()),
+            display_name: info
+                .product
+                .clone()
+                .unwrap_or_else(|| port.port_name.clone()),
             port_path: port.port_name,
             port_type: "usb".to_string(),
             manufacturer: info.manufacturer,
@@ -1203,7 +1194,9 @@ fn map_serial_port_info(port: serialport::SerialPortInfo) -> SerialPortInfo {
             vid: Some(info.vid),
             pid: Some(info.pid),
         },
-        serialport::SerialPortType::BluetoothPort => serial_port_info_without_usb(port, "bluetooth"),
+        serialport::SerialPortType::BluetoothPort => {
+            serial_port_info_without_usb(port, "bluetooth")
+        }
         serialport::SerialPortType::PciPort => serial_port_info_without_usb(port, "pci"),
         serialport::SerialPortType::Unknown => serial_port_info_without_usb(port, "unknown"),
     }
@@ -1274,8 +1267,9 @@ fn reserve_serial_port(port_path: &str) -> Result<SerialPortReservation, SerialE
 }
 
 fn serial_port_owners() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    static OWNERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-        std::sync::OnceLock::new();
+    static OWNERS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
     OWNERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -1762,9 +1756,8 @@ mod serial_tests {
     #[test]
     fn fake_serial_worker_lifecycle_closes_without_reading_after_close_command() {
         let config = valid_config();
-        let mut port = FakeSerialPort::new(VecDeque::from([FakeRead::Bytes(
-            b"unexpected".to_vec(),
-        )]));
+        let mut port =
+            FakeSerialPort::new(VecDeque::from([FakeRead::Bytes(b"unexpected".to_vec())]));
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let (worker_tx, worker_rx) = crate::backpressure::byte_bounded_channel(
             crate::backpressure::TRANSPORT_OUTPUT_BACKLOG_BYTES,
@@ -1909,5 +1902,4 @@ mod serial_tests {
 
         assert!(session.buffer_text().contains("red"));
     }
-
 }

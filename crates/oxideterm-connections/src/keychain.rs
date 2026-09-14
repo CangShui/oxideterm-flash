@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 const SERVICE_NAME: &str = "com.oxideterm.ssh";
+#[allow(dead_code)]
 const LEGACY_ACCOUNT_SEPARATOR: &str = "@";
 
 #[derive(Clone, Debug)]

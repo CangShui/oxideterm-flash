@@ -4,6 +4,70 @@ pub(in crate::workspace::sftp) use oxideterm_sftp::{
     join_remote_path as join_sftp_path, normalize_remote_path, remote_directory_prefixes,
 };
 
+pub(in crate::workspace::sftp) fn sftp_error_i18n_key(error: &str) -> Option<&'static str> {
+    let normalized = error.trim().to_ascii_lowercase();
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| normalized.contains(needle));
+    if contains_any(&["already exists", "file exists", "os error 17"]) {
+        Some("sftp.errors.item_exists")
+    } else if contains_any(&["permission denied", "access denied", "os error 13"]) {
+        Some("sftp.errors.permission_denied")
+    } else if contains_any(&[
+        "no such file",
+        "file not found",
+        "directory not found",
+        "os error 2",
+    ]) {
+        Some("sftp.errors.not_found")
+    } else if contains_any(&["read-only", "read only", "readonly"]) {
+        Some("sftp.errors.read_only")
+    } else if contains_any(&["no space", "disk full", "quota exceeded"]) {
+        Some("sftp.errors.no_space")
+    } else if contains_any(&["timeout", "timed out"]) {
+        Some("sftp.errors.operation_timeout")
+    } else if contains_any(&[
+        "no connection",
+        "connection lost",
+        "connection closed",
+        "disconnected",
+        "broken pipe",
+        "reset by peer",
+        "channel closed",
+        "unexpected eof",
+    ]) {
+        Some("sftp.errors.connection_unavailable")
+    } else if contains_any(&[
+        "operation unsupported",
+        "not supported",
+        "subsystem not available",
+    ]) {
+        Some("sftp.errors.operation_unsupported")
+    } else if contains_any(&["invalid path", "invalid argument", "bad message"]) {
+        Some("sftp.errors.invalid_path")
+    } else if contains_any(&["transfer cancelled", "cancelled", "canceled"]) {
+        Some("sftp.errors.operation_cancelled")
+    } else if contains_any(&[
+        "protocol error",
+        "failure: failure",
+        "write error",
+        "i/o error",
+        "io error",
+        "channel error",
+        "transfer error",
+        "storage error",
+        "application is shutting down",
+    ]) {
+        Some("sftp.errors.operation_failed")
+    } else {
+        None
+    }
+}
+
+pub(in crate::workspace::sftp) fn localized_sftp_error_detail(i18n: &I18n, error: &str) -> String {
+    sftp_error_i18n_key(error)
+        .map(|key| i18n.t(key))
+        .unwrap_or_else(|| error.to_string())
+}
+
 pub(in crate::workspace::sftp) fn sftp_bg(color: u32, has_background: bool) -> Rgba {
     color_for_background(color, has_background, SFTP_BG_ACTIVE_BG_ALPHA)
 }
@@ -452,10 +516,13 @@ async fn load_remote_sftp_listing_inner(
     path: &str,
     update_ready_path: bool,
 ) -> Result<RemoteSftpListing, String> {
-    let transfer = backend
-        .acquire_transfer_sftp()
-        .await
-        .map_err(|error| error.to_string())?;
+    let transfer = match backend.acquire_transfer_sftp().await {
+        Ok(transfer) => transfer,
+        Err(error) if error_is_sftp_protocol_unavailable(&error) => {
+            return load_remote_listing_via_shell_fallback(backend, path, update_ready_path).await;
+        }
+        Err(error) => return Err(error),
+    };
     match list_remote_sftp_once(&transfer, path).await {
         Ok(listing) => {
             if update_ready_path && let SftpRemoteBackend::Node { router, node_id } = &backend {
@@ -503,6 +570,7 @@ async fn load_remote_sftp_listing_inner(
     }
 }
 
+#[allow(dead_code)]
 pub(in crate::workspace::sftp) async fn load_remote_sftp_preview(
     backend: SftpRemoteBackend,
     path: &str,
@@ -528,6 +596,7 @@ pub(in crate::workspace::sftp) async fn load_remote_sftp_preview(
     }
 }
 
+#[allow(dead_code)]
 async fn load_remote_sftp_preview_once(
     sftp: &SftpSession,
     path: &str,
@@ -616,6 +685,43 @@ pub(in crate::workspace::sftp) fn sftp_preview_editor_is_network_error(error: &s
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
+}
+
+async fn load_remote_listing_via_shell_fallback(
+    backend: SftpRemoteBackend,
+    path: &str,
+    update_ready_path: bool,
+) -> Result<RemoteSftpListing, String> {
+    // OpenWrt/QWRT Dropbear often has SSH but no SFTP subsystem. MobaXterm
+    // browses those hosts with a node-owned SSH exec `ls`; this is the same
+    // documented compatibility path, not native SFTP.
+    tracing::debug!(
+        target: "oxideterm::audit",
+        stage = "sftp.list.compat",
+        result = "fallback",
+        reason = "the remote SSH server does not expose an SFTP protocol",
+        business_impact = "the file browser listed the directory through SSH exec instead of SFTP",
+        "remote directory listing used SSH exec compatibility fallback"
+    );
+    let handle = backend.connection_handle().await?;
+    let (cwd, entries) = list_remote_directory_via_shell(&handle, path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let listing = remote_listing_from_file_infos(cwd, entries);
+    if update_ready_path && let SftpRemoteBackend::Node { router, node_id } = &backend {
+        let connection = router
+            .resolve_connection(node_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        router
+            .mark_sftp_ready_from_listing(
+                node_id,
+                connection.handle.connection_id(),
+                Some(listing.cwd.clone()),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(listing)
 }
 
 async fn list_remote_sftp_once(
@@ -886,7 +992,8 @@ pub(in crate::workspace::sftp) fn diff_cell(
 
 /// The pinned ".." row synthesizes this entry instead of reading one from the
 /// listing, so navigation never depends on the server exposing a parent link.
-pub(in crate::workspace::sftp) fn parent_directory_entry() -> crate::workspace::sftp::SftpFileEntry {
+pub(in crate::workspace::sftp) fn parent_directory_entry() -> crate::workspace::sftp::SftpFileEntry
+{
     crate::workspace::sftp::SftpFileEntry {
         name: "..".to_string(),
         path: "..".to_string(),
@@ -973,5 +1080,22 @@ mod sftp_helper_tests {
         assert_eq!(entry.name, "..");
         assert_eq!(entry.file_type, SftpFileType::Directory);
         assert!(!entry.is_symlink);
+    }
+
+    #[test]
+    fn raw_sftp_statuses_map_to_user_facing_error_keys() {
+        assert_eq!(
+            sftp_error_i18n_key("Protocol error: Failure: Failure"),
+            Some("sftp.errors.operation_failed")
+        );
+        assert_eq!(
+            sftp_error_i18n_key("File already exists: /root/download/test2"),
+            Some("sftp.errors.item_exists")
+        );
+        assert_eq!(
+            sftp_error_i18n_key("Permission denied: /root/download"),
+            Some("sftp.errors.permission_denied")
+        );
+        assert_eq!(sftp_error_i18n_key("用户可读的本地化提示"), None);
     }
 }

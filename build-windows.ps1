@@ -10,6 +10,28 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot ".")).Path
 $targetDir = Join-Path $root "target"
 $releaseDir = Join-Path $targetDir "release"
 $distDir = Join-Path $root "dist"
+$logDir = Join-Path $root "logs"
+$traceId = [Guid]::NewGuid().ToString("N")
+$logPath = Join-Path $logDir ("build-windows-dev-{0}.log" -f (Get-Date -Format "yyyy-MM-dd"))
+
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+
+function Write-BuildAudit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Stage,
+        [Parameter(Mandatory = $true)]
+        [string]$Result,
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $timestamp = [DateTime]::UtcNow.ToString("o")
+    Add-Content -LiteralPath $logPath -Encoding utf8 -Value (
+        "[{0}] traceId={1} stage={2} result={3} message={4}" -f
+        $timestamp, $traceId, $Stage, $Result, $Message
+    )
+}
 
 function Invoke-Cargo {
     param(
@@ -17,15 +39,58 @@ function Invoke-Cargo {
         [string[]]$Arguments
     )
 
+    $commandDescription = "cargo $($Arguments -join ' ')"
+    Write-BuildAudit -Stage "cargo-command-start" -Result "started" -Message $commandDescription
     & cargo @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
+    $cargoExitCode = $LASTEXITCODE
+    if ($cargoExitCode -ne 0) {
+        Write-BuildAudit -Stage "cargo-command-finish" -Result "failed" -Message (
+            "$commandDescription exited with code $cargoExitCode; the requested Windows package was not produced"
+        )
+        throw "$commandDescription failed with exit code $cargoExitCode."
+    }
+    Write-BuildAudit -Stage "cargo-command-finish" -Result "completed" -Message (
+        "$commandDescription completed successfully"
+    )
+}
+
+function Stop-RunningBuildOutputs {
+    # The packaging step replaces dist\*.exe. If a previous build is still
+    # running, Windows locks those files and the removal/copy below fails with
+    # "access denied", so stop our own binaries first (graceful, then forced).
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ProcessNames
+    )
+
+    foreach ($processName in $ProcessNames) {
+        $running = @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+        foreach ($process in $running) {
+            Write-Host "==> Stopping running $processName (PID $($process.Id)) to replace its binary"
+            Write-BuildAudit -Stage "artifact-lock" -Result "stopping" -Message (
+                "stopped running process $processName (PID $($process.Id)) because it locked an output binary"
+            )
+            try {
+                $process.CloseMainWindow() | Out-Null
+                if (-not $process.WaitForExit(3000)) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                }
+            } catch {
+                Write-Host "    Could not stop $processName (PID $($process.Id)): $($_.Exception.Message)"
+                Write-BuildAudit -Stage "artifact-lock" -Result "failed" -Message (
+                    "failed to stop $processName (PID $($process.Id)): $($_.Exception.Message)"
+                )
+            }
+        }
     }
 }
 
 Write-Host "==> Building OxideTerm Windows release binaries"
 Write-Host "    Root: $root"
 Write-Host "    Output: $distDir"
+Write-BuildAudit -Stage "build-request" -Result "accepted" -Message (
+    "Windows release build started; root=$root output=$distDir clean=$Clean"
+)
 
 if ($Clean -and (Test-Path -LiteralPath $targetDir)) {
     Write-Host "==> Removing target directory"
@@ -36,6 +101,9 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo was not found. Install Rust and ensure cargo is available in PATH."
 }
 if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
+    Write-BuildAudit -Stage "toolchain-validation" -Result "rejected" -Message (
+        "rustc was not found; no build command was started"
+    )
     throw "rustc was not found. Install Rust and ensure rustc is available in PATH."
 }
 
@@ -49,7 +117,78 @@ if (-not $hostLine) {
 }
 $hostTriple = $hostLine.Substring("host: ".Length).Trim()
 if ($hostTriple -notlike "*-windows-*") {
+    Write-BuildAudit -Stage "toolchain-validation" -Result "rejected" -Message (
+        "Rust host $hostTriple is not a Windows target; no release artifact was produced"
+    )
     throw "build-windows.ps1 must run with a Windows Rust toolchain, found: $hostTriple"
+}
+
+# cargo links Windows binaries with the MSVC link.exe. When this script runs
+# outside a "Developer PowerShell", import the Visual Studio x64 environment so
+# the linker is on PATH instead of failing later during the binary link step.
+if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+    try {
+        $programFilesX86 = ${env:ProgramFiles(x86)}
+        $vswherePath = if ($programFilesX86) {
+            Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+        } else {
+            $null
+        }
+        $vcvarsPath = $null
+        if ($vswherePath -and (Test-Path -LiteralPath $vswherePath)) {
+            $vsInstallPath = & $vswherePath -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vsInstallPath) {
+                $candidate = Join-Path $vsInstallPath "VC\Auxiliary\Build\vcvars64.bat"
+                if (Test-Path -LiteralPath $candidate) {
+                    $vcvarsPath = $candidate
+                }
+            }
+        }
+        if ($vcvarsPath) {
+            Write-Host "==> Importing MSVC environment from $vcvarsPath"
+            Write-BuildAudit -Stage "msvc-toolchain" -Result "importing" -Message (
+                "link.exe was missing; importing the Visual Studio x64 developer environment"
+            )
+            cmd /c "`"$vcvarsPath`" >nul && set" | ForEach-Object {
+                if ($_ -match '^([^=]+)=(.*)$') {
+                    Set-Item -Path ("Env:" + $matches[1]) -Value $matches[2] -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    } catch {
+        Write-Host "    MSVC environment bootstrap failed: $($_.Exception.Message)"
+        Write-BuildAudit -Stage "msvc-toolchain" -Result "failed" -Message (
+            "MSVC environment bootstrap failed: $($_.Exception.Message)"
+        )
+    }
+}
+if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+    Write-BuildAudit -Stage "msvc-toolchain" -Result "rejected" -Message (
+        "link.exe was not found; the MSVC linker is required to link Windows binaries"
+    )
+    throw "link.exe was not found. Run this script from 'Developer PowerShell for Visual Studio', or install the Visual Studio C++ build tools."
+}
+
+# aws-lc-sys requires NASM for optimized Windows builds. Prefer an installed
+# executable, but use its maintained prebuilt fallback when NASM is absent.
+if ($env:AWS_LC_SYS_NO_ASM) {
+    Remove-Item Env:\AWS_LC_SYS_NO_ASM
+    Write-BuildAudit -Stage "aws-lc-toolchain" -Result "corrected" -Message (
+        "cleared AWS_LC_SYS_NO_ASM because aws-lc-sys permits it only for debug builds"
+    )
+}
+$nasmCommand = Get-Command nasm -ErrorAction SilentlyContinue
+if ($nasmCommand) {
+    Write-Host "    NASM: $($nasmCommand.Source)"
+    Write-BuildAudit -Stage "aws-lc-toolchain" -Result "available" -Message (
+        "using installed NASM at $($nasmCommand.Source)"
+    )
+} else {
+    $env:AWS_LC_SYS_PREBUILT_NASM = "1"
+    Write-Host "    NASM: using aws-lc-sys prebuilt fallback"
+    Write-BuildAudit -Stage "aws-lc-toolchain" -Result "fallback" -Message (
+        "system NASM was not found; enabled the aws-lc-sys prebuilt NASM fallback for the release build"
+    )
 }
 
 Invoke-Cargo @(
@@ -90,6 +229,9 @@ foreach ($helperPackage in $helperPackages) {
 }
 foreach ($source in @($appSource, $cliSource) + @($helperSources.Values)) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        Write-BuildAudit -Stage "artifact-validation" -Result "failed" -Message (
+            "expected build artifact was missing: $source"
+        )
         throw "Expected build artifact was not found: $source"
     }
 }
@@ -124,6 +266,10 @@ Assert-WindowsGuiExecutable -Path $appSource
 if (-not (Test-Path -LiteralPath $distDir)) {
     New-Item -ItemType Directory -Path $distDir | Out-Null
 }
+
+# A still-running previous build locks dist\*.exe and makes the replacement fail.
+Stop-RunningBuildOutputs -ProcessNames (@("oxideterm-native", "oxideterm") + $helperPackages)
+Start-Sleep -Milliseconds 500
 
 $generatedPaths = @(
     (Join-Path $distDir "oxideterm-native.exe"),
@@ -175,3 +321,6 @@ Write-Host "==> Build complete"
 Get-ChildItem -LiteralPath $distDir -File | Select-Object Name, Length
 Write-Host "SHA256 checksums:"
 $hashLines | ForEach-Object { Write-Host "    $_" }
+Write-BuildAudit -Stage "build-response" -Result "completed" -Message (
+    "Windows release package completed; artifacts=$($hashArtifacts.Count) checksumFile=$hashFile"
+)

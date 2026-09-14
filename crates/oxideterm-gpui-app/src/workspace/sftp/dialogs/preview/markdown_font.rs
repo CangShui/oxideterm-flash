@@ -1,3 +1,5 @@
+use crate::workspace::sftp::helpers::localized_sftp_error_detail;
+
 use super::*;
 
 impl WorkspaceApp {
@@ -54,8 +56,9 @@ impl WorkspaceApp {
             )
         };
         if let Some(error) = font_error.as_deref() {
+            let error = localized_sftp_error_detail(&self.i18n, error);
             return self
-                .render_sftp_native_asset_status("Font", path, mime_type, error, cx)
+                .render_sftp_native_asset_status("Font", path, mime_type, &error, cx)
                 .into_any_element();
         }
         let Some(font_family) = font_family else {

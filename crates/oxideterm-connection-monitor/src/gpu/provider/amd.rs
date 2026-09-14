@@ -11,10 +11,8 @@ use crate::gpu::{GpuDevice, GpuProcess, GpuProvider};
 pub(super) fn sample_command() -> String {
     concat!(
         "echo '===AMD_STATUS==='; ",
-        "if ! command -v amd-smi >/dev/null 2>&1; then ",
-        "echo unavailable; ",
-        "else ",
-        "echo available; ",
+        "if command -v amd-smi >/dev/null 2>&1; then ",
+        "echo amd-smi; ",
         "echo '===AMD_DATA==='; ",
         "amd_output=$(LC_ALL=C amd-smi --json 2>&1); ",
         "amd_exit=$?; printf '%s\\n' \"$amd_output\"; ",
@@ -22,6 +20,17 @@ pub(super) fn sample_command() -> String {
         "if [ \"$amd_exit\" -ne 0 ]; then ",
         "echo '===AMD_ERROR==='; printf '%s\\n' \"$amd_output\"; ",
         "fi; ",
+        "elif command -v amdgpu_top >/dev/null 2>&1; then ",
+        "echo amdgpu-top; ",
+        "echo '===AMD_TOP_DATA==='; ",
+        "amd_output=$(LC_ALL=C amdgpu_top --json -n 1 -s 500ms 2>&1); ",
+        "amd_exit=$?; printf '%s\\n' \"$amd_output\"; ",
+        "echo '===AMD_QUERY_EXIT==='; echo \"$amd_exit\"; ",
+        "if [ \"$amd_exit\" -ne 0 ]; then ",
+        "echo '===AMD_ERROR==='; printf '%s\\n' \"$amd_output\"; ",
+        "fi; ",
+        "else ",
+        "echo unavailable; ",
         "fi; "
     )
     .to_string()
@@ -34,7 +43,7 @@ pub(super) fn parse(output: &str) -> ProviderSnapshot {
     if status_value == Some("unavailable") {
         return empty_snapshot(ProviderStatus::Unavailable);
     }
-    if status_value != Some("available") {
+    if !matches!(status_value, Some("amd-smi" | "amdgpu-top" | "available")) {
         return empty_snapshot(ProviderStatus::Unknown);
     }
     if query_exit.is_some_and(|exit| exit != 0) {
@@ -43,6 +52,10 @@ pub(super) fn parse(output: &str) -> ProviderSnapshot {
             return empty_snapshot(ProviderStatus::NoDevices);
         }
         return empty_snapshot(ProviderStatus::Error(format!("AMD: {message}")));
+    }
+
+    if status_value == Some("amdgpu-top") {
+        return parse_amdgpu_top(output);
     }
 
     let Some(payload) = section(output, "AMD_DATA") else {
@@ -95,6 +108,153 @@ pub(super) fn parse(output: &str) -> ProviderSnapshot {
         devices,
         processes,
     }
+}
+
+fn parse_amdgpu_top(output: &str) -> ProviderSnapshot {
+    let query_exit =
+        first_section_line(output, "AMD_QUERY_EXIT").and_then(|value| value.parse::<i32>().ok());
+    if query_exit.is_some_and(|exit| exit != 0) {
+        return empty_snapshot(ProviderStatus::Error(format!(
+            "AMD: {}",
+            sanitized_error(output, "AMD_ERROR", "amdgpu_top query failed")
+        )));
+    }
+    let Some(payload) = section(output, "AMD_TOP_DATA") else {
+        return empty_snapshot(ProviderStatus::NoDevices);
+    };
+    let values = parse_json_stream(payload);
+    let Some(value) = values.last() else {
+        return empty_snapshot(ProviderStatus::Error("AMD: invalid amdgpu_top JSON".into()));
+    };
+    let Some(devices) = object_value_case_insensitive(value, "devices").and_then(Value::as_array)
+    else {
+        return empty_snapshot(ProviderStatus::NoDevices);
+    };
+    let devices = devices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, device)| parse_amdgpu_top_device(index as u32, device))
+        .collect::<Vec<_>>();
+    ProviderSnapshot {
+        status: if devices.is_empty() {
+            ProviderStatus::NoDevices
+        } else {
+            ProviderStatus::Available
+        },
+        devices,
+        // amdgpu_top process JSON varies across versions. Device telemetry is
+        // authoritative; process rows remain empty rather than guessing owners.
+        processes: Vec::new(),
+    }
+}
+
+fn parse_amdgpu_top_device(index: u32, value: &Value) -> Option<GpuDevice> {
+    let info = object_value_case_insensitive(value, "info").unwrap_or(value);
+    let name = first_text(
+        info,
+        &[
+            "DeviceName",
+            "device_name",
+            "MarketingName",
+            "market_name",
+            "name",
+        ],
+    )
+    .unwrap_or_else(|| format!("AMD GPU {index}"));
+    let pci_bus_id =
+        first_text(info, &["PCI", "pci", "BDF", "bdf"]).unwrap_or_else(|| format!("AMD:{index}"));
+    let activity = object_value_case_insensitive(value, "gpu_activity")
+        .or_else(|| object_value_case_insensitive(value, "activity"));
+    let memory = object_value_case_insensitive(value, "VRAM")
+        .or_else(|| object_value_case_insensitive(value, "memory_usage"));
+    let sensors = object_value_case_insensitive(value, "Sensors")
+        .or_else(|| object_value_case_insensitive(value, "sensors"));
+
+    Some(GpuDevice {
+        provider: GpuProvider::Amd,
+        index,
+        uuid: amd_device_id(index, &pci_bus_id),
+        pci_bus_id,
+        name,
+        driver_version: first_text(info, &["Driver", "driver", "driver_version"]),
+        performance_state: None,
+        health_status: None,
+        utilization_percent: activity
+            .and_then(|activity| first_metric(activity, &["GFX", "Graphics", "graphics", "gfx"])),
+        memory_utilization_percent: activity
+            .and_then(|activity| first_metric(activity, &["Memory", "memory", "UMC", "umc"])),
+        memory_used: memory.and_then(|memory| {
+            first_bytes(
+                memory,
+                &["Total VRAM Usage", "Used", "used", "VRAM Used", "vram_used"],
+            )
+        }),
+        memory_total: memory.and_then(|memory| {
+            first_bytes(
+                memory,
+                &["Total VRAM", "Total", "total", "VRAM Total", "vram_total"],
+            )
+        }),
+        temperature_celsius: sensors.and_then(|sensors| {
+            first_metric(
+                sensors,
+                &[
+                    "Edge Temperature",
+                    "Edge Temp.",
+                    "Temperature",
+                    "temperature",
+                ],
+            )
+        }),
+        power_draw_watts: sensors
+            .and_then(|sensors| first_metric(sensors, &["GPU Power", "Power", "power"])),
+        power_limit_watts: None,
+        fan_speed_percent: sensors
+            .and_then(|sensors| first_metric(sensors, &["Fan", "fan", "Fan Speed"])),
+    })
+}
+
+fn parse_json_stream(payload: &str) -> Vec<Value> {
+    let mut values = Vec::new();
+    let mut remaining = payload;
+    while let Some(start) = remaining.find(['{', '[']) {
+        let candidate = &remaining[start..];
+        let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
+        match stream.next() {
+            Some(Ok(value)) => {
+                let consumed = stream.byte_offset();
+                values.push(value);
+                remaining = &candidate[consumed..];
+            }
+            Some(Err(_)) | None => remaining = &candidate[1..],
+        }
+    }
+    values
+}
+
+fn object_value_case_insensitive<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    value
+        .as_object()?
+        .iter()
+        .find_map(|(candidate, value)| candidate.eq_ignore_ascii_case(key).then_some(value))
+}
+
+fn first_text(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object_value_case_insensitive(value, key))
+        .and_then(text_value)
+}
+
+fn first_metric(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| object_value_case_insensitive(value, key))
+        .and_then(number_value)
+}
+
+fn first_bytes(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object_value_case_insensitive(value, key))
+        .and_then(|value| bytes_value(value, ByteUnit::Mibibytes))
 }
 
 fn parse_device(value: &Value, driver_version: Option<&str>) -> Option<GpuDevice> {
@@ -351,5 +511,38 @@ available
 
         assert_eq!(snapshot.status, ProviderStatus::Available);
         assert_eq!(snapshot.devices.len(), 1);
+    }
+
+    #[test]
+    fn amdgpu_top_fallback_parses_integrated_gpu_telemetry() {
+        let output = r#"===AMD_STATUS===
+amdgpu-top
+===AMD_TOP_DATA===
+{"devices":[{"Info":{"DeviceName":"AMD Radeon Graphics","PCI":"0000:01:00.0","Driver":"6.14.0"},"gpu_activity":{"GFX":{"value":7},"Memory":{"value":3}},"VRAM":{"Total VRAM Usage":{"value":17,"unit":"MiB"},"Total VRAM":{"value":512,"unit":"MiB"}},"Sensors":{"Edge Temperature":{"value":44,"unit":"C"},"GPU Power":{"value":11,"unit":"W"}}}]}
+===AMD_QUERY_EXIT===
+0
+===GPU_NPU_SAMPLE_END==="#;
+
+        let snapshot = parse(output);
+
+        assert_eq!(snapshot.status, ProviderStatus::Available);
+        assert_eq!(snapshot.devices.len(), 1);
+        let device = &snapshot.devices[0];
+        assert_eq!(device.name, "AMD Radeon Graphics");
+        assert_eq!(device.provider, GpuProvider::Amd);
+        assert_eq!(device.utilization_percent, Some(7.0));
+        assert_eq!(device.memory_used, Some(17 * 1024 * 1024));
+        assert_eq!(device.memory_total, Some(512 * 1024 * 1024));
+        assert_eq!(device.temperature_celsius, Some(44.0));
+        assert_eq!(device.power_draw_watts, Some(11.0));
+    }
+
+    #[test]
+    fn amd_command_prefers_amd_smi_then_falls_back_to_amdgpu_top() {
+        let command = sample_command();
+        let amd_smi = command.find("command -v amd-smi").unwrap();
+        let amdgpu_top = command.find("command -v amdgpu_top").unwrap();
+        assert!(amd_smi < amdgpu_top);
+        assert!(command.contains("amdgpu_top --json -n 1 -s 500ms"));
     }
 }

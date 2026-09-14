@@ -204,6 +204,15 @@ impl ConnectionStore {
             .as_ref()
             .map(|conn| conn.options.clone())
             .unwrap_or_default();
+        tracing::debug!(
+            target: "oxideterm_connections",
+            trace_id = next_store_sync_trace_id(),
+            stage = "session.persist.options",
+            saved_connection_id = %id,
+            editing_existing = existing.is_some(),
+            favorite_count = options.remote_path_favorites.len(),
+            "会话编辑保存：以现有记录为基底保留选项，只覆盖表单字段，收藏与未编辑配置不会丢失"
+        );
         // Tauri preserves saved per-connection SSH options on edit and only
         // overwrites fields carried by the current form. This keeps imported
         // Tauri config tails such as compression/term_type from being dropped.
@@ -291,6 +300,9 @@ impl ConnectionStore {
         if let Some(group) = group {
             self.ensure_group(group)?;
         }
+        self.data
+            .standalone_sftp_profile_tombstones
+            .retain(|tombstone| tombstone.id != id);
         self.normalize();
         self.save()?;
         for keychain_id in old_keychain_ids
@@ -794,6 +806,42 @@ impl ConnectionStore {
         Ok(true)
     }
 
+    pub fn toggle_remote_path_favorite(
+        &mut self,
+        id: &str,
+        path: &str,
+        is_directory: bool,
+    ) -> Result<Option<bool>> {
+        let favorite = RemotePathFavorite::new(path, is_directory)?;
+        let Some(connection) = self
+            .data
+            .connections
+            .iter_mut()
+            .find(|connection| connection.id == id)
+        else {
+            return Ok(None);
+        };
+
+        let enabled = if let Some(index) = connection
+            .options
+            .remote_path_favorites
+            .iter()
+            .position(|existing| existing.path == favorite.path)
+        {
+            connection.options.remote_path_favorites.remove(index);
+            false
+        } else {
+            if connection.options.remote_path_favorites.len() >= MAX_REMOTE_PATH_FAVORITES {
+                bail!("Too many remote path favorites");
+            }
+            connection.options.remote_path_favorites.push(favorite);
+            true
+        };
+        connection.updated_at = Some(Utc::now());
+        self.save()?;
+        Ok(Some(enabled))
+    }
+
     pub fn upsert_serial_profile(
         &mut self,
         request: SaveSerialProfileRequest,
@@ -847,6 +895,9 @@ impl ConnectionStore {
         } else {
             self.data.serial_profiles.push(profile.clone());
         }
+        self.data
+            .serial_profile_tombstones
+            .retain(|tombstone| tombstone.id != id);
         self.normalize();
         self.save()?;
         Ok(profile)
@@ -857,6 +908,11 @@ impl ConnectionStore {
         self.data.serial_profiles.retain(|profile| profile.id != id);
         let deleted = self.data.serial_profiles.len() != before;
         if deleted {
+            upsert_profile_tombstone(
+                &mut self.data.serial_profile_tombstones,
+                id.to_string(),
+                Utc::now(),
+            );
             self.save()?;
         }
         Ok(deleted)
@@ -929,6 +985,9 @@ impl ConnectionStore {
         } else {
             self.data.telnet_profiles.push(profile.clone());
         }
+        self.data
+            .telnet_profile_tombstones
+            .retain(|tombstone| tombstone.id != id);
         self.normalize();
         self.save()?;
         Ok(profile)
@@ -939,6 +998,11 @@ impl ConnectionStore {
         self.data.telnet_profiles.retain(|profile| profile.id != id);
         let deleted = self.data.telnet_profiles.len() != before;
         if deleted {
+            upsert_profile_tombstone(
+                &mut self.data.telnet_profile_tombstones,
+                id.to_string(),
+                Utc::now(),
+            );
             self.save()?;
         }
         Ok(deleted)
@@ -1191,6 +1255,11 @@ impl ConnectionStore {
             .retain(|profile| profile.id != id);
         let deleted = self.data.standalone_sftp_profiles.len() != before;
         if deleted {
+            upsert_profile_tombstone(
+                &mut self.data.standalone_sftp_profile_tombstones,
+                id.to_string(),
+                Utc::now(),
+            );
             self.save()?;
             for keychain_id in keychain_ids {
                 let _ = self.keychain.delete(&keychain_id);
@@ -1291,6 +1360,9 @@ impl ConnectionStore {
         if let Some(group) = group {
             self.ensure_group(group)?;
         }
+        self.data
+            .remote_desktop_profile_tombstones
+            .retain(|tombstone| tombstone.id != id);
         self.normalize();
         self.save()?;
 
@@ -1312,6 +1384,11 @@ impl ConnectionStore {
             .retain(|profile| profile.id != id);
         let deleted = self.data.remote_desktop_profiles.len() != before;
         if deleted {
+            upsert_profile_tombstone(
+                &mut self.data.remote_desktop_profile_tombstones,
+                id.to_string(),
+                Utc::now(),
+            );
             self.save()?;
             if let Some(reference) = credential_ref {
                 self.delete_or_queue_connection_keychain_entry(reference)?;
@@ -2401,6 +2478,7 @@ impl ConnectionStore {
         connection.port = connection.port.max(1);
         connection.username = non_empty(connection.username.trim(), "Username")?.to_string();
         connection.options.ssh_algorithms.validate()?;
+        connection.options.normalize_remote_path_favorites();
         for hop in &connection.proxy_chain {
             non_empty(hop.host.trim(), "Proxy host")?;
             non_empty(hop.username.trim(), "Proxy username")?;
@@ -2686,6 +2764,14 @@ impl ConnectionStore {
     fn normalize(&mut self) {
         self.data.connection_tombstones =
             active_connection_tombstones(&self.data.connection_tombstones);
+        self.data.serial_profile_tombstones =
+            active_profile_tombstones(&self.data.serial_profile_tombstones);
+        self.data.telnet_profile_tombstones =
+            active_profile_tombstones(&self.data.telnet_profile_tombstones);
+        self.data.standalone_sftp_profile_tombstones =
+            active_profile_tombstones(&self.data.standalone_sftp_profile_tombstones);
+        self.data.remote_desktop_profile_tombstones =
+            active_profile_tombstones(&self.data.remote_desktop_profile_tombstones);
         self.data
             .recent
             .retain(|recent_id| self.data.connections.iter().any(|conn| &conn.id == recent_id));
@@ -2735,6 +2821,7 @@ impl ConnectionStore {
             }
         }
         for conn in &mut self.data.connections {
+            conn.options.normalize_remote_path_favorites();
             if conn.options.post_connect_command.is_none() {
                 conn.options.post_connect_command = conn.post_connect_command.take();
             } else {

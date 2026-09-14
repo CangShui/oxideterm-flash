@@ -132,29 +132,6 @@ impl Default for CloudSyncSettings {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReconnectSettings {
-    pub enabled: bool,
-    pub max_attempts: i64,
-    pub base_delay_ms: i64,
-    pub max_delay_ms: i64,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-impl Default for ReconnectSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_attempts: 5,
-            base_delay_ms: 1000,
-            max_delay_ms: 15_000,
-            extra: ExtraFields::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ConnectionPoolSettings {
     pub idle_timeout_secs: i64,
     #[serde(flatten)]
@@ -429,7 +406,6 @@ pub struct PersistedSettings {
     pub sftp: SftpSettings,
     #[serde(default)]
     pub cloud_sync: CloudSyncSettings,
-    pub reconnect: ReconnectSettings,
     pub connection_pool: ConnectionPoolSettings,
     #[serde(default)]
     pub network: NetworkSettings,
@@ -474,7 +450,6 @@ impl Default for PersistedSettings {
             local_terminal: LocalTerminalSettings::default(),
             sftp: SftpSettings::default(),
             cloud_sync: CloudSyncSettings::default(),
-            reconnect: ReconnectSettings::default(),
             connection_pool: ConnectionPoolSettings::default(),
             network: NetworkSettings::default(),
             experimental: ExperimentalSettings::default(),

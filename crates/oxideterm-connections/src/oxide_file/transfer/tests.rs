@@ -4,7 +4,8 @@ mod tests {
     use std::fs;
 
     use crate::{
-        ConnectionTerminalOptions, SaveRemoteDesktopProfileRequest, SaveSerialProfileRequest,
+        ConnectionTerminalOptions, RemotePathFavorite, SaveRemoteDesktopProfileRequest,
+        SaveSerialProfileRequest,
         SaveTelnetProfileRequest,
         SavedUpstreamProxyProtocol, SerialFlowControl, SerialProfile, SerialProfilesSyncSnapshot,
     };
@@ -76,6 +77,10 @@ mod tests {
                 dedicated_new_terminal_connection: false,
                 post_connect_command: None,
                 terminal: ConnectionTerminalOptions::default(),
+                remote_path_favorites: vec![
+                    RemotePathFavorite::new("/srv/apps", true).unwrap(),
+                    RemotePathFavorite::new("/var/log/app.log", false).unwrap(),
+                ],
             },
             created_at: Utc::now(),
             last_used_at: None,
@@ -179,6 +184,13 @@ mod tests {
         assert_eq!(imported.options.keep_alive_interval, 30);
         assert_eq!(imported.options.connect_timeout_seconds, Some(120));
         assert!(imported.options.compression);
+        assert_eq!(
+            imported.options.remote_path_favorites,
+            vec![
+                RemotePathFavorite::new("/srv/apps", true).unwrap(),
+                RemotePathFavorite::new("/var/log/app.log", false).unwrap(),
+            ]
+        );
         assert_eq!(imported.proxy_chain.len(), 1);
         assert!(
             target
@@ -200,6 +212,7 @@ mod tests {
             revision: "invalid".to_string(),
             exported_at: Utc::now().to_rfc3339(),
             records: vec![invalid_profile],
+            tombstones: Vec::new(),
         };
         let bytes = export_connections_to_oxide(
             &source,

@@ -54,6 +54,8 @@ const fn terminal_search_entry(
 }
 
 fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
+    // The Windows/macOS-only push below is what makes this binding mutable.
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(unused_mut))]
     let mut specs = vec![
         settings_search_entry(
             SettingsTab::General,
@@ -149,32 +151,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             ],
         ),
         terminal_search_entry(
-            TerminalSettingsPage::Local,
-            1,
-            "settings_view.local_terminal.shell",
-            &[
-                "settings_view.local_terminal.default_shell",
-                "settings_view.local_terminal.default_cwd",
-                "settings_view.local_terminal.git_bash_path",
-            ],
-        ),
-        terminal_search_entry(
-            TerminalSettingsPage::Local,
-            2,
-            "settings_view.local_terminal.shell_profile",
-            &[
-                "settings_view.local_terminal.load_shell_profile",
-                "settings_view.local_terminal.custom_env",
-                "settings_view.local_terminal.oh_my_posh",
-            ],
-        ),
-        terminal_search_entry(
-            TerminalSettingsPage::Local,
-            3,
-            "settings_view.local_terminal.available_shells",
-            &["settings_view.local_terminal.select_shell"],
-        ),
-        terminal_search_entry(
             TerminalSettingsPage::CommandBar,
             1,
             "settings_view.terminal.command_bar",
@@ -198,21 +174,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.terminal.quick_commands_confirm",
                 "settings_view.terminal.quick_commands_toast",
                 "settings_view.terminal.command_specs",
-            ],
-        ),
-        terminal_search_entry(
-            TerminalSettingsPage::Awareness,
-            1,
-            "settings_view.terminal.awareness_title",
-            &["settings_view.terminal.awareness_enabled"],
-        ),
-        terminal_search_entry(
-            TerminalSettingsPage::Awareness,
-            2,
-            "settings_view.terminal.triggers.title",
-            &[
-                "settings_view.terminal.triggers.description",
-                "settings_view.terminal.triggers.shell_execution",
             ],
         ),
         terminal_search_entry(
@@ -324,12 +285,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
         settings_search_entry(
             SettingsTab::Connections,
             3,
-            "settings_view.reconnect.title",
-            &["settings_view.reconnect.description"],
-        ),
-        settings_search_entry(
-            SettingsTab::Connections,
-            4,
             "settings_view.connections.ssh_config.title",
             &[
                 "settings_view.connections.ssh_config.auto_load",
@@ -573,11 +528,6 @@ impl WorkspaceApp {
     ) {
         let tab = result.tab;
         let target_section_index = result.section_index;
-        if result.terminal_page == Some(TerminalSettingsPage::Awareness)
-            && result.section_index == 3
-        {
-            self.terminal_trigger_settings_pane = None;
-        }
         self.settings_workspace.update(cx, |settings, cx| {
             settings.set_active_tab(tab, cx);
             if let Some(page) = result.terminal_page {

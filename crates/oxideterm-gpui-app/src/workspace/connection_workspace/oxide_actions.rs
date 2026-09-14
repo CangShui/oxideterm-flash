@@ -505,6 +505,14 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn open_oxide_import_dialog(&mut self, cx: &mut Context<Self>) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "oxide.import.dialog",
+            result = "opened",
+            "用户打开 .oxide 会话导入对话框"
+        );
         self.connection_workspace.update(cx, |connection_workspace, cx| {
             connection_workspace.oxide_import_dialog = Some(OxideImportDialogState::default());
             connection_workspace.focused_input = None;
@@ -513,6 +521,7 @@ impl WorkspaceApp {
         });
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn open_oxide_import_portable_migration_dialog(
         &mut self,
         cx: &mut Context<Self>,
@@ -530,6 +539,14 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn open_oxide_export_dialog(&mut self, cx: &mut Context<Self>) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "oxide.export.dialog",
+            result = "opened",
+            "用户打开 .oxide 会话导出对话框"
+        );
         self.open_oxide_export_dialog_with_portable_mode(false, cx);
     }
 
@@ -564,6 +581,7 @@ impl WorkspaceApp {
         .then_some(input)
     }
 
+    #[allow(dead_code)]
     pub(in crate::workspace) fn open_oxide_export_portable_migration_dialog(
         &mut self,
         cx: &mut Context<Self>,
@@ -992,6 +1010,14 @@ impl WorkspaceApp {
     }
 
     pub(super) fn preview_oxide_import_dialog(&mut self, cx: &mut Context<Self>) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "oxide.import.preview.request",
+            result = "received",
+            "用户请求预览 .oxide 导入文件，开始校验文件与密码"
+        );
         let missing_file_error = self.i18n.t("modals.import.select_file");
         let missing_password_error = self.i18n.t("modals.import.error_enter_password");
         let Some((bytes, password, conflict_strategy, generation, sender)) =
@@ -1029,8 +1055,25 @@ impl WorkspaceApp {
                 ))
             })
         else {
+            tracing::warn!(
+                target: "oxideterm::audit",
+                trace_id,
+                stage = "oxide.import.preview.request",
+                result = "blocked",
+                reason = "worker 不可用、对话框关闭、未选择文件或未输入密码",
+                "请求未进入 .oxide 预览业务逻辑"
+            );
             return;
         };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "oxide.import.preview.request",
+            generation,
+            file_bytes = bytes.len(),
+            result = "dispatched",
+            "预览任务已交给后台线程解析，密码仅存活于工作线程内"
+        );
         let store = self.connection_store.clone();
         let worker = std::thread::spawn(move || {
             let result = preview_oxide_import_with_progress(
@@ -1057,6 +1100,14 @@ impl WorkspaceApp {
     }
 
     pub(super) fn apply_oxide_import_dialog(&mut self, cx: &mut Context<Self>) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "oxide.import.apply.request",
+            result = "received",
+            "用户确认应用 .oxide 导入，开始校验文件与密码"
+        );
         let missing_file_error = self.i18n.t("modals.import.select_file");
         let missing_password_error = self.i18n.t("modals.import.error_enter_password");
         let Some((bytes, password, options, generation, sender)) =
@@ -1271,11 +1322,27 @@ impl WorkspaceApp {
                         Some(exported_count)
                     });
                     if let Some(exported_count) = exported_count {
+                        tracing::info!(
+                            target: "oxideterm::audit",
+                            trace_id = crate::logging::next_audit_trace_id(),
+                            stage = "oxide.export.perform",
+                            exported_connection_count = exported_count,
+                            result = "completed",
+                            "工作线程已完成 .oxide 导出内容加密，等待用户选择保存位置"
+                        );
                         self.prompt_save_oxide_export(bytes, exported_count, cx);
                     }
                 }
                 Err(error) => {
                     let error = oxide_file_error_message(error, &self.i18n);
+                    tracing::warn!(
+                        target: "oxideterm::audit",
+                        trace_id = crate::logging::next_audit_trace_id(),
+                        stage = "oxide.export.perform",
+                        result = "failed",
+                        error_kind = error.chars().take(160).collect::<String>(),
+                        ".oxide 导出加密失败"
+                    );
                     self.connection_workspace.update(cx, |connection_workspace, cx| {
                         let Some(dialog) = connection_workspace.oxide_export_dialog.as_mut() else {
                             return;
@@ -1329,6 +1396,20 @@ impl WorkspaceApp {
             skipped_quick_commands,
             quick_commands_errors,
         };
+        tracing::info!(
+            target: "oxideterm::audit",
+            trace_id = crate::logging::next_audit_trace_id(),
+            stage = "oxide.import.apply.response",
+            imported = result.envelope.imported,
+            skipped = result.envelope.skipped,
+            merged = result.envelope.merged,
+            replaced = result.envelope.replaced,
+            renamed = result.envelope.renamed,
+            error_count = result.envelope.errors.len(),
+            imported_forwards = result.envelope.imported_forwards,
+            result = "completed",
+            "工作线程已完成 .oxide 导入解密并写入本地存储"
+        );
         self.present_oxide_import_result(result, cx);
     }
 
@@ -1489,6 +1570,14 @@ impl WorkspaceApp {
     }
 
     pub(super) fn export_oxide_dialog(&mut self, cx: &mut Context<Self>) {
+        let trace_id = crate::logging::next_audit_trace_id();
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "oxide.export.request",
+            result = "received",
+            "用户确认导出 .oxide 文件，开始校验导出内容、密码与前置条件"
+        );
         let validation = {
             let connection_workspace = self.connection_workspace.read(cx);
             let Some(dialog) = connection_workspace.oxide_export_dialog.as_ref() else {
@@ -1519,6 +1608,14 @@ impl WorkspaceApp {
         let (selected_ids, preflight, options) = match validation {
             Ok(request) => request,
             Err(error) => {
+                tracing::warn!(
+                    target: "oxideterm::audit",
+                    trace_id,
+                    stage = "oxide.export.request",
+                    result = "blocked",
+                    reason = error.chars().take(160).collect::<String>(),
+                    "导出请求未进入 .oxide 业务逻辑"
+                );
                 self.connection_workspace.update(cx, |connection_workspace, cx| {
                     if let Some(dialog) = connection_workspace.oxide_export_dialog.as_mut() {
                         dialog.error = Some(error);
@@ -1528,6 +1625,15 @@ impl WorkspaceApp {
                 return;
             }
         };
+        tracing::debug!(
+            target: "oxideterm::audit",
+            trace_id,
+            stage = "oxide.export.request",
+            selected_connection_count = selected_ids.len(),
+            embed_keys = options.embed_keys,
+            result = "dispatched",
+            "导出任务已交给后台线程加密，密码仅存活于工作线程内"
+        );
         let Some((password, generation, sender)) =
             self.connection_workspace.update(cx, |connection_workspace, cx| {
                 let sender = connection_workspace.oxide_worker_sender()?;

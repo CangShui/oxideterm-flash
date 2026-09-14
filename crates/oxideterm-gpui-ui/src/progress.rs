@@ -1,7 +1,6 @@
-use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, Div, IntoElement, ParentElement, Styled, div, prelude::*,
+    Animation, AnimationExt, AnyElement, Div, IntoElement, ParentElement, Styled, div,
     px, relative, rgb,
 };
 use oxideterm_theme::ThemeTokens;

@@ -24,6 +24,7 @@ use crate::store::SavedConnection;
 /// The set of session file formats the exporter can produce.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionExportFormat {
+    OxideEncrypted,
     OxideTermJson,
     SecureCrt,
     Xshell,
@@ -37,7 +38,8 @@ pub enum SessionExportFormat {
 impl SessionExportFormat {
     pub fn tag(self) -> &'static str {
         match self {
-            Self::OxideTermJson => "oxide",
+            Self::OxideEncrypted => "oxide",
+            Self::OxideTermJson => "json",
             Self::SecureCrt => "securecrt",
             Self::Xshell => "xshell",
             Self::Termius => "termius",
@@ -51,6 +53,7 @@ impl SessionExportFormat {
     /// File extension for single-file formats. `None` for directory exports.
     pub fn file_extension(self) -> Option<&'static str> {
         match self {
+            Self::OxideEncrypted => Some("oxide"),
             Self::OxideTermJson => Some("json"),
             Self::SecureCrt => Some("xml"),
             Self::Xshell => Some("xts"),
@@ -83,13 +86,26 @@ pub fn export_sessions(
     connections: &[SavedConnection],
     format: SessionExportFormat,
 ) -> Result<SessionExportContent> {
-    match format {
+    let operation_id = Uuid::new_v4().to_string();
+    tracing::debug!(
+        target: "oxideterm::audit",
+        operation_id,
+        stage = "session.export.request",
+        format = ?format,
+        connection_count = connections.len(),
+        "会话导出请求已进入导出模块，开始按目标格式生成内容"
+    );
+    let result = (|| -> Result<SessionExportContent> {
+        match format {
+        SessionExportFormat::OxideEncrypted => Err(anyhow::anyhow!(
+            "encrypted .oxide export uses the dedicated OxideTerm dialog"
+        )),
         SessionExportFormat::OxideTermJson => {
             export_oxide_json(connections).map(SessionExportContent::Text)
         }
-        SessionExportFormat::SecureCrt => {
-            Ok(SessionExportContent::Text(export_securecrt_xml(connections)))
-        }
+        SessionExportFormat::SecureCrt => Ok(SessionExportContent::Text(export_securecrt_xml(
+            connections,
+        ))),
         SessionExportFormat::Xshell => {
             export_xshell_archive(connections).map(SessionExportContent::Binary)
         }
@@ -97,14 +113,37 @@ pub fn export_sessions(
         SessionExportFormat::MobaXterm => {
             Ok(SessionExportContent::Text(export_mobaxterm(connections)))
         }
-        SessionExportFormat::WindTerm => Ok(SessionExportContent::Text(export_windterm(connections))),
+        SessionExportFormat::WindTerm => {
+            Ok(SessionExportContent::Text(export_windterm(connections)))
+        }
         SessionExportFormat::Electerm => {
             Ok(SessionExportContent::Text(export_electerm(connections)))
         }
-        SessionExportFormat::FinalShell => {
-            Err(anyhow::anyhow!("FinalShell export requires a directory target"))
+        SessionExportFormat::FinalShell => Err(anyhow::anyhow!(
+            "FinalShell export requires a directory target"
+        )),
         }
+    })();
+    match &result {
+        Ok(_) => tracing::debug!(
+            target: "oxideterm::audit",
+            operation_id,
+            stage = "session.export.response",
+            format = ?format,
+            result = "completed",
+            "会话导出内容已生成"
+        ),
+        Err(_) => tracing::warn!(
+            target: "oxideterm::audit",
+            operation_id,
+            stage = "session.export.response",
+            format = ?format,
+            result = "failed",
+            failure_detail_redacted = true,
+            "会话导出内容生成失败"
+        ),
     }
+    result
 }
 
 /// Exports saved connections into a FinalShell `conn` directory layout that
@@ -115,6 +154,14 @@ pub fn export_sessions_to_finalshell_directory(
     connections: &[SavedConnection],
     target: &Path,
 ) -> Result<usize> {
+    let operation_id = Uuid::new_v4().to_string();
+    tracing::debug!(
+        target: "oxideterm::audit",
+        operation_id,
+        stage = "session.export.directory.request",
+        connection_count = connections.len(),
+        "会话目录导出请求已进入导出模块"
+    );
     let conn_dir = target.join("conn");
     std::fs::create_dir_all(&conn_dir).with_context(|| {
         format!(
@@ -159,7 +206,10 @@ pub fn export_sessions_to_finalshell_directory(
             current.push_str(segment);
             group_dir = group_dir.join(safe_dir_name(segment));
             std::fs::create_dir_all(&group_dir).with_context(|| {
-                format!("failed to create FinalShell group directory {}", group_dir.display())
+                format!(
+                    "failed to create FinalShell group directory {}",
+                    group_dir.display()
+                )
             })?;
             let folder_id = stable_id(&current);
             let folder = serde_json::json!({
@@ -191,6 +241,14 @@ pub fn export_sessions_to_finalshell_directory(
         }
     }
 
+    tracing::debug!(
+        target: "oxideterm::audit",
+        operation_id,
+        stage = "session.export.directory.response",
+        written_files = written,
+        result = "completed",
+        "会话目录导出已完成"
+    );
     Ok(written)
 }
 
@@ -247,9 +305,8 @@ fn export_oxide_json(connections: &[SavedConnection]) -> Result<String> {
 /// SecureCRT "Export Sessions" XML. The reader accepts nested `<key>` frames
 /// under a `Sessions` root; group segments become intermediate frames.
 fn export_securecrt_xml(connections: &[SavedConnection]) -> String {
-    let mut output = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<key name=\"Sessions\">\n",
-    );
+    let mut output =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<key name=\"Sessions\">\n");
     for connection in connections {
         let segments = connection
             .group
@@ -412,10 +469,7 @@ fn export_mobaxterm(connections: &[SavedConnection]) -> String {
         let _ = writeln!(
             output,
             "{}=#109#0%{}%{}%{}%%-1%-1%%%%%-1%0%0%%%-1%0%0%0%",
-            connection.name,
-            connection.host,
-            connection.port,
-            connection.username,
+            connection.name, connection.host, connection.port, connection.username,
         );
         let _ = writeln!(output);
     }
@@ -477,7 +531,10 @@ fn export_electerm(connections: &[SavedConnection]) -> String {
         let group_id = format!("g{}", stable_id(group_path));
         let mut bookmark_ids = Vec::new();
         for connection in group_connections {
-            let id = format!("b{}", stable_id(&format!("{group_path}/{}", connection.name)));
+            let id = format!(
+                "b{}",
+                stable_id(&format!("{group_path}/{}", connection.name))
+            );
             bookmarks.push(serde_json::json!({
                 "id": id,
                 "title": connection.name,
@@ -506,8 +563,7 @@ fn export_electerm(connections: &[SavedConnection]) -> String {
 
 fn saved_key_path(connection: &SavedConnection) -> Option<&str> {
     match &connection.auth {
-        crate::SavedAuth::Key { key_path, .. }
-        | crate::SavedAuth::Certificate { key_path, .. } => {
+        crate::SavedAuth::Key { key_path, .. } | crate::SavedAuth::Certificate { key_path, .. } => {
             (!key_path.trim().is_empty()).then(|| key_path.as_str())
         }
         crate::SavedAuth::ManagedKey { key_id, .. } => {
@@ -617,10 +673,8 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "oxideterm-session-export-test-{}",
-            Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("oxideterm-session-export-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
     }
@@ -641,18 +695,27 @@ mod tests {
         .expect("re-import exported file");
         assert_eq!(preview.total, 1, "roundtrip lost sessions for {format:?}");
         let draft = &preview.drafts[0];
-        assert_eq!(draft.host, "web.example.com", "host mismatch for {format:?}");
+        assert_eq!(
+            draft.host, "web.example.com",
+            "host mismatch for {format:?}"
+        );
         assert_eq!(draft.port, 2222, "port mismatch for {format:?}");
         assert_eq!(draft.username, "deploy", "username mismatch for {format:?}");
-        assert!(draft.group.as_deref().is_some_and(|group| group.contains("Production")),
-            "group not preserved for {format:?}: {:?}", draft.group);
+        assert!(
+            draft
+                .group
+                .as_deref()
+                .is_some_and(|group| group.contains("Production")),
+            "group not preserved for {format:?}: {:?}",
+            draft.group
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     impl ConnectionImportSource {
         fn from_export(format: SessionExportFormat) -> Self {
             match format {
-                SessionExportFormat::OxideTermJson => {
+                SessionExportFormat::OxideEncrypted | SessionExportFormat::OxideTermJson => {
                     panic!("native format is not a third-party client")
                 }
                 SessionExportFormat::SecureCrt => Self::SecureCrt,
@@ -699,13 +762,13 @@ mod tests {
     #[test]
     fn finalshell_directory_roundtrips() {
         let connections = vec![sample_connection()];
-        let dir = std::env::temp_dir().join(format!(
-            "oxideterm-fs-export-test-{}",
-            Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("oxideterm-fs-export-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let written = export_sessions_to_finalshell_directory(&connections, &dir).expect("export");
-        assert!(written >= 2, "expected folder + connection files, got {written}");
+        assert!(
+            written >= 2,
+            "expected folder + connection files, got {written}"
+        );
         let preview = preview_connection_import(
             ConnectionImportSource::FinalShell,
             &[dir.display().to_string()],
@@ -715,7 +778,12 @@ mod tests {
         assert_eq!(preview.total, 1);
         let draft = &preview.drafts[0];
         assert_eq!(draft.host, "web.example.com");
-        assert!(draft.group.as_deref().is_some_and(|group| group.contains("Production")));
+        assert!(
+            draft
+                .group
+                .as_deref()
+                .is_some_and(|group| group.contains("Production"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

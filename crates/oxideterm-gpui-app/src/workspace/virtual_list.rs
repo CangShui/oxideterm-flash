@@ -161,6 +161,7 @@ fn nearest_virtual_scroll_strategy(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn tauri_virtual_list_is_near_bottom(
     handle: &UniformListScrollHandle,
     threshold: Pixels,

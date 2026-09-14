@@ -198,6 +198,10 @@ impl WorkspaceApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| {
+                    crate::logging::audit_button_click(
+                        "terminal-cwd-chip",
+                        "terminal-cwd",
+                    );
                     if this.terminal.read(cx).cwd_picker_open() {
                         this.close_terminal_cwd_picker(cx);
                     } else {

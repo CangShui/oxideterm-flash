@@ -1,3 +1,4 @@
+use super::helpers::localized_sftp_error_detail;
 use super::*;
 
 impl WorkspaceApp {
@@ -7,6 +8,7 @@ impl WorkspaceApp {
         _has_background: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let error = localized_sftp_error_detail(&self.i18n, error);
         div()
             .flex()
             .items_center()
@@ -25,7 +27,7 @@ impl WorkspaceApp {
                     (),
                     self.i18n
                         .t("sftp.errors.connection_sync")
-                        .replace("{{error}}", error),
+                        .replace("{{error}}", &error),
                     self.tokens.ui.text,
                     cx,
                 ),

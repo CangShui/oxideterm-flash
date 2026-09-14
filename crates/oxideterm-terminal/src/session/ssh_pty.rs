@@ -356,7 +356,8 @@ impl SshPtySession {
         if self.output_events_enabled && !bytes.is_empty() {
             // Terminal recording is the only consumer of raw display-output events;
             // keep this allocation off the normal rendering path.
-            self.pending_events.push(TerminalEvent::Output(bytes.to_vec()));
+            self.pending_events
+                .push(TerminalEvent::Output(bytes.to_vec()));
         }
     }
 
@@ -390,12 +391,6 @@ impl SshPtySession {
                         self.pending_events.push(TerminalEvent::EncodingHint(hint));
                     }
                     let decoded = self.output_decoder.decode_to_utf8_bytes(&terminal_bytes);
-                    if let Some(stream) = self.trigger_stream.as_mut() {
-                        stream.observe_bytes(decoded.as_ref(), |matched| {
-                            self.pending_events
-                                .push(TerminalEvent::TriggerMatched(matched));
-                        });
-                    }
                     if self.output_events_enabled {
                         // The scanner removes private OSC before persistence;
                         // decoded clipboard payloads must never reach a recording.
@@ -416,8 +411,10 @@ impl SshPtySession {
                             |event| self.pending_events.push(event),
                         );
                     }
-                    self.graphics
-                        .clear_for_alt_screen_transition(&term, &mut self.graphics_alt_screen_active);
+                    self.graphics.clear_for_alt_screen_transition(
+                        &term,
+                        &mut self.graphics_alt_screen_active,
+                    );
                     cursor.set(graphics_cursor_from_term(&term, size));
                 }
                 TerminalGraphicsSegment::Event(event) => {
@@ -457,11 +454,12 @@ impl SshPtySession {
                     // before showing file dialogs. Keep the same lock boundary:
                     // all later PTY output is routed into the pending transfer
                     // buffer until GPUI confirms/cancels the prompt.
-                    self.pending_events.push(TerminalEvent::TrzszTransferPrompt {
-                        direction: handshake.direction,
-                        selection: handshake.selection,
-                        remote_is_windows: handshake.remote_is_windows,
-                    });
+                    self.pending_events
+                        .push(TerminalEvent::TrzszTransferPrompt {
+                            direction: handshake.direction,
+                            selection: handshake.selection,
+                            remote_is_windows: handshake.remote_is_windows,
+                        });
                 }
                 TrzszConsumerEvent::TransferDataQueued => {}
                 TrzszConsumerEvent::TransferCancelRequested => {}
@@ -1021,11 +1019,7 @@ impl TerminalSessionBackend for SshPtySession {
         )
     }
 
-    fn snapshot_with_display_offset(
-        &self,
-        display_offset: usize,
-        rows: usize,
-    ) -> TerminalSnapshot {
+    fn snapshot_with_display_offset(&self, display_offset: usize, rows: usize) -> TerminalSnapshot {
         let term = self.term.lock();
         snapshot_from_term_with_display_offset(
             &term,

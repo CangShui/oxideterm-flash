@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use oxideterm_editor_core::{BufferOffset, TextRange};
-use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::{HighlightSpan, LanguageId, SyntaxScope};
 
 pub(crate) fn highlight_spans(
-    language_id: LanguageId,
+    _language_id: LanguageId,
     tree: &Tree,
     highlight_query: &Query,
     source: &str,
